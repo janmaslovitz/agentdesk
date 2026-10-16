@@ -46,6 +46,12 @@ model = "sonnet"
 effort = "medium"
 budget_usd = 2.0
 
+# Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
+[chat.planner]
+model = "sonnet"
+effort = "medium"
+budget_usd = 2.0
+
 [guard]
 deny = [
   'git\s+push', 'git\s+remote', 'gh\s+(pr|release|repo|api|issue|workflow)', 'git\s+reset\s+--hard',

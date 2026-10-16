@@ -7,6 +7,7 @@ folder can be copied to another computer):
     data/accounts/<name>.json             last usage-limit readings for that account
     data/projects/<slug>/project.toml     repo, base branch, gates, account
     data/projects/<slug>/tasks/*.md       the queue (TOML header between +++ lines)
+    data/projects/<slug>/tasks/drafts/    the Planner's draft tasks (never run), with plan.json
     data/projects/<slug>/state.json, notes.md, reports/, agentdesk.log
 """
 
@@ -19,6 +20,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +86,12 @@ model = "haiku"
 
 # Coworker: autonomous chat (no approval cards), guarded like the workers; budget_usd is per message.
 [chat.coworker]
+model = "sonnet"
+effort = "medium"
+budget_usd = 2.0
+
+# Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
+[chat.planner]
 model = "sonnet"
 effort = "medium"
 budget_usd = 2.0
@@ -203,12 +212,32 @@ def toml_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
+def replace_file(tmp: Path, target: Path, tries: int = 40) -> None:
+    """`tmp.replace(target)`, retried for a moment: on Windows the rename fails while another handle has
+    the target open (the dashboard or the plan watcher reading state.json, a virus scanner, ...)."""
+    for i in range(tries):
+        try:
+            tmp.replace(target)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.05)
+
+
+def write_atomic(target: Path, text: str) -> None:
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    replace_file(tmp, target)
+
+
 # ----------------------------------------------------------------------------- chat settings (project.toml / settings.toml)
 
-CHAT_MODES = ("assistant", "coworker")
-CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet"}
+CHAT_MODES = ("assistant", "coworker", "planner")
+CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet", "planner": "sonnet"}
 # Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
-CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 2.0, "max_turns": 40}}
+CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 2.0, "max_turns": 40},
+                 "planner": {"effort": "medium", "budget_usd": 2.0, "max_turns": 30}}
 COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
 # On top of `[guard] deny`: the Coworker may not touch AgentDesk's own config from the shell (the
 # orchestrator runs project.toml's gate commands unguarded, and settings.toml holds the guard itself).
@@ -238,9 +267,7 @@ def _project_cfg(p: Project) -> dict:
 
 def _write_project(p: Project, text: str) -> None:
     p.cfg = tomllib.loads(text)  # refuses to write a file it can't read back
-    tmp = p.path("project.toml.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(p.path("project.toml"))
+    write_atomic(p.path("project.toml"), text)
 
 
 def chat_mode(p: Project) -> str:
@@ -366,10 +393,7 @@ class Store:
         return json.loads(s.read_text(encoding="utf-8")) if s.exists() else {"tasks": {}, "spent_usd": 0.0}
 
     def save(self, state: dict) -> None:
-        s = self.p.path("state.json")
-        tmp = s.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(s)
+        write_atomic(self.p.path("state.json"), json.dumps(state, indent=2, ensure_ascii=False))
 
     def notes(self) -> str:
         n = self.p.path("notes.md")
@@ -387,6 +411,8 @@ class Task:
 
 
 def load_tasks(p: Project) -> list[Task]:
+    """The queue: `tasks/*.md` only. Draft plans live in `tasks/drafts/` (not globbed) and carry
+    `status = "draft"` in their header, which is skipped too wherever such a file ends up."""
     tasks = []
     for f in sorted(p.tasks_dir.glob("*.md")):
         m = re.match(r"\+\+\+\s*\n(.*?)\n\+\+\+\s*\n(.*)", f.read_text(encoding="utf-8"), re.S)
@@ -394,6 +420,8 @@ def load_tasks(p: Project) -> list[Task]:
             continue
         try:
             h = tomllib.loads(m.group(1))
+            if h.get("status") == "draft":
+                continue
             tasks.append(Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", []))))
         except (tomllib.TOMLDecodeError, KeyError):
             continue
@@ -417,6 +445,230 @@ def add_task(p: Project, task_id: str, title: str, body: str, tier: str | None =
 def next_task_id(p: Project) -> str:
     nums = [int(t.id) for t in load_tasks(p) if t.id.isdigit()]
     return f"{(max(nums) + 1) if nums else 1:03d}"
+
+
+# ----------------------------------------------------------------------------- draft plans (the Planner chat)
+#
+# One plan per project in <project>/plan.json: status "draft" (proposed, its tasks are files in
+# tasks/drafts/ marked `status = "draft"`, which the queue never loads), then "approved" (the drafts
+# became real tasks and the queue was started), then "finished". Only the user approves (dashboard).
+
+PLAN_LOCK = threading.Lock()
+MAX_PLAN_TASKS = 20
+
+
+def drafts_dir(p: Project) -> Path:
+    return p.tasks_dir / "drafts"
+
+
+def load_plan(p: Project) -> dict | None:
+    f = p.path("plan.json")
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+    except ValueError:
+        return None
+
+
+def save_plan(p: Project, plan: dict) -> None:
+    write_atomic(p.path("plan.json"), json.dumps(plan, indent=2, ensure_ascii=False))
+
+
+def plan_active(plan: dict | None) -> bool:
+    return bool(plan) and plan.get("status") == "approved"
+
+
+def plan_order(tasks: list[dict]) -> list[dict]:
+    """The plan's tasks so each comes after the drafts it depends on (plan order where free)."""
+    keys = {t["key"] for t in tasks}
+    left, done, order = list(tasks), set(), []
+    while left:
+        nxt = next((t for t in left if all(d in done or d not in keys for d in t["depends"])), None)
+        if nxt is None:
+            raise ValueError("the plan's depends form a cycle: " + ", ".join(t["key"] for t in left))
+        order.append(nxt)
+        done.add(nxt["key"])
+        left.remove(nxt)
+    return order
+
+
+def check_plan_tasks(p: Project, tasks) -> list[dict]:
+    """The planner's task list, checked and normalized: keys d1..dN by position; depends name other
+    drafts (dN) or tasks already in the queue; no cycles."""
+    if not isinstance(tasks, list) or not tasks:
+        raise ValueError("a plan needs at least one task")
+    if len(tasks) > MAX_PLAN_TASKS:
+        raise ValueError(f"at most {MAX_PLAN_TASKS} tasks per plan")
+    keys = [f"d{i}" for i in range(1, len(tasks) + 1)]
+    queued = {t.id for t in load_tasks(p)}
+    out = []
+    for key, t in zip(keys, tasks):
+        if not isinstance(t, dict):
+            raise ValueError(f"{key}: each task is an object")
+        title = str(t.get("title") or "").strip()
+        if not title:
+            raise ValueError(f"{key}: the title is missing")
+        tier = t.get("tier") or None
+        if tier is not None and tier not in TIER_ORDER:
+            raise ValueError(f"{key}: tier is one of {', '.join(TIER_ORDER)} (or empty: the router decides)")
+        deps = list(dict.fromkeys(str(d).strip() for d in t.get("depends") or [] if str(d).strip()))
+        for d in deps:
+            if d == key or (d not in keys and d not in queued):
+                raise ValueError(f"{key}: depends on {d!r}, which is neither another task of this plan (d1..d{len(keys)}) nor a queued task")
+        out.append({"key": key, "title": title[:200], "goal": str(t.get("goal") or "").strip(), "body": str(t.get("body") or "").strip(),
+                    "files": [str(f) for f in t.get("files") or []][:30], "tier": tier, "depends": deps})
+    plan_order(out)  # refuses cycles
+    return out
+
+
+def plan_task_body(t: dict) -> str:
+    parts = [t["goal"]]
+    if t["files"]:
+        parts.append("## Where\n" + "\n".join(f"- {f}" for f in t["files"]))
+    parts.append(t["body"])
+    return "\n\n".join(x for x in parts if x) or t["title"]
+
+
+def _write_drafts(p: Project, tasks: list[dict]) -> None:
+    _clear_drafts(p)
+    d = drafts_dir(p)
+    d.mkdir(parents=True, exist_ok=True)
+    for t in tasks:
+        head = [f"id = {toml_str(t['key'])}", f"title = {toml_str(t['title'])}", 'status = "draft"']
+        if t["tier"]:
+            head.append(f"tier = {toml_str(t['tier'])}")
+        if t["depends"]:
+            head.append("depends = [" + ", ".join(toml_str(x) for x in t["depends"]) + "]")
+        (d / f"{t['key']}.md").write_text("+++\n" + "\n".join(head) + "\n+++\n\n" + plan_task_body(t) + "\n", encoding="utf-8")
+
+
+def _clear_drafts(p: Project) -> int:
+    d, n = drafts_dir(p), 0
+    if d.exists():
+        for f in d.glob("*.md"):
+            f.unlink()
+            n += 1
+        try:
+            d.rmdir()
+        except OSError:  # something else in there: leave it
+            pass
+    return n
+
+
+def _now() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def propose_plan(p: Project, summary: str, tasks) -> dict:
+    with PLAN_LOCK:
+        old = load_plan(p)
+        if old and old.get("status") == "draft":
+            raise ValueError("there is a draft plan already: change it with update_plan, or cancel_plan first")
+        if plan_active(old):
+            raise ValueError("an approved plan is still going (one approved plan per project at a time); "
+                             "it has to finish, or the user closes it on the plan card")
+        norm = check_plan_tasks(p, tasks)
+        plan = {"status": "draft", "summary": str(summary or "").strip()[:500], "tasks": norm, "version": 1, "created": _now()}
+        _write_drafts(p, norm)
+        save_plan(p, plan)
+    Store(p).log(f"planner: draft plan with {len(norm)} task(s) in tasks/drafts/")
+    return plan
+
+
+def update_plan(p: Project, summary: str | None, tasks) -> dict:
+    with PLAN_LOCK:
+        plan = load_plan(p)
+        if not plan or plan.get("status") != "draft":
+            raise ValueError("there is no draft plan to change (an approved plan isn't rewritten); propose_plan makes one")
+        norm = check_plan_tasks(p, tasks)
+        plan.update(tasks=norm, version=int(plan.get("version", 1)) + 1, updated=_now())
+        if summary:
+            plan["summary"] = str(summary).strip()[:500]
+        _write_drafts(p, norm)
+        save_plan(p, plan)
+    Store(p).log(f"planner: draft plan changed ({len(norm)} task(s))")
+    return plan
+
+
+def cancel_plan(p: Project) -> int:
+    """Delete the draft plan and its draft task files; returns how many drafts went."""
+    with PLAN_LOCK:
+        plan = load_plan(p)
+        if plan_active(plan):
+            raise ValueError("this plan is approved: its tasks are in the queue. Stop the run, or close the plan")
+        n = _clear_drafts(p)
+        p.path("plan.json").unlink(missing_ok=True)
+    Store(p).log(f"planner: draft plan cancelled ({n} draft(s) removed)")
+    return n
+
+
+def close_plan(p: Project) -> None:
+    """Forget an approved or finished plan (its tasks stay in the queue), so a new one can be made."""
+    with PLAN_LOCK:
+        plan = load_plan(p)
+        if plan and plan.get("status") == "draft":
+            raise ValueError("this plan is a draft: cancel it instead")
+        p.path("plan.json").unlink(missing_ok=True)
+
+
+def approve_plan(p: Project) -> dict[str, str]:
+    """Turn the drafts into real tasks (new ids in dependency order, depends mapped) and mark the plan
+    approved. Returns {draft key: task id}. Starting the queue is the caller's (server) job."""
+    with PLAN_LOCK:
+        plan = load_plan(p)
+        if not plan or plan.get("status") != "draft":
+            raise ValueError("there is no draft plan to approve")
+        order = plan_order(check_plan_tasks(p, plan["tasks"]))  # checked again: the queue may have changed
+        n, ids = int(next_task_id(p)), {}
+        for t in order:
+            while (p.tasks_dir / f"{n:03d}.md").exists():
+                n += 1
+            ids[t["key"]] = f"{n:03d}"
+            n += 1
+        for t in order:
+            add_task(p, ids[t["key"]], t["title"], plan_task_body(t), t["tier"], [ids.get(d, d) for d in t["depends"]])
+        _clear_drafts(p)
+        plan.update(status="approved", ids=ids, approved=_now(), seen={})
+        save_plan(p, plan)
+    Store(p).log(f"planner: plan approved; tasks {', '.join(ids.values())} queued")
+    return ids
+
+
+def plan_estimate(tasks: list[dict]) -> tuple[float, float]:
+    """A rough cost range: per task from ~15% of its tier's budget (unknown tier: standard) up to the
+    full tier budget plus the router's."""
+    s = settings()
+    router = float(s.get("router", {}).get("budget_usd", 0.3))
+    lo = hi = 0.0
+    for t in tasks:
+        b = float(s["tiers"].get(t.get("tier") or "standard", s["tiers"]["standard"])["budget_usd"])
+        lo, hi = lo + 0.15 * b, hi + b + router
+    return round(lo, 2), round(hi, 2)
+
+
+def plan_view(p: Project, plan: dict | None = None) -> dict | None:
+    """The plan card's data: tasks in dependency order with their real ids and status once approved."""
+    plan = plan or load_plan(p)
+    if not plan:
+        return None
+    state = Store(p).load()["tasks"]
+    ids = plan.get("ids", {})
+    rows = []
+    for t in plan_order(plan["tasks"]):
+        tid = ids.get(t["key"])
+        rows.append({**t, "id": tid or t["key"], "depends": [ids.get(d, d) for d in t["depends"]],
+                     "status": state.get(tid, {}).get("status", "pending") if tid else "draft"})
+    lo, hi = plan_estimate(plan["tasks"])
+    return {"status": plan["status"], "summary": plan.get("summary", ""), "version": plan.get("version", 1),
+            "tasks": rows, "estimate": [lo, hi]}
+
+
+def plan_brief(p: Project) -> str:
+    """One line on the current plan for the Planner (it doesn't see the dashboard's buttons)."""
+    v = plan_view(p)
+    if not v:
+        return "no plan"
+    tasks = "; ".join(f"{t['id']} {t['status']} {t['title']}" for t in v["tasks"])
+    return f"{v['status']} plan ({v['summary'] or 'no summary'}): {tasks}"
 
 
 # ----------------------------------------------------------------------------- processes, worktrees, gates

@@ -59,11 +59,11 @@ Limits: a budget per call and per run, and a pause at the account's usage thresh
 (`data/settings.toml`, `[limits]`). Workers can't push, change remotes, publish or edit outside
 their worktree (`[guard]`).
 
-## The chat: Assistant and Coworker modes
+## The chat: Assistant, Coworker and Planner modes
 
 Each project has a chat with a mode switch in its header, saved in the project's `project.toml`
-as `chat_mode = "assistant"` or `"coworker"` (default assistant). Switching starts a new chat
-session and keeps the messages on screen.
+as `chat_mode = "assistant"`, `"coworker"` or `"planner"` (default assistant). Switching starts a
+new chat session and keeps the messages on screen.
 
 - **Assistant** (safe, cheap; model from `[chat.assistant] model` in `data/settings.toml`, default
   `haiku`). It reads the project's files, state, reports, logs and the repository without asking.
@@ -89,6 +89,26 @@ session and keeps the messages on screen.
   - the account usage pause (`[limits] pause_at_utilization`): if the account's last reading is at or
     over the threshold, the Coworker answers *Paused: …* instead of starting; if a reading crosses it
     during a message, it stops there and says so.
+- **Planner** (plan first, work after your approval; model from `[chat.planner]`, default `sonnet`
+  at `effort = "medium"`, `budget_usd = 2.0` per message, the same usage pause as the Coworker).
+  Describe the work; the Planner reads the repository and the queue (Read, Glob, Grep only: it
+  can't edit files, run commands or start runs) and writes a plan with `propose_plan`: ordered
+  tasks, each with a goal, the files it touches, a tier and `depends`. The plan is a draft:
+  `plan.json` in the project folder plus draft task files in `tasks/drafts/` marked
+  `status = "draft"`, which Run next, Run all and Run never pick up. The chat shows it as a plan
+  card with the dependency order and a rough cost range, and three buttons:
+  - **Approve and start**: the drafts become real tasks (next free ids, in dependency order, their
+    `depends` mapped) and the queue starts as with **Run all** (the whole ready queue, not only the
+    plan). If a run is already going, the plan's tasks start when it ends; if the account is
+    paused, they're queued and the chat says so (press **Start** on the card later).
+  - **Edit**: type what should change; the Planner rewrites the draft with `update_plan`.
+  - **Cancel**: deletes the draft plan and its draft files.
+
+  After approval the chat reports each plan task starting, finishing (branch and commit) or being
+  blocked, and the run ending. A blocked task is only reported: the plan waits for you, and the
+  Planner doesn't rewrite an approved plan. The card's **Stop** stops the run without an approval
+  card; **Start** goes on; **Close** forgets a stopped or finished plan (its tasks stay in the
+  queue). One approved plan per project at a time.
 
 **Approvals** (Assistant mode). When the chat wants to run a shell command (Bash/PowerShell) or start/stop a run, a
 card appears under the messages: **Allow once**, **Always allow** or **Deny**. Nothing runs before
