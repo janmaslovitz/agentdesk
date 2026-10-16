@@ -163,6 +163,11 @@ model = "sonnet"
 effort = "medium"
 budget_usd = 5.0
 
+# Proxy for the Claude CLI (it ignores the Windows proxy setting by itself).
+# "auto": use the Windows proxy when it is switched on and reachable; "off": never; or a URL like "http://127.0.0.1:12334".
+[network]
+proxy = "auto"
+
 # Auto-runner: the dashboard starts the next ready task of every project by itself (no model calls),
 # recovers runs that died, retries a crashed task retry_crashed times, and flags the rest.
 # A project can override `enabled` in its project.toml under [autorunner].
@@ -207,9 +212,85 @@ def account(name: str | None) -> dict:
     return next((a for a in accts if a.get("name") == name), accts[0] if accts else {"name": "default", "kind": "subscription"})
 
 
+PROXY_VARS = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+
+
+def _registry_proxy() -> tuple[bool, str, str]:
+    """(enabled, server, override) of the Windows Internet Settings proxy; (False, "", "") elsewhere."""
+    if os.name != "nt":
+        return False, "", ""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Internet Settings") as k:
+            def val(name, default):
+                try:
+                    return winreg.QueryValueEx(k, name)[0]
+                except OSError:
+                    return default
+            return bool(val("ProxyEnable", 0)), str(val("ProxyServer", "") or ""), str(val("ProxyOverride", "") or "")
+    except OSError:
+        return False, "", ""
+
+
+def _proxy_url(server: str) -> str | None:
+    """The proxy URL from a ProxyServer value: `host:port`, or `http=h:p;https=h:p;...` (https preferred)."""
+    server = server.strip()
+    if not server:
+        return None
+    if "=" in server:
+        parts = dict(p.split("=", 1) for p in server.split(";") if "=" in p)
+        server = parts.get("https") or parts.get("http") or ""
+        if not server:
+            return None  # only socks/ftp entries: the CLI can't use them
+    return server if "://" in server else "http://" + server
+
+
+_PROXY_UP: dict[str, tuple[float, bool]] = {}
+
+
+def proxy_accepts(url: str, timeout: float = 0.7) -> bool:
+    """Whether something is listening at the proxy's address (cached for 15 s): a dead proxy is worse than none."""
+    import socket
+    import urllib.parse
+    hit = _PROXY_UP.get(url)
+    if hit and time.time() - hit[0] < 15:
+        return hit[1]
+    u = urllib.parse.urlparse(url)
+    try:
+        with socket.create_connection((u.hostname or "", u.port or 80), timeout=timeout):
+            ok = True
+    except (OSError, ValueError):
+        ok = False
+    _PROXY_UP[url] = (time.time(), ok)
+    return ok
+
+
+def proxy_env() -> dict[str, str]:
+    """Proxy variables for the Claude CLI. The CLI ignores the Windows proxy setting, so AgentDesk passes it on:
+    `[network] proxy` in settings.toml is "auto" (default: the Windows proxy, when it is switched on and
+    reachable), "off", or a proxy URL. Variables already set in AgentDesk's own environment win."""
+    if any(os.environ.get(v) for v in PROXY_VARS):
+        return {}
+    mode = str(settings().get("network", {}).get("proxy", "auto")).strip()
+    bypass = ["localhost", "127.0.0.1", "::1"]
+    if mode.lower() == "off":
+        return {}
+    if mode and mode.lower() != "auto":
+        url: str | None = mode if "://" in mode else "http://" + mode
+    else:
+        enabled, server, override = _registry_proxy()
+        if not enabled:
+            return {}
+        url = _proxy_url(server)
+        bypass += [x.strip() for x in override.split(";") if x.strip() and x.strip() != "<local>"]
+    if not url or not proxy_accepts(url):
+        return {}
+    return {"HTTPS_PROXY": url, "HTTP_PROXY": url, "NO_PROXY": ",".join(bypass)}
+
+
 def account_env(acct: dict) -> dict[str, str]:
-    """Environment for the Claude CLI so it uses this account."""
-    env: dict[str, str] = {}
+    """Environment for the Claude CLI so it uses this account (and the Windows proxy, see proxy_env)."""
+    env: dict[str, str] = dict(proxy_env())
     if acct.get("kind") == "api_key":
         key = os.environ.get(acct.get("key_env", ""), "")
         if key:
