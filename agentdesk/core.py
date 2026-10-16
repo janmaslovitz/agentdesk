@@ -72,7 +72,17 @@ def _hide_sdk_console() -> None:
 
 
 _hide_sdk_console()
-DATA = Path(os.environ.get("AGENTDESK_HOME") or APP / "data")
+def _data_home() -> Path:
+    """AGENTDESK_HOME, else `data` next to the app. The packaged program (often under Program Files, which
+    users can't write to) uses `data` next to the .exe only if it already exists there, else the AgentDesk folder in LOCALAPPDATA."""
+    if os.environ.get("AGENTDESK_HOME"):
+        return Path(os.environ["AGENTDESK_HOME"])
+    if FROZEN and not (APP / "data").is_dir():
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AgentDesk"
+    return APP / "data"
+
+
+DATA = _data_home()
 TIER_ORDER = ["mechanical", "standard", "hard"]
 
 DEFAULT_SETTINGS = """# AgentDesk settings. Edit here or in the dashboard.

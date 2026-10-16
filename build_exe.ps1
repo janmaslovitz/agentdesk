@@ -12,7 +12,7 @@ if (-not (Test-Path "$venv\Scripts\python.exe")) {
     if ($LASTEXITCODE) { throw "could not create the build venv (is Python 3.11+ installed?)" }
 }
 $vpy = "$venv\Scripts\python.exe"
-& $vpy -m pip install --quiet -r requirements.txt -r requirements-build.txt
+& $vpy -m pip install --quiet -r requirements.txt -r requirements-tray.txt -r requirements-build.txt
 if ($LASTEXITCODE) { throw "pip install failed" }
 & $vpy -m PyInstaller --noconfirm --clean agentdesk.spec
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
