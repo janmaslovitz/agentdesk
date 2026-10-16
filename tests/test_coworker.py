@@ -65,9 +65,9 @@ def test_coworker_settings(monkeypatch):
     monkeypatch.setattr(core, "settings", lambda: {"chat": {"coworker": {"model": "opus", "budget_usd": 0.5}}})
     cs = core.chat_settings("coworker")
     assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("opus", "medium", 0.5)
-    # The shipped data/settings.toml has the keys too, and still parses.
-    shipped = tomllib.loads((Path(__file__).resolve().parent.parent / "data" / "settings.toml").read_text(encoding="utf-8"))
-    assert shipped["chat"]["coworker"]["budget_usd"] == 2.0 and shipped["chat"]["model"] == "haiku"
+    # The defaults written for a new install have the keys too (the user's own settings.toml is never read by tests).
+    default = tomllib.loads(core.DEFAULT_SETTINGS)
+    assert default["chat"]["coworker"]["budget_usd"] == 2.0 and core.chat_settings("assistant")["model"] == "haiku"
 
 
 # ----------------------------------------------------------------------------- guard: no approval cards, but the workers' deny list

@@ -68,3 +68,13 @@ def test_agents_and_checks_get_a_scratch_data_home(project):
     assert core.options(project).env["AGENTDESK_HOME"] == core.scratch_home() != str(core.DATA)
     code, out = core.run([sys.executable, "-c", "import os;print(os.environ['AGENTDESK_HOME'])"], project.dir)
     assert out.strip() == core.scratch_home()
+
+
+def test_is_agentdesk_matches_only_agentdesk_command_lines(monkeypatch):
+    cases = {'".venv\Scripts\pythonw.exe"  -m agentdesk': True,
+             "python -m agentdesk run proj": True,
+             "python -m agentdeskx": False,
+             "C:\AgentDesk\.venv\Scripts\python.exe -c pass": False}
+    for cmd, want in cases.items():
+        monkeypatch.setattr(cli, "process_info", lambda pid, cmd=cmd: (1, cmd))
+        assert cli.is_agentdesk(123) is want, cmd

@@ -57,7 +57,7 @@ def process_info(pid: int) -> tuple[int, str] | None:
 def is_agentdesk(pid: int) -> bool:
     """A pid file can be stale and its pid reused: only treat the process as ours if it runs agentdesk."""
     info = process_info(pid)
-    return bool(info) and re.search(r"-m\s+agentdesk", info[1]) is not None
+    return bool(info) and re.search(r"-m\s+agentdesk(\s|$)", info[1]) is not None
 
 
 def own_lineage() -> set[int]:
