@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -49,8 +50,17 @@ class Runner:
             return "a run is already going for this project"
         out = self.p.path("runner.log").open("a", encoding="utf-8")
         env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "AGENTDESK_HOME": str(core.DATA)}
-        flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-        self.proc = subprocess.Popen([sys.executable, "-m", "agentdesk", *args], cwd=core.APP, stdout=out, stderr=out, env=env, creationflags=flags)
+        # Detach from the dashboard's console/session so the run outlives the dashboard and its window.
+        if sys.platform == "win32":
+            kw: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW}
+        else:
+            kw = {"start_new_session": True}
+        self.proc = subprocess.Popen([sys.executable, "-m", "agentdesk", *args], cwd=core.APP, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **kw)
+        out.close()
+        try:
+            self.p.path("runner.pid").write_text(str(self.proc.pid), encoding="utf-8")
+        except OSError:
+            pass
         self.args = args
         core.Store(self.p).log(f"dashboard: started {' '.join(args)} (pid {self.proc.pid})")
         return None
@@ -405,14 +415,38 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, b"not found", "text/plain")
 
 
+def pid_file() -> Path:
+    return core.DATA / "dashboard.pid"
+
+
+def answers(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def main(port: int = 8765, browser: bool = True) -> None:
     core.settings()  # creates the data folder and default settings on first start
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}"
-    print(f"AgentDesk at {url}  (data: {core.DATA}; Ctrl+C to quit — runs keep going)")
+    if answers(port):
+        print(f"AgentDesk is already running at {url}")
+        if browser:
+            webbrowser.open(url)
+        return
+    if sys.stdout is None or sys.stderr is None:  # started by pythonw: no console, log to a file
+        log = (core.DATA / "agentdesk.log").open("a", encoding="utf-8", buffering=1)
+        sys.stdout = sys.stdout or log
+        sys.stderr = sys.stderr or log
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    pid_file().write_text(str(os.getpid()), encoding="utf-8")
+    print(f"AgentDesk at {url}  (data: {core.DATA}; stop with `python -m agentdesk stop` — runs keep going)")
     if browser:
         webbrowser.open(url)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        pid_file().unlink(missing_ok=True)
