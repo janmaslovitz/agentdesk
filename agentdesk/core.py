@@ -1037,3 +1037,355 @@ def final_gates(p: Project, task_id: str) -> None:
 
 def run_async(coro) -> None:
     asyncio.run(coro)
+
+
+# ----------------------------------------------------------------------------- export / import of a project
+
+EXPORT_FORMAT = 1
+EXPORT_DIR = ".agentdesk"
+MAX_FILE_BYTES = 20 * 1024 * 1024      # one file in an import
+MAX_TOTAL_BYTES = 100 * 1024 * 1024    # everything in an import
+MAX_ENTRIES = 5000
+_EXPORT_TOP = ("project.toml", "notes.md", "state.json", "agentdesk.log")
+_EXPORT_DIRS = ("tasks", "reports")
+_SECRET_KEY = re.compile(r"key|token|secret|passw|credential|auth", re.I)
+_SECRET_TEXT = re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}|\b(?:ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}")
+
+
+class NameClash(ValueError):
+    """A project with this name already exists; `suggested` is a free name."""
+
+    def __init__(self, name: str, suggested: str):
+        self.suggested = suggested
+        super().__init__(f"a project named {name} exists; choose a new name (suggestion: {suggested})")
+
+
+class BadExport(ValueError):
+    """The export is not importable (bad paths, version, size, content)."""
+
+
+def _secret_values() -> list[str]:
+    """Values of local credentials that must never appear in an export (key from the environment, login folders)."""
+    vals = []
+    for a in settings().get("accounts", []):
+        for v in (os.environ.get(a.get("key_env", "")) if a.get("key_env") else None, a.get("config_dir"), a.get("api_key"), a.get("token")):
+            if v and len(str(v)) >= 6:
+                vals.append(str(v))
+    return vals
+
+
+def _redact(text: str) -> str:
+    for v in _secret_values():
+        text = text.replace(v, "[redacted]")
+        text = text.replace(Path(v).as_posix(), "[redacted]")
+    return _SECRET_TEXT.sub("[redacted]", text)
+
+
+def _toml_edit(text: str, drop: set[tuple[str, str]], blank_secret_env: bool = False) -> str:
+    out, sec = [], ""
+    for line in text.splitlines():
+        m = re.match(r"\s*\[+([^\]]+)\]+", line)
+        if m:
+            sec = m.group(1).strip()
+        else:
+            k = re.match(r"\s*([A-Za-z0-9_\-]+)\s*=", line)
+            if k and (sec, k.group(1)) in drop:
+                continue
+            if k and blank_secret_env and sec == "gates.env" and _SECRET_KEY.search(k.group(1)):
+                line = f'{k.group(1)} = ""'
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _portable_toml(text: str) -> str:
+    """project.toml without the machine-specific repo path/worktrees and the account; secret-looking env values blanked."""
+    res = _toml_edit(text, {("", "account"), ("repo", "path"), ("repo", "worktrees")}, blank_secret_env=True)
+    tomllib.loads(res)
+    return res
+
+
+def _localize_toml(text: str, name: str, repo: str, worktrees: str, account: str | None) -> str:
+    text = _toml_edit(text, {("", "account"), ("", "name"), ("repo", "path"), ("repo", "worktrees")}, blank_secret_env=True)
+    lines = text.splitlines()
+    head = [f"name = {toml_str(name)}"] + ([f"account = {toml_str(account)}"] if account else [])
+    first = next((i for i, l in enumerate(lines) if l.lstrip().startswith("[")), len(lines))
+    lines[first:first] = head + [""]
+    repo_lines = [f"path = {toml_str(Path(repo).as_posix())}", f"worktrees = {toml_str(Path(worktrees).as_posix())}"]
+    at = next((i for i, l in enumerate(lines) if l.strip() == "[repo]"), None)
+    if at is None:
+        lines += ["", "[repo]", *repo_lines]
+    else:
+        lines[at + 1:at + 1] = repo_lines
+    res = "\n".join(lines) + "\n"
+    tomllib.loads(res)
+    return res
+
+
+def export_files(p: Project, include_logs: bool = False) -> dict[str, bytes]:
+    """The files of an export (relative posix path -> bytes). An allow-list: nothing else in the project folder
+    (worktrees, pid files, runner log, account files) can leak in. Known secret values are redacted."""
+    files: dict[str, bytes] = {}
+
+    def add(rel: str, data: bytes) -> None:
+        try:
+            files[rel] = _redact(data.decode("utf-8")).encode("utf-8")
+        except UnicodeDecodeError:
+            pass  # binary files are not part of an export
+
+    for n in _EXPORT_TOP:
+        f = p.path(n)
+        if f.is_file() and (n != "agentdesk.log" or include_logs):
+            text = f.read_text(encoding="utf-8", errors="replace")
+            add(n, (_portable_toml(text) if n == "project.toml" else text).encode("utf-8"))
+    for d in _EXPORT_DIRS:
+        for f in sorted(p.path(d).rglob("*")) if p.path(d).is_dir() else []:
+            if f.is_file() and not f.is_symlink():
+                add(f.relative_to(p.dir).as_posix(), f.read_bytes())
+    for f in sorted(p.dir.glob("chat*.json")):  # chat history / per-project chat settings
+        if f.is_file():
+            add(f.name, f.read_bytes())
+    return files
+
+
+def _manifest(p: Project, files: dict[str, bytes], include_logs: bool) -> bytes:
+    from . import __version__
+    m = {"format": EXPORT_FORMAT, "project": p.name, "slug": p.slug, "base": p.cfg.get("repo", {}).get("base", "main"),
+         "exported_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "app_version": __version__,
+         "includes_logs": include_logs, "files": sorted(files)}
+    return json.dumps(m, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+def export_project(p: Project, dest: Path | str | None = None, include_logs: bool = False) -> bytes | Path:
+    """Write the export as a .zip to `dest` (returns the path), or return the zip bytes if `dest` is None."""
+    import io
+    import zipfile
+    files = export_files(p, include_logs)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("manifest.json", _manifest(p, files, include_logs))
+        for rel, data in files.items():
+            z.writestr(rel, data)
+    if dest is None:
+        return buf.getvalue()
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(buf.getvalue())
+    return dest
+
+
+def _push_dir(repo: Path) -> dict:
+    """Push the current branch of `repo` to its first remote (origin preferred). Never forced, never changes remotes."""
+    def g(*a, timeout=120):
+        code, out = run(["git", *a], repo, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=timeout)
+        return code, out.strip()
+    names = g("remote")[1].split()
+    if not names:
+        return {"ok": False, "message": "local-only: there is no remote to push to"}
+    remote = "origin" if "origin" in names else names[0]
+    branch = g("rev-parse", "--abbrev-ref", "HEAD")[1]
+    code, out = g("push", "-u", remote, f"refs/heads/{branch}:refs/heads/{branch}", timeout=300)
+    return {"ok": code == 0, "message": out or f"Pushed '{branch}' to {remote}."}
+
+
+def export_to_git(p: Project, config_repo: str | None = None, include_logs: bool = False, push: bool = False) -> dict:
+    """Commit the export into `<project repo>/.agentdesk/` (or `<config_repo>/<slug>/`). Only that folder is committed.
+    Pushing is separate (`push=True`; the server requires the user's confirmation, as for the git panel)."""
+    repo = Path(config_repo) if config_repo else p.repo
+    if not repo.is_dir() or not (repo / ".git").exists():
+        return {"ok": False, "message": f"{repo} is not a git repository"}
+    folder = repo / (p.slug if config_repo else EXPORT_DIR)
+    files = export_files(p, include_logs)
+    manifest = _manifest(p, files, include_logs)
+    old = folder / "manifest.json"
+    if old.is_file():  # unchanged content keeps the old manifest (its timestamp) so there is nothing to commit
+        try:
+            same = {f.relative_to(folder).as_posix(): f.read_bytes() for f in folder.rglob("*") if f.is_file()}
+            same.pop("manifest.json")
+            if same == files and json.loads(old.read_bytes()).get("includes_logs") == include_logs:
+                manifest = old.read_bytes()
+        except (OSError, ValueError):
+            pass
+    if folder.exists():
+        shutil.rmtree(folder)  # deleted tasks/reports disappear too; history keeps them
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_bytes(manifest)
+    for rel, data in files.items():
+        t = folder / rel
+        t.parent.mkdir(parents=True, exist_ok=True)
+        t.write_bytes(data)
+    rel = folder.relative_to(repo).as_posix()
+    ident = ["-c", "user.name=AgentDesk", "-c", "user.email=agentdesk@localhost"]
+    if git(["add", "-A", "--", rel], repo)[0] != 0:
+        return {"ok": False, "message": "git add failed"}
+    if git(["diff", "--cached", "--quiet", "--", rel], repo)[0] == 0:
+        res = {"ok": True, "committed": False, "message": "nothing changed since the last export"}
+    else:
+        code, out = git([*ident, "commit", "-m", f"AgentDesk: export project {p.name}", "--", rel], repo)
+        if code != 0:
+            return {"ok": False, "message": f"git commit failed: {out}"}
+        res = {"ok": True, "committed": True, "message": f"committed to {rel}"}
+    if push:
+        pr = _push_dir(repo)
+        res = {**res, "ok": pr["ok"], "pushed": pr["ok"], "message": res["message"] + "; " + pr["message"]}
+    return res
+
+
+def _safe_rel(name: str) -> str | None:
+    """The cleaned relative path of an archive entry; raises BadExport if it escapes the project folder."""
+    n = name.replace("\\", "/")
+    parts = n.split("/")
+    if n.startswith("/") or re.match(r"^[A-Za-z]:", n) or ".." in parts or "\x00" in n:
+        raise BadExport(f"unsafe path in the export: {name!r}")
+    parts = [x for x in parts if x not in ("", ".")]
+    return "/".join(parts) if parts else None
+
+
+def _wanted(rel: str) -> bool:
+    return rel in _EXPORT_TOP or (rel.split("/")[0] in _EXPORT_DIRS and "/" in rel) or re.fullmatch(r"chat[^/]*\.json", rel) is not None
+
+
+def _read_zip(path: Path) -> tuple[dict, dict[str, bytes]]:
+    import zipfile
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError) as e:
+        raise BadExport(f"not a valid export file: {e}")
+    with z:
+        infos = z.infolist()
+        if len(infos) > MAX_ENTRIES:
+            raise BadExport("too many files in the export")
+        total, out = 0, {}
+        for zi in infos:
+            rel = _safe_rel(zi.filename)  # checks every entry, wanted or not
+            if rel is None or zi.is_dir():
+                continue
+            if zi.file_size > MAX_FILE_BYTES:
+                raise BadExport(f"{rel} is too large ({zi.file_size} bytes; limit {MAX_FILE_BYTES})")
+            data = z.open(zi).read(MAX_FILE_BYTES + 1)  # the header size can lie
+            if len(data) > MAX_FILE_BYTES:
+                raise BadExport(f"{rel} is too large (limit {MAX_FILE_BYTES})")
+            total += len(data)
+            if total > MAX_TOTAL_BYTES:
+                raise BadExport("the export is too large")
+            out[rel] = data
+    return _check_manifest(out)
+
+
+def _check_manifest(files: dict[str, bytes]) -> tuple[dict, dict[str, bytes]]:
+    if "manifest.json" not in files:
+        raise BadExport("no manifest.json: this is not an AgentDesk export")
+    try:
+        m = json.loads(files.pop("manifest.json").decode("utf-8"))
+    except ValueError:
+        raise BadExport("manifest.json is not valid")
+    if not isinstance(m, dict) or m.get("format") != EXPORT_FORMAT:
+        raise BadExport(f"unknown export format version {m.get('format') if isinstance(m, dict) else m!r} (this app reads {EXPORT_FORMAT})")
+    if "project.toml" not in files:
+        raise BadExport("the export has no project.toml")
+    return m, {k: v for k, v in files.items() if _wanted(k)}
+
+
+def _read_manifest_name(d: Path) -> str:
+    try:
+        return str(json.loads((d / "manifest.json").read_text(encoding="utf-8")).get("project", ""))
+    except (ValueError, OSError):
+        return ""
+
+
+def find_export_dir(root: Path, project_name: str | None = None) -> Path:
+    """The folder holding manifest.json inside a repo/folder: root, `.agentdesk/`, or one subfolder (config repo)."""
+    subs = sorted(x for x in root.iterdir() if x.is_dir() and x.name != ".git")
+    cands = [c for c in [root, *subs] if (c / "manifest.json").is_file()]
+    if project_name:
+        cands = [c for c in cands if _read_manifest_name(c) in (project_name,) or c.name == slug(project_name)] or cands
+    if not cands:
+        raise BadExport(f"no AgentDesk export (manifest.json) found in {root}")
+    if len(cands) > 1:
+        raise BadExport("several exports found there; say which project: " + ", ".join(c.name for c in cands))
+    return cands[0]
+
+
+def _read_folder(d: Path) -> tuple[dict, dict[str, bytes]]:
+    files, total = {}, 0
+    for f in sorted(d.rglob("*")):
+        if not f.is_file() or f.is_symlink():
+            continue
+        rel = f.relative_to(d).as_posix()
+        size = f.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise BadExport(f"{rel} is too large (limit {MAX_FILE_BYTES})")
+        total += size
+        if total > MAX_TOTAL_BYTES or len(files) > MAX_ENTRIES:
+            raise BadExport("the export is too large")
+        files[rel] = f.read_bytes()
+    return _check_manifest(files)
+
+
+def _free_name(name: str) -> str:
+    n = 2
+    while (DATA / "projects" / slug(f"{name} {n}")).exists():
+        n += 1
+    return f"{name} {n}"
+
+
+def clone_for_import(url: str, into: Path | None = None) -> Path:
+    """Clone a config repo (git URL or local path) into a new folder and return it."""
+    import tempfile
+    if into is not None and into.exists() and any(into.iterdir()):
+        raise BadExport(f"{into} already exists and is not empty")
+    imports = DATA / "imports"
+    imports.mkdir(parents=True, exist_ok=True)
+    dest = into or Path(tempfile.mkdtemp(prefix="agentdesk-import-", dir=imports))
+    code, out = run(["git", "clone", "--", url, str(dest)], imports, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=600)
+    if code != 0:
+        raise BadExport(f"git clone failed: {out.strip()}")
+    return dest
+
+
+def import_project(src: Path | str, repo: str, new_name: str | None = None, account_name: str | None = None,
+                   project_name: str | None = None, pull: bool = False) -> Project:
+    """Create a project from a .zip, or from a folder / git repo holding an export (`.agentdesk/`, config repo).
+    Never overwrites: if the name is taken, raises NameClash (give `new_name`). The repo path is chosen here (this
+    machine); the account must be a local one or is left unset. A local git folder is pulled first if `pull`."""
+    src = Path(src)
+    if src.is_dir():
+        if pull and (src / ".git").exists():
+            code, out = run(["git", "pull", "--ff-only"], src, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=300)
+            if code != 0:
+                raise BadExport(f"git pull failed: {out.strip()}")
+        sub = src / EXPORT_DIR
+        manifest, files = _read_folder(sub if (sub / "manifest.json").is_file() else find_export_dir(src, project_name))
+    elif src.is_file():
+        manifest, files = _read_zip(src)
+    else:
+        raise BadExport(f"{src} does not exist")
+    name = (new_name or "").strip() or str(manifest.get("project") or "").strip()
+    if not name:
+        raise BadExport("the export has no project name")
+    s = slug(name)
+    d = DATA / "projects" / s
+    if d.exists():
+        raise NameClash(name, _free_name(name))
+    if not Path(repo).is_dir():
+        raise ValueError(f"{repo} is not a folder")
+    acct = account_name if account_name and any(a.get("name") == account_name for a in settings().get("accounts", [])) else None
+    try:
+        toml = _localize_toml(files["project.toml"].decode("utf-8"), name, repo, str(d / "worktrees"), acct)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise BadExport(f"project.toml in the export is not valid: {e}")
+    d.mkdir(parents=True)  # exist_ok=False: never overwrite
+    try:
+        for rel, data in files.items():
+            if rel == "project.toml":
+                continue
+            t = d / rel
+            if d.resolve() not in t.resolve().parents:
+                raise BadExport(f"unsafe path in the export: {rel!r}")
+            t.parent.mkdir(parents=True, exist_ok=True)
+            t.write_bytes(data)
+        (d / "tasks").mkdir(exist_ok=True)
+        (d / "project.toml").write_text(toml, encoding="utf-8")
+    except BaseException:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    return project(s)
