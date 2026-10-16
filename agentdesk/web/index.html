@@ -76,7 +76,11 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .seg button.on { background: var(--accent); color: #fff; }
 .modenote { font-size: 12px; color: var(--muted); padding: 6px 14px; border-bottom: 1px solid var(--line); }
 .badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; color: var(--warn); border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); white-space: nowrap; }
-#pending:empty { display: none; }
+#pending:empty, #plan:empty { display: none; }
+#plan { padding: 10px; border-top: 1px solid var(--line); }
+.plan ol { margin: 6px 0; padding-left: 20px; } .plan li { margin: 4px 0; }
+.plan li .muted { font-size: 12px; }
+.msg.progress { background: transparent; border: 1px dashed var(--line); font-size: 13px; }
 #pending { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 .approve { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
 .approve .h { font-weight: 600; } .approve .h span { font-weight: 400; color: var(--muted); font-size: 12px; }
@@ -309,11 +313,12 @@ function shell() {
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody><tbody id="doneHead"></tbody><tbody id="doneTasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 0"></div>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
-    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button></span>
+    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button><button data-mode="planner" onclick="setMode('planner')" title="Reads only and writes a plan of tasks; nothing runs until you approve it">Planner</button></span>
         <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
       <div class="modenote" id="modeNote" hidden></div>
       <div class="msgs" id="msgs"></div>
+      <div id="plan"></div>
       <div id="pending"></div>
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
@@ -396,12 +401,14 @@ async function refresh() {
   try { st = await api(`/api/p/${cur}/state`); } catch { return; }
   if (st.error) return;
   if (chatFor !== cur) {
-    chatFor = cur; pendingKey = null; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
+    chatFor = cur; pendingKey = null; planKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
     const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
-  }
+    lastSeq = h.seq || 0;
+  } else if ((st.chat_seq || 0) > lastSeq) await fetchNotes();
   showMode(st.project);
   if (gitFor !== cur) gitLoad();
   if (buildFor !== cur) buildLoad();
+  showPlan(st.plan, st.runner.running);
   const p = st.project, r = st.runner;
   const po = ov?.projects.find(x => x.slug === cur);
   if (po) { $("autoProj").checked = po.auto_enabled; $("autoState").textContent = po.auto; }
@@ -480,7 +487,7 @@ async function stop() { const r = await api(`/api/p/${cur}/stop`, {}); if (r.err
 
 // A chat message; `meta` (assistant replies) has the tool calls, cost and tokens of that answer.
 function addMsg(role, text, meta) {
-  const div = document.createElement("div"); div.className = "msg " + role; div.innerHTML = md(text);
+  const div = document.createElement("div"); div.className = "msg " + role + (meta?.kind === "progress" ? " progress" : ""); div.innerHTML = md(text);
   for (const c of meta?.tools || []) {
     const d = document.createElement("details");
     if (typeof c === "string") { d.className = "call"; d.innerHTML = `<summary><b>${esc(c)}</b></summary>`; div.appendChild(d); continue; }
@@ -508,7 +515,7 @@ async function send() {
     if (forProject !== cur || !wait.isConnected) { clearInterval(timer); return; }
     label.textContent = `working… ${Math.floor((Date.now() - t0) / 1000)}s`;
   }, 1000);
-  try { const r = await api(`/api/p/${cur}/chat`, {text}); wait.remove(); if (forProject === cur) addMsg("assistant", r.text || r.error, r); }
+  try { const r = await api(`/api/p/${cur}/chat`, {text}); wait.remove(); if (forProject === cur) { await fetchNotes(); addMsg("assistant", r.text || r.error, r); } }
   catch (e) { wait.textContent = "Error: " + e; }
   finally { clearInterval(timer); }
   $("sendb").disabled = false; refreshAll();
@@ -516,19 +523,60 @@ async function send() {
 async function resetChat() { await api(`/api/p/${cur}/chat/reset`, {}); $("msgs").innerHTML = ""; }
 
 // `p`: the project from /state (chat_mode, chat_model, chat_budget, cowork).
+const MODE_NAMES = {assistant: "Assistant", coworker: "Coworker", planner: "Planner"};
+const PLACEHOLDERS = {assistant: "What's blocked and why? / Queue a task: …", coworker: "What should I do? (I work in the project checkout)",
+  planner: "Describe the work; I'll plan it as tasks for your approval"};
 function showMode(p) {
-  const mode = p.chat_mode, cw = mode === "coworker";
+  const mode = p.chat_mode, cw = mode === "coworker", pl = mode === "planner", budget = `$${Number(p.chat_budget ?? (mode === "coworker" ? 5 : 2)).toFixed(2)} per message`;
   for (const b of $("modeSeg").children) b.classList.toggle("on", b.dataset.mode === mode);
   $("coworkBadge").hidden = !cw;
   $("chatModel").textContent = p.chat_model || "";
-  $("modeNote").hidden = !cw;
-  if (cw) $("modeNote").textContent = `Full access: works in the project checkout (main included), runs any command without asking. Budget $${Number(p.chat_budget ?? 5).toFixed(2)} per message.`;
+  $("modeNote").hidden = !cw && !pl;
+  if (cw) $("modeNote").textContent = `Full access: works in the project checkout (main included), runs any command without asking. Budget ${budget}.`;
+  if (pl) $("modeNote").textContent = `Reads only and writes a draft plan; nothing runs until you press Approve and start. Budget ${budget}.`;
+  $("input").placeholder = PLACEHOLDERS[mode] || PLACEHOLDERS.assistant;
 }
 async function setMode(mode) {
   const r = await api(`/api/p/${cur}/chat/mode`, {mode});
   if (r.error) return note(r.error);
   if (st) { st.project.chat_mode = r.mode; showMode(st.project); }
-  refresh(); addMsg("assistant", `Switched to ${r.mode === "coworker" ? "Coworker" : "Assistant"} mode; a new session starts with your next message.`);
+  refresh(); addMsg("assistant", `Switched to ${MODE_NAMES[r.mode] || r.mode} mode; a new session starts with your next message.`);
+}
+
+// Progress notes (plan approved, task started/done/blocked, run ended) the server adds to the chat.
+let lastSeq = 0;
+async function fetchNotes() {
+  const h = await api(`/api/p/${cur}/chat`);
+  for (const m of h.history) if (m.kind === "progress" && m.seq > lastSeq) addMsg(m.role, m.text, m);
+  lastSeq = Math.max(lastSeq, h.seq || 0);
+}
+
+// The plan card: a draft waits for Approve and start / Edit / Cancel; an approved plan shows progress and Stop.
+let planKey = "";
+function showPlan(plan, running) {
+  const key = JSON.stringify([plan, running]);
+  if (key === planKey) return;
+  planKey = key;
+  if (!plan) { $("plan").innerHTML = ""; return; }
+  const draft = plan.status === "draft", [lo, hi] = plan.estimate || [0, 0];
+  const items = plan.tasks.map(t => `<li><b>${esc(t.id)}</b> ${esc(t.title)} ${draft ? "" : `<span class="st ${esc(t.status)}">${esc(t.status)}</span>`}
+    <div class="muted">${esc(t.tier || "tier: router")}${t.depends.length ? " · after " + esc(t.depends.join(", ")) : ""}${t.files?.length ? " · " + esc(t.files.join(", ")) : ""}</div>
+    ${draft && t.goal ? `<div class="muted">${esc(t.goal)}</div>` : ""}</li>`).join("");
+  const head = draft ? "Plan (draft)" : plan.status === "approved" ? (running ? "Plan running" : "Plan approved") : plan.status === "finished" ? "Plan finished" : "Plan";
+  const buttons = draft
+    ? `<button class="primary" onclick="planAct('approve')">Approve and start</button><button onclick="planEdit()">Edit</button><button class="danger" onclick="planAct('cancel')">Cancel</button>`
+    : plan.status === "approved" && running ? `<button class="danger" onclick="planAct('stop')">Stop</button>`
+    : (plan.status === "approved" ? `<button class="primary" onclick="planAct('start')">Start</button>` : "") + `<button onclick="planAct('close')">Close</button>`;
+  $("plan").innerHTML = `<div class="approve plan"><div class="h">${head}: ${esc(plan.summary)} <span>${plan.tasks.length} task(s) · estimated ${money(lo)}–${money(hi)}</span></div>
+    <ol>${items}</ol><div class="row">${buttons}</div></div>`;
+}
+async function planAct(action) {
+  const r = await api(`/api/p/${cur}/plan/${action}`, {});
+  if (r.error) note(r.error);
+  planKey = ""; await refresh(); refreshAll();
+}
+function planEdit() {
+  const i = $("input"); if (!i.value) i.value = "Change the plan: "; i.focus(); i.setSelectionRange(i.value.length, i.value.length);
 }
 
 // Approval cards: tool calls waiting for the user. Re-rendered only when the set changes (keeps typing in the prefix box).

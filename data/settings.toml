@@ -40,6 +40,12 @@ budget_usd = 12.0
 [chat]
 model = "haiku"
 
+# Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
+[chat.planner]
+model = "sonnet"
+effort = "medium"
+budget_usd = 2.0
+
 [guard]
 deny = [
   'git\s+push', 'git\s+remote', 'gh\s+(pr|release|repo|api|issue|workflow)', 'git\s+reset\s+--hard',
@@ -47,3 +53,9 @@ deny = [
   'rm\s+-rf\s+/', 'curl\s+.*(-T\b|--upload|-d\b|--data|-X\s*POST)', 'Invoke-WebRequest.*-Method\s+Post',
   'cargo\s+publish', 'npm\s+publish', 'twine\s+upload', 'setup\.exe', 'msiexec',
 ]
+
+[window]
+y = -7
+x = -7
+height = 1406
+width = 2574

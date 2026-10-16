@@ -233,8 +233,40 @@ You have a budget per message (${budget:.2f}); finish with a short summary of wh
 left. Workers run in their own worktrees, so your edits in the checkout don't collide with theirs.
 """
 
+PLANNER_PROMPT = """You are the Planner on the user's AgentDesk dashboard for the project "{name}" (repository
+{repo}). You turn the user's request into a plan of tasks for the workers; you don't do the work
+yourself. Be brief and plain; answer in the user's language.
+
+Read the request, then as much of the repository ({repo}) and the project's AgentDesk folder (your
+working directory: tasks/*.md is the queue, state.json the status of each task, reports/, notes.md,
+agentdesk.log) as you need to plan well, with Read, Glob and Grep. Keep the exploring short. Then
+call propose_plan with:
+- summary: one line on what the plan achieves;
+- tasks, in order, each with a short title; goal (what to change, constraints, and how to tell it's
+  done: the worker reads only its task); files (the files it touches); tier (mechanical | standard |
+  hard, or empty to let the router decide); depends (what must be done first: d1, d2, ... for this
+  plan's tasks by position, or ids of tasks already queued).
+Prefer few, self-contained tasks; split only where one worker would otherwise do too much at once.
+
+The plan is a draft: nothing runs until the user presses "Approve and start" on the plan card. Then the
+drafts become queued tasks and the workers run them in dependency order. You don't approve, start or
+stop anything yourself. When the user asks for changes, call update_plan with the whole new task list;
+call cancel_plan only when the user asks to drop the draft. An approved plan is not rewritten: if one
+of its tasks is blocked, explain what failed (state.json last_failure, agentdesk.log) and what you'd
+suggest, and wait for the user's decision.
+
+You can't edit files or run commands, and never push or publish anything. Budget per message:
+${budget:.2f}. Never invent results: read the files. Each user message starts with the plan's current
+state in brackets.
+"""
+
 MCP = "agentdesk"
 MCP_PREFIX = f"mcp__{MCP}__"
+AUTONOMOUS = ("coworker", "planner")  # modes without approval cards: a budget per message and the usage pause
+PLANNER_TOOLS = ("propose_plan", "update_plan", "cancel_plan")
+# What the Planner may use. ToolSearch only loads tool schemas (the CLI may defer MCP tools behind it).
+PLANNER_ALLOWED = ("Read", "Glob", "Grep", "ToolSearch")
+PLAN_POLL_S = 2.0
 NEEDS_APPROVAL = {"run_next": "Start a run of the next ready task", "run_task": "Start a run of task {id}",
                   "run_all": "Start a run of all ready tasks", "plan_task": "Preview the router's plan for task {id} (a cheap model call)",
                   "stop_run": "Stop the current run"}
@@ -318,6 +350,9 @@ class Chat:
         self.session_id: str | None = None  # the CLI session; coworker messages resume it in a new process
         self.session_cost = 0.0  # the session's running total_cost_usd (the CLI reports totals, not per message)
         self.generation = 0  # bumped by reset, so an answer still coming in doesn't revive the old session
+        self.seq = 0  # numbers the progress notes, so the page can fetch the new ones
+        self.note_lock = threading.Lock()
+        self.watcher: threading.Thread | None = None
 
     # -- the visible transcript, kept in chat.json so it survives a restart (the SDK session does not)
 
@@ -333,7 +368,7 @@ class Chat:
         f = self.p.path("chat.json")
         tmp = f.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.history, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(f)
+        core.replace_file(tmp, f)
 
     # -- the running memory, kept in chat_memory.md: this (not the transcript) goes back to the model
 
@@ -347,7 +382,7 @@ class Chat:
         f = self.p.path("chat_memory.md")
         tmp = f.with_suffix(".tmp")
         tmp.write_text(text.strip() + "\n", encoding="utf-8")
-        tmp.replace(f)
+        core.replace_file(tmp, f)
 
     def with_memory(self, prompt: str) -> str:
         """The system prompt plus the memory as it is now (read when a session is created)."""
@@ -414,6 +449,19 @@ class Chat:
         if core.chat_settings("coworker").get("full_access"):
             return {}
         r = await self.coworker_permission(str(data.get("tool_name", "")), dict(data.get("tool_input") or {}))
+        if isinstance(r, PermissionResultDeny):
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": r.message}}
+        return {}
+
+    async def planner_permission(self, name: str, args: dict, _ctx=None):
+        """Planner: reading and its three planning tools, nothing else (no edits, shell or run tools)."""
+        if name in PLANNER_ALLOWED or (name.startswith(MCP_PREFIX) and name[len(MCP_PREFIX):] in PLANNER_TOOLS):
+            return PermissionResultAllow()
+        return PermissionResultDeny(message="the Planner only reads and plans: no edits, commands or runs. "
+                                            "Put the work in the plan (propose_plan / update_plan)")
+
+    async def planner_hook(self, data: dict, _tool_use_id=None, _ctx=None) -> dict:
+        r = await self.planner_permission(str(data.get("tool_name", "")), dict(data.get("tool_input") or {}))
         if isinstance(r, PermissionResultDeny):
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": r.message}}
         return {}
@@ -492,6 +540,60 @@ class Chat:
 
         return [add_task, queue_status, run_next, run_task, run_all, plan_task, stop_run]
 
+    def planner_tools(self) -> list:
+        """The Planner's tools: they only write the draft plan (plan.json and tasks/drafts/)."""
+        p = self.p
+
+        def done(plan_or_text) -> dict:
+            if isinstance(plan_or_text, str):
+                return {"content": [{"type": "text", "text": plan_or_text}]}
+            v = core.plan_view(p, plan_or_text) or {}
+            lines = [f"draft plan v{v.get('version', 1)}: {v.get('summary', '')}"]
+            for t in v.get("tasks", []):
+                lines.append(f"{t['id']} {t['title']} ({t['tier'] or 'tier: router'}"
+                             + (f"; after {', '.join(t['depends'])}" if t["depends"] else "") + ")")
+            lo, hi = v.get("estimate", [0, 0])
+            lines.append(f"Estimated ${lo:.2f}-${hi:.2f}. The user sees it as a card with Approve and start / Edit / Cancel; "
+                         "nothing runs before they approve.")
+            return {"content": [{"type": "text", "text": "\n".join(lines)}]}
+
+        def err(e: Exception) -> dict:
+            return {"content": [{"type": "text", "text": str(e)}], "is_error": True}
+
+        task_schema = {"type": "object", "required": ["title", "goal"], "properties": {
+            "title": {"type": "string", "description": "short"},
+            "goal": {"type": "string", "description": "what to change, constraints, and how to tell it's done"},
+            "files": {"type": "array", "items": {"type": "string"}, "description": "files it touches"},
+            "tier": {"type": "string", "enum": core.TIER_ORDER, "description": "optional; else the router decides"},
+            "depends": {"type": "array", "items": {"type": "string"},
+                        "description": "d1, d2, ... (this plan's tasks by position) or ids of queued tasks"}}}
+        plan_schema = {"type": "object", "required": ["tasks"], "properties": {
+            "summary": {"type": "string", "description": "one line on what the plan achieves"},
+            "tasks": {"type": "array", "items": task_schema, "description": "in order"}}}
+
+        @tool("propose_plan", "Write the plan as draft tasks (not runnable until the user approves it on the dashboard).", plan_schema)
+        async def propose_plan(a):
+            try:
+                return done(core.propose_plan(p, str(a.get("summary") or ""), a.get("tasks")))
+            except ValueError as e:
+                return err(e)
+
+        @tool("update_plan", "Replace the draft plan's tasks (the whole list) after the user asked for changes.", plan_schema)
+        async def update_plan(a):
+            try:
+                return done(core.update_plan(p, a.get("summary") or None, a.get("tasks")))
+            except ValueError as e:
+                return err(e)
+
+        @tool("cancel_plan", "Drop the draft plan and its draft task files (only when the user asks).", {})
+        async def cancel_plan(_a):
+            try:
+                return done(f"draft plan cancelled ({core.cancel_plan(p)} draft task file(s) removed)")
+            except ValueError as e:
+                return err(e)
+
+        return [propose_plan, update_plan, cancel_plan]
+
     # -- sessions: the Assistant keeps one CLI process; the Coworker starts one per message (resuming the
     # session), because --max-budget-usd counts the spend of the process, which makes it a per-message budget.
 
@@ -532,13 +634,28 @@ class Chat:
                             can_use_tool=self.coworker_permission, setting_sources=[], env=gate_env,
                             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.coworker_hook])]})
 
+    def _planner_options(self):
+        cs = core.chat_settings("planner")
+        self.model = cs["model"]
+        prompt = PLANNER_PROMPT.format(name=self.p.name, repo=self.p.repo, budget=float(cs["budget_usd"]))
+        # Read-only plus the planning tools; the permission check and the hook refuse everything else.
+        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.dir), system_prompt=prompt,
+                            max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
+                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
+                            mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.planner_tools())},
+                            disallowed_tools=["Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
+                                              "Task", "Agent"],
+                            permission_mode="default", can_use_tool=self.planner_permission, setting_sources=[],
+                            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.planner_hook])]})
+
     async def _client(self, mode: str) -> ClaudeSDKClient:
         if self.client is not None and self.mode != mode:
             await self._close()
         if self.client is None:
             self.mode = mode
             # The coworker's worktree may need a `git worktree add` first: off the event loop.
-            opts = await asyncio.to_thread(self._coworker_options) if mode == "coworker" else self._assistant_options()
+            opts = (await asyncio.to_thread(self._coworker_options) if mode == "coworker"
+                    else self._planner_options() if mode == "planner" else self._assistant_options())
             self.client = ClaudeSDKClient(options=opts)
             await self.client.connect()
         return self.client
@@ -556,13 +673,16 @@ class Chat:
 
     async def _ask(self, text: str) -> dict:
         mode = core.chat_mode(self.p)
-        coworker = mode == "coworker"
+        coworker = mode in AUTONOMOUS  # coworker or planner: per-message budget and the usage pause
+        label = mode.title()
         acct = self.p.account.get("name", "default")
         gen = self.generation
         if coworker:
             await self._close()  # a fresh process per message, so the budget counts this message only
         client = await self._client(mode)
         reply, calls, result = [], {}, None
+        if mode == "planner":  # the plan may have changed on the dashboard (approved, cancelled, progress)
+            text = f"[Plan: {core.plan_brief(self.p)}]\n\n{text}"
         try:
             await client.query(text)
             async for msg in client.receive_response():
@@ -599,7 +719,7 @@ class Chat:
             u.setdefault("tokens", {})[k] = u.get("tokens", {}).get(k, 0) + v
         self.p.path("chat_usage.json").write_text(json.dumps(u), encoding="utf-8")
         parts = ["\n\n".join(reply).strip()]
-        if coworker and (note := budget_note(result, cost)):
+        if coworker and (note := budget_note(result, cost, mode)):
             parts.append(note)
         return self._answer("\n\n".join(x for x in parts if x) or "(no answer)", calls.values(), cost, tokens)
 
@@ -650,7 +770,9 @@ class Chat:
     def info(self) -> dict:
         mode = core.chat_mode(self.p)
         cs = core.chat_settings(mode)
-        out = {"history": self.history, "mode": mode, "busy": self.busy, "model": cs["model"]}
+        out = {"history": self.history, "mode": mode, "busy": self.busy, "model": cs["model"], "seq": self.seq}
+        if mode in AUTONOMOUS:
+            out.update(budget_usd=float(cs["budget_usd"]))
         if mode == "coworker":
             full = bool(cs.get("full_access"))
             out.update(budget_usd=float(cs["budget_usd"]), full_access=full,
@@ -658,14 +780,145 @@ class Chat:
                        branch=self.p.cfg["repo"]["base"] if full else f"auto/{core.COWORK}")
         return out
 
+    # -- the approved plan: progress notes in the chat, and starting the queue when it's free
 
-def budget_note(result, cost: float) -> str | None:
-    """The chat's message when a coworker message hit `[chat.coworker] budget_usd`."""
+    def note(self, text: str) -> None:
+        """A progress note in the chat (not from the model); the page fetches notes newer than its last seq."""
+        with self.note_lock:
+            self.seq += 1
+            self.history.append({"role": "assistant", "text": text, "kind": "progress", "seq": self.seq})
+
+    def watch_plan(self) -> None:
+        """Poll the approved plan in the background until it's finished or closed."""
+        if self.watcher is not None and self.watcher.is_alive():
+            return
+
+        def loop():
+            while True:
+                time.sleep(PLAN_POLL_S)
+                try:
+                    if not self.plan_tick():
+                        return
+                except Exception as e:  # the project went away, a file was half written, ...
+                    try:
+                        core.Store(self.p).log(f"planner: progress watch stopped: {e}")
+                    except OSError:
+                        pass
+                    return
+
+        self.watcher = threading.Thread(target=loop, daemon=True)
+        self.watcher.start()
+
+    def plan_tick(self) -> bool:
+        """Report the approved plan's progress (task started, done, blocked, paused; the run ending; the
+        plan finishing), and start the queue if the plan waits for a run that was going. A blocked task is
+        only reported: the plan waits for the user. Returns whether the plan still needs watching."""
+        p, notes = self.p, []
+        with core.PLAN_LOCK:
+            plan = core.load_plan(p)
+            if not core.plan_active(plan):
+                return False
+            state = core.Store(p).load()["tasks"]
+            r = runner(p)
+            running = r.running()
+            ids, seen = plan.get("ids", {}), plan.setdefault("seen", {})
+            titles = {ids[t["key"]]: t["title"] for t in plan["tasks"] if t["key"] in ids}
+            statuses = {}
+            for tid in ids.values():
+                e = state.get(tid, {})
+                st, before = e.get("status", "pending"), seen.get(tid, "pending")
+                statuses[tid] = st
+                if st == before:
+                    continue
+                seen[tid] = st
+                what = f"{tid}: {titles.get(tid, '')}"
+                if st in ("routing", "working"):
+                    if before not in ("routing", "working"):
+                        notes.append(f"▶ Started {what}")
+                elif st == "done":
+                    notes.append(f"✓ Done {what}" + (f" (branch auto/{tid} at {e['commit']})" if e.get("commit") else ""))
+                elif st == "blocked":
+                    why = next((ln.strip() for ln in str(e.get("last_failure") or "").splitlines() if ln.strip()), "")
+                    notes.append(f"✗ Blocked {what}" + (f" — {why[:200]}" if why else "") +
+                                 ". The plan waits here: tell me how to go on (I don't change the plan without asking).")
+                elif st == "paused":
+                    notes.append(f"⏸ Paused {what} (the account usage limit or the run budget was reached).")
+            done = sum(s == "done" for s in statuses.values())
+            if statuses and done == len(statuses):
+                plan["status"] = "finished"
+                notes.append(f"Plan finished: all {done} task(s) done. Review the auto/* branches and merge what you want.")
+            elif plan.get("start_pending") and not running:
+                plan["start_pending"] = False
+                msg, running = self._start_queue(plan)
+                notes.append(msg)
+            elif plan.get("was_running") and not running:
+                rest = ", ".join(f"{t} ({s})" for t, s in statuses.items() if s != "done")
+                notes.append(f"The run ended: {done} of {len(statuses)} plan tasks done; not done: {rest}. "
+                             "Press Start on the plan card to go on.")
+            plan["was_running"] = running
+            core.save_plan(p, plan)
+        for n in notes:
+            self.note(n)
+        return plan["status"] == "approved"
+
+    def _start_queue(self, plan: dict) -> tuple[str, bool]:
+        """Start "Run all" for the approved plan (PLAN_LOCK held; the caller saves `plan`). Returns the chat
+        note and whether a run is going now."""
+        p = self.p
+        r = runner(p)
+        if r.running():
+            plan["start_pending"] = True
+            return "A run is already going; the plan's tasks start when it ends.", True
+        if e := r.start(run_args(p, "all") or []):
+            return f"Couldn't start the queue: {e}", False
+        return "Started the queue (Run all): the tasks run in dependency order; progress shows here.", True
+
+    def start_plan(self) -> str:
+        """Start (or go on with) the approved plan's run; the plan card's Start button."""
+        with core.PLAN_LOCK:
+            plan = core.load_plan(self.p)
+            if not core.plan_active(plan):
+                raise ValueError("there is no approved plan to start")
+            msg, plan["was_running"] = self._start_queue(plan)
+            core.save_plan(self.p, plan)
+        self.note(msg)
+        self.watch_plan()
+        return msg
+
+    def approve_plan(self) -> dict:
+        """The user's "Approve and start": the drafts become tasks and the queue starts."""
+        ids = core.approve_plan(self.p)
+        self.note(f"Plan approved: tasks {', '.join(ids.values())} are queued.")
+        msg = self.start_plan()
+        return {"ok": True, "ids": ids, "note": msg}
+
+    def cancel_plan(self) -> dict:
+        n = core.cancel_plan(self.p)
+        self.note(f"Plan cancelled: {n} draft task(s) removed.")
+        return {"ok": True, "removed": n}
+
+    def stop_plan(self) -> dict:
+        """The plan card's Stop: the same as the stop_run tool, without an approval card."""
+        if e := runner(self.p).stop():
+            raise ValueError(e)
+        self.note("Stopping the run (the plan's remaining tasks stay queued; Start goes on).")
+        return {"ok": True}
+
+    def close_plan(self) -> dict:
+        if runner(self.p).running() and core.plan_active(core.load_plan(self.p)):
+            raise ValueError("the plan's run is going: stop it first")
+        core.close_plan(self.p)
+        self.note("Plan closed; its tasks stay in the queue.")
+        return {"ok": True}
+
+
+def budget_note(result, cost: float, mode: str = "coworker") -> str | None:
+    """The chat's message when a coworker/planner message hit `[chat.<mode>] budget_usd`."""
     if result is None or result.subtype != "error_max_budget_usd":
         return None
-    budget = float(core.chat_settings("coworker")["budget_usd"])
-    return (f"Stopped: this message spent {usd(cost)} and reached the Coworker budget of {usd(budget)} per message "
-            "(`[chat.coworker] budget_usd` in settings.toml). Send another message to continue.")
+    budget = float(core.chat_settings(mode)["budget_usd"])
+    return (f"Stopped: this message spent {usd(cost)} and reached the {mode.title()} budget of {usd(budget)} per message "
+            f"(`[chat.{mode}] budget_usd` in settings.toml). Send another message to continue.")
 
 
 def usd(x: float) -> str:
@@ -681,6 +934,8 @@ def chat(p: core.Project) -> Chat:
     with LOCK:
         if p.slug not in CHATS:
             CHATS[p.slug] = Chat(LOOP, p)
+            if core.plan_active(core.load_plan(p)):  # e.g. after a dashboard restart
+                CHATS[p.slug].watch_plan()
         return CHATS[p.slug]
 
 
@@ -838,11 +1093,16 @@ def project_state(p: core.Project) -> dict:
     s = core.settings()
     mode = core.chat_mode(p)
     cs = core.chat_settings(mode)
+    try:
+        plan = core.plan_view(p)
+    except (ValueError, KeyError) as e:  # a hand-edited plan.json
+        plan = {"status": "broken", "summary": f"plan.json can't be read: {e}", "tasks": [], "estimate": [0, 0]}
     return {"project": {"slug": p.slug, "name": p.name, "repo": str(p.repo), "base": p.cfg["repo"]["base"], "account": p.account.get("name"),
                         "gates": p.cfg.get("gates", {}).get("quick", []), "chat_mode": mode,
                         "chat_model": cs["model"] + (f" ({cs['effort']})" if cs.get("effort") else ""),
                         "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
             "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
+            "plan": plan, "chat_seq": chat(p).seq,
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
@@ -1195,6 +1455,13 @@ class Handler(BaseHTTPRequestHandler):
                     core.set_chat_mode(p, mode)
                     chat(p).reset(keep_history=True)
                     return self.json({"ok": True, "mode": mode})
+                if act == "plan" and len(parts) == 5:
+                    c = chat(p)
+                    actions = {"approve": c.approve_plan, "cancel": c.cancel_plan, "start": lambda: {"ok": True, "note": c.start_plan()},
+                               "stop": c.stop_plan, "close": c.close_plan}
+                    if parts[4] not in actions:
+                        return self.json({"error": "unknown plan action"}, 400)
+                    return self.json(actions[parts[4]]())
                 if act == "pending" and len(parts) == 5:
                     prefix = str(d.get("prefix") or "").strip() or None
                     if not chat(p).approvals.resolve(parts[4], str(d.get("action", "")), prefix):
@@ -1252,7 +1519,7 @@ def window_settings(save: dict | None = None) -> dict:
         return cur
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(new, encoding="utf-8", newline="")
-    tmp.replace(path)
+    core.replace_file(tmp, path)
     return core.settings().get("window", {})
 
 
