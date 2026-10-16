@@ -136,7 +136,12 @@ function closeDlg(id) { $(id).close(); }
 function note(t) { if (chatFor) addMsg("assistant", "⚠ " + t); else alert(t); }
 
 async function addProject() {
-  const r = await api("/api/projects", {name: $("pName").value, repo: $("pRepo").value, base: $("pBase").value, preset: $("pPreset").value, account: $("pAccount").value});
+  const body = {name: $("pName").value, repo: $("pRepo").value, base: $("pBase").value, preset: $("pPreset").value, account: $("pAccount").value};
+  let r = await api("/api/projects", body);
+  if (r.needs_local_git) {
+    if (!confirm(r.message + ".\n\nSet up local version tracking (stays on this computer)?\nNothing is pushed and no remote is added.")) return;
+    r = await api("/api/projects", {...body, local_git: true});
+  }
   if (r.error) return note(r.error);
   closeDlg("dProject"); cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
 }

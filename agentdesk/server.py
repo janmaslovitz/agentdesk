@@ -362,8 +362,12 @@ class Handler(BaseHTTPRequestHandler):
         d = self.body()
         try:
             if parts == ["api", "projects"]:
-                p = core.add_project(str(d.get("name", "")).strip(), str(d.get("repo", "")).strip(), str(d.get("base", "")).strip() or "main",
-                                     str(d.get("preset", "none")), str(d.get("account", "default")))
+                try:
+                    p = core.add_project(str(d.get("name", "")).strip(), str(d.get("repo", "")).strip(), str(d.get("base", "")).strip() or "main",
+                                         str(d.get("preset", "none")), str(d.get("account", "default")),
+                                         local_git=d.get("local_git") is True)
+                except core.NeedsLocalGit as e:
+                    return self.json({"needs_local_git": True, "reason": e.reason, "message": str(e)})
                 return self.json({"ok": True, "slug": p.slug})
             if parts == ["api", "accounts"]:
                 err = add_account(str(d.get("name", "")).strip(), str(d.get("kind", "subscription")), str(d.get("value", "")).strip())

@@ -43,6 +43,13 @@ from, a checks preset (Rust, Node, Python, Go, none) and the account. The checks
 attempt; edit them in `data/projects/<project>/project.toml` (`[gates] quick` after each attempt,
 `final` on demand; `[gates.env]` environment for them).
 
+A plain folder works too. If it isn't a git repo (or is one with no commits), AgentDesk offers
+"Set up local version tracking" (CLI: `add-project ... --local-git`). If accepted it runs `git init`,
+writes a `.gitignore` only if there is none, and makes one commit, "AgentDesk: starting point"; the
+current branch becomes the base. This is local only: nothing is pushed and no remote is added. If git
+has no name/email, `AgentDesk <agentdesk@localhost>` is set for that repo only. Existing repos with
+commits are never changed.
+
 ## How work flows
 
 1. You add tasks: **+ Task**, or describe the work to the project's assistant in the chat (it
