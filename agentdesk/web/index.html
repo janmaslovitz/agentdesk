@@ -132,9 +132,11 @@ code { font: 12px var(--mono); }
 
 <dialog id="dImport"><h3>Import project</h3>
   <label>From a .zip file</label><input type="file" id="iFile" accept=".zip">
-  <label>Or from a repo / folder on this computer (<code>.agentdesk/</code> or a config repo)</label><input id="iSource" placeholder="C:\path	oepo">
+  <label>Or from a repo / folder on this computer (<code>.agentdesk/</code> or a config repo)</label><input id="iSource" placeholder="C:\path	o
+epo">
   <label>Or clone a repo from a URL</label><input id="iUrl" placeholder="https://… or path of a bare repo">
-  <label>This project's repository folder on this computer</label><input id="iRepo" placeholder="C:\path	oepo">
+  <label>This project's repository folder on this computer</label><input id="iRepo" placeholder="C:\path	o
+epo">
   <label>…or clone the code from a URL into that folder (new or empty)</label><input id="iRepoUrl" placeholder="https://…">
   <label>Account</label><select id="iAccount"></select>
   <label>Project name (empty: the exported name)</label><input id="iName">
@@ -299,7 +301,7 @@ function shell() {
   </div>
   <div class="grid">
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
-      <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
+      <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody><tbody id="doneHead"></tbody><tbody id="doneTasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 0"></div>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
     <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button></span>
@@ -422,14 +424,19 @@ async function refresh() {
   }
   $("tiers").textContent = Object.entries(st.tiers).map(([k,v]) => `${k}: ${v.model}${v.effort?" ("+v.effort+")":""}`).join(" · ");
   $("tierAvg").textContent = Object.entries(st.tier_avg||{}).map(([k,v]) => `${k} tasks average ${v.avg_pct}% (${v.tasks})`).join(" · ") || "no per-tier usage averages yet";
-  $("tasks").innerHTML = st.tasks.map(t => {
+  const taskRow = t => {
     const models = [...new Set(t.runs.filter(x => x.tier !== "router").map(x => x.model))].join(" → ");
     return `<tr class="task${t.id===selTask?" sel":""}" onclick="pickTask('${esc(t.id)}')"><td class="num">${esc(t.id)}</td>
       <td>${esc(t.title)}${t.depends.length?`<div class="muted">after ${esc(t.depends.join(", "))}</div>`:""}</td>
       <td><span class="st ${esc(t.status)}">${esc(t.status)}</span></td><td>${esc(t.tier||"auto")}${models?`<div class="muted">${esc(models)}</div>`:""}</td>
       <td class="num">${fmt(sumTok(t.tokens))}</td><td class="num">${money(t.cost)}<div class="muted">${t.runs.length?usedText(t.used_pct):""}</div></td>
       <td><button onclick="event.stopPropagation();runMode('task','${esc(t.id)}')" ${t.status==="done"||r.running?"disabled":""}>Run</button></td></tr>`;
-  }).join("") || `<tr><td colspan="7" class="muted">No tasks yet: press "+ Task" or describe the work in the chat.</td></tr>`;
+  };
+  const activeT = st.tasks.filter(t => t.status !== "done"), doneT = st.tasks.filter(t => t.status === "done");
+  const doneOpen = localStorage.getItem("doneOpen") === "1";
+  $("tasks").innerHTML = activeT.map(taskRow).join("") || `<tr><td colspan="7" class="muted">${doneT.length ? "No open tasks." : 'No tasks yet: press "+ Task" or describe the work in the chat.'}</td></tr>`;
+  $("doneHead").innerHTML = doneT.length ? `<tr style="cursor:pointer" onclick="toggleDone()"><td colspan="7" class="muted"><b>${doneOpen?"▾":"▸"} Done (${doneT.length})</b></td></tr>` : "";
+  $("doneTasks").innerHTML = doneOpen ? doneT.map(taskRow).join("") : "";
   const box = $("log").parentElement, atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   $("log").textContent = st.log.join("\n") + (st.errors.length ? "\n\n— process output —\n" + st.errors.join("\n") : "");
   if (atEnd) box.scrollTop = box.scrollHeight;
@@ -461,6 +468,7 @@ async function showDetail(fetchText) {
     <div style="margin-top:8px"><button onclick="runMode('plan','${esc(t.id)}')">Preview plan</button> ${t.status==="done"?`<button onclick="runMode('final','${esc(t.id)}')">Run final checks</button>`:""}</div>`;
 }
 
+function toggleDone() { localStorage.setItem("doneOpen", localStorage.getItem("doneOpen") === "1" ? "0" : "1"); if (typeof refresh === "function") refresh(); }
 async function run(mode) { runMode(mode); }
 async function runMode(mode, id) { const r = await api(`/api/p/${cur}/run`, {mode, id}); if (r.error) note(r.error); refresh(); }
 async function stop() { const r = await api(`/api/p/${cur}/stop`, {}); if (r.error) note(r.error); refresh(); }
