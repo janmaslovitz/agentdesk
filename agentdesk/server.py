@@ -241,7 +241,7 @@ class Chat:
     def __init__(self, loop: asyncio.AbstractEventLoop, p: core.Project):
         self.loop, self.p = loop, p
         self.client: ClaudeSDKClient | None = None
-        self.history: list[dict] = []
+        self.history: list[dict] = self.load_history()
         self.lock = threading.Lock()
         self.approvals = Approvals(loop)
         self.busy = False
@@ -250,6 +250,22 @@ class Chat:
         self.session_id: str | None = None  # the CLI session; coworker messages resume it in a new process
         self.session_cost = 0.0  # the session's running total_cost_usd (the CLI reports totals, not per message)
         self.generation = 0  # bumped by reset, so an answer still coming in doesn't revive the old session
+
+    # -- the visible transcript, kept in chat.json so it survives a restart (the SDK session does not)
+
+    def load_history(self) -> list[dict]:
+        """The saved transcript, or [] when the file is missing, unreadable or not a list."""
+        try:
+            data = json.loads(self.p.path("chat.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # ValueError covers bad JSON and bad UTF-8
+            return []
+        return data if isinstance(data, list) else []
+
+    def save_history(self) -> None:
+        f = self.p.path("chat.json")
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.history, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(f)
 
     # -- permissions: everything the chat may do without the user, and the approval cards for the rest
 
@@ -484,6 +500,7 @@ class Chat:
     def ask(self, text: str) -> dict:
         with self.lock:
             self.history.append({"role": "user", "text": text})
+            self.save_history()
             self.busy = True
             fut = asyncio.run_coroutine_threadsafe(self._ask(text), self.loop)
             try:
@@ -496,6 +513,7 @@ class Chat:
             finally:
                 self.busy = False
             self.history.append({"role": "assistant", **out})
+            self.save_history()
             return out
 
     def reset(self, keep_history: bool = False) -> None:
@@ -512,6 +530,7 @@ class Chat:
             self.mode, self.session_id, self.session_cost = "", None, 0.0
             if not keep_history:
                 self.history = []
+                self.p.path("chat.json").unlink(missing_ok=True)
 
     def info(self) -> dict:
         mode = core.chat_mode(self.p)

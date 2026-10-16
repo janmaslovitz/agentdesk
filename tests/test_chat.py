@@ -309,3 +309,54 @@ def test_http_pending_and_mode(project, http):
     assert info["mode"] == "coworker" and info["history"] == [{"role": "user", "text": "hello"}]
     assert get(base + "/state")["project"]["chat_mode"] == "coworker"
     assert "error" in post(base + "/chat/mode", {"mode": "boss"})
+
+
+# ----------------------------------------------------------------------------- transcript on disk
+
+def test_transcript_survives_restart(project, monkeypatch):
+    c = server.Chat(server.LOOP, project)
+    answer = {"text": "Ünïcode ✓", "tools": [{"name": "Read", "input": "a.md", "output": "", "error": False}], "cost": 0.01}
+
+    async def fake_ask(text):
+        return answer
+
+    monkeypatch.setattr(c, "_ask", fake_ask)
+    assert c.ask("hello") == answer
+    saved = json.loads(project.path("chat.json").read_text(encoding="utf-8"))
+    assert saved == [{"role": "user", "text": "hello"}, {"role": "assistant", **answer}]
+    assert "Ünïcode ✓" in project.path("chat.json").read_text(encoding="utf-8")  # ensure_ascii=False
+
+    # a new Chat for the same project (as after a restart) shows the same transcript
+    again = server.Chat(server.LOOP, project)
+    assert again.history == saved
+    assert server.Chat(server.LOOP, project).history == saved
+
+
+def test_reset_clears_transcript_file(project):
+    c = server.Chat(server.LOOP, project)
+    c.history.append({"role": "user", "text": "hello"})
+    c.save_history()
+    c.reset()
+    assert c.history == []
+    assert not project.path("chat.json").exists()
+    assert server.Chat(server.LOOP, project).history == []
+
+
+def test_mode_switch_keeps_transcript_file(project):
+    c = server.Chat(server.LOOP, project)
+    c.history.append({"role": "user", "text": "hello"})
+    c.save_history()
+    c.reset(keep_history=True)
+    assert c.history == [{"role": "user", "text": "hello"}]
+    assert server.Chat(server.LOOP, project).history == [{"role": "user", "text": "hello"}]
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"", b'{"role": "user"}', b'"just text"', b"\xff\xfe bad utf-8"])
+def test_bad_transcript_file_gives_empty_history(project, content):
+    project.path("chat.json").write_bytes(content)
+    assert server.Chat(server.LOOP, project).history == []
+
+
+def test_missing_transcript_file_gives_empty_history(project):
+    assert not project.path("chat.json").exists()
+    assert server.Chat(server.LOOP, project).history == []
