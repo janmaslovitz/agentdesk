@@ -23,6 +23,7 @@ def project(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start"], cwd=repo, check=True)
     core.settings()
     name = f"scratch-{tmp_path.name}"
     p = core.add_project(name, str(repo), "main")
