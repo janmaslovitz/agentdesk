@@ -5,4 +5,4 @@ Set-Location $PSScriptRoot
 if (Get-Command py -ErrorAction SilentlyContinue) { py -3 -m venv .venv } else { python -m venv .venv }
 & .\.venv\Scripts\python.exe -m pip install --upgrade pip --quiet
 & .\.venv\Scripts\python.exe -m pip install -r requirements.txt --quiet
-Write-Host "AgentDesk is ready. Start it with AgentDesk.cmd (or: .venv\Scripts\python -m agentdesk)."
+Write-Host "AgentDesk is ready. Start it with AgentDesk.cmd (hidden, no console); stop it with AgentDesk.cmd stop."

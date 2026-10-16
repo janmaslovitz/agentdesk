@@ -13,8 +13,14 @@ Needs **Python 3.11+** and **git**. Copy this folder anywhere, then:
 
 The Claude command-line tool comes bundled with the SDK; nothing else to install.
 
-**Start:** double-click `AgentDesk.cmd` (Windows) or run `./agentdesk.sh`. The dashboard opens at
-http://127.0.0.1:8765, reachable from this computer only.
+**Start:** double-click `AgentDesk.cmd` (Windows) or run `./agentdesk.sh`. The dashboard starts in the
+background with no console window and keeps running after the launching window is closed; it opens at
+http://127.0.0.1:8765, reachable from this computer only. Starting it again just opens the browser on the
+running dashboard. Runs started from the dashboard are detached too, so they keep going if the dashboard
+is closed. Output goes to `runner.log` (runs) and `data/agentdesk.log` (dashboard when started in the background).
+
+**Stop:** `AgentDesk.cmd stop` (or `./agentdesk.sh stop`, `python -m agentdesk stop`) ends the dashboard
+(PID in `data/dashboard.pid`). Add `--runs` to also stop runs started from the dashboard.
 
 ## Moving to another computer
 

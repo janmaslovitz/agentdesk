@@ -1,6 +1,7 @@
 """AgentDesk command line.
 
     python -m agentdesk                          open the dashboard (default)
+    python -m agentdesk stop [--runs]            end the dashboard (--runs: also stop runs it started)
     python -m agentdesk projects                 list projects
     python -m agentdesk add-project NAME REPO BASE [--preset rust|node|python|go|none] [--account A]
     python -m agentdesk status PROJECT
@@ -13,8 +14,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import signal
 import shutil
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -29,6 +33,40 @@ def cmd_status(p: core.Project) -> None:
         cost = sum((r.get("cost_usd") or 0) for r in e.get("runs", []))
         print(f"{t.id:<8} {e.get('status', 'pending'):<9} {e.get('tier', t.tier or '-'):<11} {cost:7.3f}$  {t.title}")
     print(f"project total {state.get('spent_usd', 0):.3f} USD")
+
+
+def kill(pid: int, tree: bool = False) -> bool:
+    if sys.platform == "win32":
+        cmd = ["taskkill", "/PID", str(pid), "/F"] + (["/T"] if tree else [])
+        return subprocess.run(cmd, capture_output=True).returncode == 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except OSError:
+        return False
+
+
+def cmd_stop(runs: bool) -> None:
+    pf = core.DATA / "dashboard.pid"
+    if pf.exists():
+        try:
+            ok = kill(int(pf.read_text().strip()))
+        except ValueError:
+            ok = False
+        pf.unlink(missing_ok=True)
+        print("dashboard stopped" if ok else "dashboard was not running (stale pid file removed)")
+    else:
+        print("dashboard is not running")
+    if runs:
+        for p in core.projects():
+            rf = p.path("runner.pid")
+            if rf.exists():
+                try:
+                    if kill(int(rf.read_text().strip()), tree=True):
+                        print(f"stopped run of {p.slug}")
+                except ValueError:
+                    pass
+                rf.unlink(missing_ok=True)
 
 
 def cmd_import(name: str, old: Path) -> None:
@@ -56,10 +94,12 @@ def cmd_import(name: str, old: Path) -> None:
 
 
 def main() -> None:
-    sys.stdout.reconfigure(encoding="utf-8")
+    if sys.stdout is not None:  # None under pythonw
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="agentdesk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
     d = sub.add_parser("dashboard"); d.add_argument("--port", type=int, default=8765); d.add_argument("--no-browser", action="store_true")
+    st = sub.add_parser("stop"); st.add_argument("--runs", action="store_true", help="also stop runs started from the dashboard")
     sub.add_parser("projects")
     a = sub.add_parser("add-project"); a.add_argument("name"); a.add_argument("repo"); a.add_argument("base")
     a.add_argument("--preset", default="none", choices=list(core.PRESETS)); a.add_argument("--account", default="default")
@@ -72,6 +112,8 @@ def main() -> None:
     if args.cmd in (None, "dashboard"):
         from . import server
         server.main(port=getattr(args, "port", 8765), browser=not getattr(args, "no_browser", False))
+    elif args.cmd == "stop":
+        cmd_stop(args.runs)
     elif args.cmd == "projects":
         for p in core.projects():
             print(f"{p.slug:<20} {p.cfg['repo']['path']}  (base {p.cfg['repo']['base']}, account {p.account.get('name')})")
