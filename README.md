@@ -59,6 +59,40 @@ Limits: a budget per call and per run, and a pause at the account's usage thresh
 (`data/settings.toml`, `[limits]`). Workers can't push, change remotes, publish or edit outside
 their worktree (`[guard]`).
 
+## The chat: Assistant and Coworker modes
+
+Each project has a chat with a mode switch in its header, saved in the project's `project.toml`
+as `chat_mode = "assistant"` or `"coworker"` (default assistant). Switching starts a new chat
+session and keeps the messages on screen.
+
+- **Assistant** (safe, cheap; model from `[chat.assistant] model` in `data/settings.toml`, default
+  `haiku`). It reads the project's files, state, reports, logs and the repository without asking.
+  It never edits your code: it may only write task files (`tasks/*.md`) and add to `notes.md`. It
+  hands work to the workers with its own tools: `add_task` and `queue_status` (no approval) and
+  `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`, which each show an approval card first.
+- **Coworker** (autonomous) is planned for a later version; until then choosing it is saved but the
+  chat behaves as the Assistant.
+
+**Approvals.** When the chat wants to run a shell command (Bash/PowerShell) or start/stop a run, a
+card appears under the messages: **Allow once**, **Always allow** or **Deny**. Nothing runs before
+you answer; no answer within 10 minutes counts as Deny.
+
+**Allow-list.** **Always allow** (shell commands only) saves a command prefix — prefilled as the
+command and its subcommand, editable before you press it — in the project's `project.toml`:
+
+```toml
+[chat]
+allowed_commands = ["git status", "git log", "cargo test -p"]
+```
+
+A command then runs without a card if it equals an entry or starts with it followed by a space
+(`git log --oneline -5` matches `git log`; `git logs` doesn't). Only single plain commands qualify:
+anything with `; & | > < ( ) { } $` or a backtick or newline always asks, and so does anything the
+`[guard] deny` list in `settings.toml` matches. Edit or empty the list in `project.toml` at any time.
+
+Every tool call shows in the chat (command or arguments, with its output folded under it), and
+each answer shows its cost and tokens; the chat's totals are in the **Chat** card.
+
 ## Command line
 
 ```

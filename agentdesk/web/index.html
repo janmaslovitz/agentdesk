@@ -61,6 +61,23 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .msg { padding: 8px 11px; border-radius: 10px; max-width: 92%; white-space: pre-wrap; }
 .msg.user { align-self: flex-end; background: var(--accent); color: #fff; } .msg.assistant { align-self: flex-start; background: var(--chip); }
 .msg .tools { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.msg .call { margin-top: 4px; font-size: 12px; white-space: normal; }
+.msg .call summary { cursor: pointer; color: var(--muted); font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg .call summary b { color: var(--text); font-weight: 600; } .msg .call.err summary b { color: var(--bad); }
+.msg .call pre { max-height: 220px; overflow: auto; background: var(--bg); border-radius: 6px; padding: 6px 8px; }
+.msg .cost { font-size: 11px; color: var(--muted); margin-top: 6px; white-space: normal; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 3px 10px; font-size: 12px; }
+.seg button.on { background: var(--accent); color: #fff; }
+.modenote { font-size: 12px; color: var(--warn); padding: 6px 14px; border-bottom: 1px solid var(--line); }
+#pending:empty { display: none; }
+#pending { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
+.approve { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
+.approve .h { font-weight: 600; } .approve .h span { font-weight: 400; color: var(--muted); font-size: 12px; }
+.approve pre { background: var(--bg); border-radius: 6px; padding: 6px 8px; }
+.approve .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.approve .always { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
+.approve input { font: 12px var(--mono); padding: 4px 6px; width: 120px; }
 .compose { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 textarea, input, select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
 .compose textarea { flex: 1; resize: none; height: 54px; }
@@ -188,8 +205,11 @@ function shell() {
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
-    <section><h3>Assistant <span class="muted">ask about progress, or describe work to queue</span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
+    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Autonomous mode (coming in a later version)">Coworker</button></span>
+        <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
+      <div class="modenote" id="modeNote" hidden>Coworker mode isn't available yet: the chat behaves as the Assistant (asks before running anything).</div>
       <div class="msgs" id="msgs"></div>
+      <div id="pending"></div>
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
@@ -201,7 +221,12 @@ async function refresh() {
   if (!$("tasks")) shell();
   try { st = await api(`/api/p/${cur}/state`); } catch { return; }
   if (st.error) return;
-  if (chatFor !== cur) { chatFor = cur; $("msgs").innerHTML = ""; const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m.tools); }
+  if (chatFor !== cur) {
+    chatFor = cur; pendingKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
+    const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
+    $("chatModel").textContent = h.model || "";
+  }
+  showMode(st.project.chat_mode);
   const p = st.project, r = st.runner;
   $("pTitle").textContent = p.name;
   $("pMeta").textContent = `${p.repo} · base ${p.base} · account ${p.account}`;
@@ -254,23 +279,71 @@ async function run(mode) { runMode(mode); }
 async function runMode(mode, id) { const r = await api(`/api/p/${cur}/run`, {mode, id}); if (r.error) note(r.error); refresh(); }
 async function stop() { const r = await api(`/api/p/${cur}/stop`, {}); if (r.error) note(r.error); refresh(); }
 
-function addMsg(role, text, tools) {
+// A chat message; `meta` (assistant replies) has the tool calls, cost and tokens of that answer.
+function addMsg(role, text, meta) {
   const div = document.createElement("div"); div.className = "msg " + role; div.innerHTML = md(text);
-  if (tools && tools.length) { const t = document.createElement("div"); t.className = "tools"; t.textContent = "used: " + tools.join(", "); div.appendChild(t); }
+  for (const c of meta?.tools || []) {
+    const d = document.createElement("details");
+    if (typeof c === "string") { d.className = "call"; d.innerHTML = `<summary><b>${esc(c)}</b></summary>`; div.appendChild(d); continue; }
+    d.className = "call" + (c.error ? " err" : "");
+    d.innerHTML = `<summary><b>${esc(c.name)}</b> ${esc(c.input)}</summary>` +
+      (c.input && c.input.length > 60 ? `<pre>${esc(c.input)}</pre>` : "") + `<pre>${esc(c.output || "(no output)")}</pre>`;
+    div.appendChild(d);
+  }
+  if (role === "assistant" && meta && meta.cost !== undefined) {
+    const t = meta.tokens || {}, c = document.createElement("div"); c.className = "cost";
+    c.textContent = `${money(meta.cost)} · ${fmt(sumTok(t))} tokens (in ${fmt(t.input)}, out ${fmt(t.output)}, cache ${fmt((t.cache_read||0)+(t.cache_write||0))})` + (meta.model ? ` · ${meta.model}` : "");
+    div.appendChild(c);
+  }
   $("msgs").appendChild(div); $("msgs").scrollTop = $("msgs").scrollHeight; return div;
 }
 async function send() {
   const text = $("input").value.trim(); if (!text || !cur) return;
   $("input").value = ""; $("sendb").disabled = true; addMsg("user", text);
-  const wait = addMsg("assistant", "…");
-  try { const r = await api(`/api/p/${cur}/chat`, {text}); wait.remove(); addMsg("assistant", r.text || r.error, r.tools); }
+  const wait = addMsg("assistant", "…"), forProject = cur;
+  try { const r = await api(`/api/p/${cur}/chat`, {text}); wait.remove(); if (forProject === cur) addMsg("assistant", r.text || r.error, r); }
   catch (e) { wait.textContent = "Error: " + e; }
   $("sendb").disabled = false; refreshAll();
 }
 async function resetChat() { await api(`/api/p/${cur}/chat/reset`, {}); $("msgs").innerHTML = ""; }
 
+function showMode(mode) {
+  for (const b of $("modeSeg").children) b.classList.toggle("on", b.dataset.mode === mode);
+  $("modeNote").hidden = mode !== "coworker";
+}
+async function setMode(mode) {
+  const r = await api(`/api/p/${cur}/chat/mode`, {mode});
+  if (r.error) return note(r.error);
+  showMode(r.mode); addMsg("assistant", `Switched to ${r.mode === "coworker" ? "Coworker" : "Assistant"} mode; a new session starts with your next message.`);
+}
+
+// Approval cards: tool calls waiting for the user. Re-rendered only when the set changes (keeps typing in the prefix box).
+let pendingKey = "";
+async function pollPending() {
+  if (!cur || !$("pending")) return;
+  let r; try { r = await api(`/api/p/${cur}/pending`); } catch { return; }
+  const items = r.pending || [], key = items.map(x => x.id).join(",");
+  if (key === pendingKey) return;
+  pendingKey = key;
+  $("pending").innerHTML = items.map(x => {
+    const shell = x.tool === "Bash" || x.tool === "PowerShell";
+    return `<div class="approve" id="ap-${esc(x.id)}"><div class="h">${shell ? "Run a command?" : "Allow this action?"} <span>${esc(x.tool)}${x.reason ? " — " + esc(x.reason) : ""}</span></div>
+      <pre>${esc(x.detail)}</pre>
+      <div class="row"><button class="primary" onclick="answer('${esc(x.id)}','allow_once')">Allow once</button>
+      <button class="danger" onclick="answer('${esc(x.id)}','deny')">Deny</button>
+      ${x.prefix ? `<span class="always"><button onclick="answer('${esc(x.id)}','always_allow')">Always allow</button><input id="pre-${esc(x.id)}" value="${esc(x.prefix)}" title="Commands starting with this run without asking from now on (this project)"></span>` : ""}</div></div>`;
+  }).join("");
+  if (items.length) $("pending").scrollIntoView({block: "nearest"});
+}
+async function answer(id, action) {
+  const pre = $("pre-" + id), r = await api(`/api/p/${cur}/pending/${encodeURIComponent(id)}`, {action, prefix: pre ? pre.value : ""});
+  if (r.error) note(r.error);
+  pendingKey = ""; pollPending(); setTimeout(refresh, 800);
+}
+
 refreshAll();
 setInterval(refresh, 2500);
+setInterval(pollPending, 1500);
 setInterval(refreshAll, 10000);
 </script>
 </body>

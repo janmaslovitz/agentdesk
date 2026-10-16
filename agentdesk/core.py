@@ -78,7 +78,7 @@ effort = "high"
 max_turns = 120
 budget_usd = 12.0
 
-[chat]
+[chat.assistant]
 model = "haiku"
 
 [guard]
@@ -195,6 +195,119 @@ def project(slug_: str) -> Project:
 
 def toml_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
+
+
+# ----------------------------------------------------------------------------- chat settings (project.toml / settings.toml)
+
+CHAT_MODES = ("assistant", "coworker")
+CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet"}
+# Auto-approving a command by prefix is only safe for a single plain command: anything that could
+# chain, pipe, redirect or evaluate a second command (also PowerShell's (...), $(...), {...}) asks.
+SHELL_META = re.compile(r"[;&|`<>(){}$\n\r]")
+
+
+def chat_settings(mode: str) -> dict:
+    """`[chat.<mode>]` from settings.toml, with the model defaulting to `[chat] model`, then haiku/sonnet."""
+    chat = settings().get("chat", {})
+    out = dict(chat.get(mode, {}))
+    legacy = chat.get("model") if mode == "assistant" else None  # older settings.toml: [chat] model
+    out["model"] = out.get("model") or legacy or CHAT_DEFAULT_MODELS.get(mode, "haiku")
+    return out
+
+
+def _project_text(p: Project) -> str:
+    return p.path("project.toml").read_text(encoding="utf-8")
+
+
+def _project_cfg(p: Project) -> dict:
+    return tomllib.loads(_project_text(p))
+
+
+def _write_project(p: Project, text: str) -> None:
+    p.cfg = tomllib.loads(text)  # refuses to write a file it can't read back
+    tmp = p.path("project.toml.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(p.path("project.toml"))
+
+
+def chat_mode(p: Project) -> str:
+    m = _project_cfg(p).get("chat_mode", "assistant")
+    return m if m in CHAT_MODES else "assistant"
+
+
+def set_chat_mode(p: Project, mode: str) -> None:
+    if mode not in CHAT_MODES:
+        raise ValueError(f"chat mode is one of {', '.join(CHAT_MODES)}")
+    text = _project_text(p)
+    line = f"chat_mode = {toml_str(mode)}"
+    first_table = re.search(r"(?m)^\[", text)
+    head, rest = (text[:first_table.start()], text[first_table.start():]) if first_table else (text, "")
+    if re.search(r"(?m)^chat_mode\s*=.*$", head):
+        head = re.sub(r"(?m)^chat_mode\s*=.*$", lambda _m: line, head, count=1)
+    else:
+        head = line + "\n" + head
+    _write_project(p, head + rest)
+
+
+def allowed_commands(p: Project) -> list[str]:
+    return [str(x) for x in _project_cfg(p).get("chat", {}).get("allowed_commands", [])]
+
+
+def allow_command(p: Project, prefix: str) -> None:
+    """Add a command prefix to `[chat] allowed_commands` in project.toml."""
+    prefix = prefix.strip()
+    if not prefix or SHELL_META.search(prefix):
+        raise ValueError("an allowed command is a plain command prefix, e.g. `git status`")
+    cmds = allowed_commands(p)
+    if prefix in cmds:
+        return
+    cmds.append(prefix)
+    line = "allowed_commands = [" + ", ".join(toml_str(c) for c in cmds) + "]"
+    text = _project_text(p)
+    m = re.search(r"(?m)^\[chat\][ \t]*$", text)
+    if m:
+        start = m.end()
+        nxt = re.search(r"(?m)^\[", text[start:])
+        end = start + nxt.start() if nxt else len(text)
+        body = text[start:end]
+        if re.search(r"(?m)^allowed_commands\s*=.*$", body):
+            body = re.sub(r"(?m)^allowed_commands\s*=.*$", lambda _m: line, body, count=1)
+        else:
+            body = "\n" + line + body
+        text = text[:start] + body + text[end:]
+    else:
+        text = text.rstrip("\n") + "\n\n[chat]\n" + line + "\n"
+    if tomllib.loads(text).get("chat", {}).get("allowed_commands") != cmds:
+        raise ValueError("couldn't update [chat] allowed_commands in project.toml; edit it by hand")
+    _write_project(p, text)
+
+
+def command_allowed(cmd: str, prefixes: list[str]) -> bool:
+    """True if `cmd` is one plain command starting with an allowed prefix (whole words)."""
+    c = cmd.strip()
+    if not c or SHELL_META.search(c):
+        return False
+    return any(pre.strip() and (c == pre.strip() or c.startswith(pre.strip() + " ")) for pre in prefixes)
+
+
+def suggest_prefix(cmd: str) -> str | None:
+    """A prefix for "Always allow": the command and its subcommand, e.g. `git log` for `git log -5`."""
+    c = cmd.strip()
+    if not c or SHELL_META.search(c):
+        return None
+    words = []
+    for w in c.split():
+        if words and (w.startswith("-") or re.search(r"[/\\.:\"'=*]", w)):
+            break
+        words.append(w)
+        if len(words) == 2:
+            break
+    return " ".join(words) or None
+
+
+def guard_denied(cmd: str) -> str | None:
+    """The `[guard] deny` pattern a command matches, if any."""
+    return next((x for x in settings().get("guard", {}).get("deny", []) if re.search(x, cmd, re.I)), None)
 
 
 def add_project(name: str, repo: str, base: str, preset: str = "none", account_name: str = "default",
