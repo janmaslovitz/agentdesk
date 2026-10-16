@@ -309,3 +309,183 @@ def test_http_pending_and_mode(project, http):
     assert info["mode"] == "coworker" and info["history"] == [{"role": "user", "text": "hello"}]
     assert get(base + "/state")["project"]["chat_mode"] == "coworker"
     assert "error" in post(base + "/chat/mode", {"mode": "boss"})
+
+
+# ----------------------------------------------------------------------------- transcript on disk
+
+def test_transcript_survives_restart(project, monkeypatch):
+    c = server.Chat(server.LOOP, project)
+    answer = {"text": "Ünïcode ✓", "tools": [{"name": "Read", "input": "a.md", "output": "", "error": False}], "cost": 0.01}
+
+    async def fake_ask(text):
+        return answer
+
+    monkeypatch.setattr(c, "_ask", fake_ask)
+    assert c.ask("hello") == answer
+    saved = json.loads(project.path("chat.json").read_text(encoding="utf-8"))
+    assert saved == [{"role": "user", "text": "hello"}, {"role": "assistant", **answer}]
+    assert "Ünïcode ✓" in project.path("chat.json").read_text(encoding="utf-8")  # ensure_ascii=False
+
+    # a new Chat for the same project (as after a restart) shows the same transcript
+    again = server.Chat(server.LOOP, project)
+    assert again.history == saved
+    assert server.Chat(server.LOOP, project).history == saved
+
+
+def test_reset_clears_transcript_file(project):
+    c = server.Chat(server.LOOP, project)
+    c.history.append({"role": "user", "text": "hello"})
+    c.save_history()
+    c.reset()
+    assert c.history == []
+    assert not project.path("chat.json").exists()
+    assert server.Chat(server.LOOP, project).history == []
+
+
+def test_mode_switch_keeps_transcript_file(project):
+    c = server.Chat(server.LOOP, project)
+    c.history.append({"role": "user", "text": "hello"})
+    c.save_history()
+    c.reset(keep_history=True)
+    assert c.history == [{"role": "user", "text": "hello"}]
+    assert server.Chat(server.LOOP, project).history == [{"role": "user", "text": "hello"}]
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"", b'{"role": "user"}', b'"just text"', b"\xff\xfe bad utf-8"])
+def test_bad_transcript_file_gives_empty_history(project, content):
+    project.path("chat.json").write_bytes(content)
+    assert server.Chat(server.LOOP, project).history == []
+
+
+def test_missing_transcript_file_gives_empty_history(project):
+    assert not project.path("chat.json").exists()
+    assert server.Chat(server.LOOP, project).history == []
+
+
+# ----------------------------------------------------------------------------- running memory
+
+def memory_text(fact="Uses SQLite"):
+    return "\n".join(f"## {s}\n- {fact if s == 'Decisions' else 'none'}\n" for s in server.MEMORY_SECTIONS)
+
+
+def fake_chat(project, monkeypatch, replies):
+    """A Chat whose model answers "pong" and whose memory call returns the given replies in turn (or raises)."""
+    c = server.Chat(server.LOOP, project)
+    prompts, queue = [], list(replies)
+
+    async def fake_ask(text):
+        return {"text": "pong", "tools": [], "cost": 0.0}
+
+    async def fake_memory(p, model, prompt):
+        prompts.append((model, prompt))
+        r = queue.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(c, "_ask", fake_ask)
+    monkeypatch.setattr(server, "memory_call", fake_memory)
+    return c, prompts
+
+
+def test_memory_injected_into_prompt(chat):
+    assert "earlier conversations" not in chat._assistant_options().system_prompt
+    chat.save_memory(memory_text("Deploy on Fridays"))
+    for opts in (chat._assistant_options(), server.Chat(server.LOOP, chat.p)._assistant_options()):  # also after a restart
+        assert server.MEMORY_HEADING in opts.system_prompt and "Deploy on Fridays" in opts.system_prompt
+    assert not chat.p.path("chat_memory.tmp").exists()
+
+
+def test_memory_written_after_ask(project, monkeypatch):
+    c, prompts = fake_chat(project, monkeypatch, [memory_text("Uses SQLite")])
+    assert c.ask("we use sqlite")["text"] == "pong"
+    assert "Uses SQLite" in project.path("chat_memory.md").read_text(encoding="utf-8")
+    assert "we use sqlite" in prompts[0][1] and "pong" in prompts[0][1]
+    assert "Uses SQLite" not in project.path("chat.json").read_text(encoding="utf-8")  # separate stores
+
+
+def test_memory_update_gets_old_memory_and_retries_once(project, monkeypatch):
+    project.path("chat_memory.md").write_text(memory_text("Old fact"), encoding="utf-8")
+    c, prompts = fake_chat(project, monkeypatch, ["", memory_text("New fact")])
+    c.ask("hi")
+    assert "Old fact" in prompts[0][1] and len(prompts) == 2
+    assert "New fact" in project.path("chat_memory.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("bad", [["", ""], ["just text", "no headings"], ["## Decisions\nonly one", "x"],
+                                 [memory_text("word " * 2000)] * 2, [RuntimeError("boom")]])
+def test_bad_memory_update_keeps_old_memory_and_chat_answers(project, monkeypatch, bad):
+    old = memory_text("Keep me")
+    project.path("chat_memory.md").write_text(old, encoding="utf-8")
+    c, _ = fake_chat(project, monkeypatch, bad)
+    assert c.ask("hi")["text"] == "pong"
+    assert project.path("chat_memory.md").read_text(encoding="utf-8") == old
+    assert [m["role"] for m in c.history] == ["user", "assistant"]
+
+
+def test_failed_ask_does_not_update_memory(project, monkeypatch):
+    c, prompts = fake_chat(project, monkeypatch, [memory_text()])
+
+    async def boom(text):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(c, "_ask", boom)
+    assert c.ask("hi")["text"].startswith("Error")
+    assert prompts == [] and not project.path("chat_memory.md").exists()
+
+
+def test_reset_clears_memory_but_mode_switch_keeps_it(project):
+    c = server.Chat(server.LOOP, project)
+    c.save_memory(memory_text())
+    c.reset(keep_history=True)
+    assert project.path("chat_memory.md").exists()
+    c.reset()
+    assert not project.path("chat_memory.md").exists()
+    assert server.MEMORY_HEADING not in c._assistant_options().system_prompt
+
+# ----------------------------------------------------------------------------- stuck card
+
+def test_answered_card_leaves_the_list_at_once(chat):
+    """The page polls right after answering; the card must already be gone even if the SDK loop is busy."""
+    fut = start(chat.permission("Bash", {"command": "git log"}))
+    [req] = wait_pending(chat)
+    release = threading.Event()
+
+    async def block():
+        release.wait(5)
+
+    blocker = start(block())  # the loop can't run the waiting ask() yet
+    time.sleep(0.05)
+    assert chat.approvals.resolve(req["id"], "deny")
+    assert chat.approvals.pending() == []
+    assert chat.approvals.resolve(req["id"], "deny") is False  # a second click is "not waiting any more"
+    assert not fut.done()
+    release.set()
+    blocker.result(2)
+    assert isinstance(fut.result(2), PermissionResultDeny)
+
+
+def test_reset_clears_cards_at_once(chat):
+    start(chat.permission("Bash", {"command": "dir"}))
+    wait_pending(chat)
+    chat.reset()
+    assert chat.approvals.pending() == []
+
+
+def test_page_rerenders_an_empty_pending_list():
+    """Source check only (the JS isn't run by pytest): after an answer the page must reset pendingKey to a
+    value an empty poll can't equal, otherwise ""=="" returns early and a stale card stays."""
+    html = (server.Path(server.__file__).parent / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'pendingKey = "";' not in html
+    assert "let pendingKey = null;" in html and "pendingKey = null; pollPending()" in html
+
+
+def test_http_answer_leaves_empty_list_and_second_answer_404s(project, http):
+    c = server.chat(project)
+    base = f"{http}/api/p/{project.slug}"
+    fut = start(c.permission("Bash", {"command": "git log -3"}))
+    [req] = wait_pending(c)
+    assert post(f"{base}/pending/{req['id']}", {"action": "deny"}) == {"ok": True}
+    assert get(base + "/pending") == {"pending": []}
+    assert isinstance(fut.result(2), PermissionResultDeny)
+    assert post(f"{base}/pending/{req['id']}", {"action": "deny"})["error"].startswith("that request isn't waiting")
