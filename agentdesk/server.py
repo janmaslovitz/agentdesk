@@ -244,8 +244,8 @@ class Approvals:
     def resolve(self, rid: str, action: str, prefix: str | None = None) -> bool:
         if action not in ACTIONS:
             raise ValueError(f"action is one of {', '.join(ACTIONS)}")
-        with self.lock:
-            entry = self.items.get(rid)
+        with self.lock:  # answered cards leave the list now, not when the SDK loop gets round to ask()
+            entry = self.items.pop(rid, None)
         if entry is None:
             return False
         fut = entry[1]

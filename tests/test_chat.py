@@ -442,3 +442,50 @@ def test_reset_clears_memory_but_mode_switch_keeps_it(project):
     c.reset()
     assert not project.path("chat_memory.md").exists()
     assert server.MEMORY_HEADING not in c._assistant_options().system_prompt
+
+# ----------------------------------------------------------------------------- stuck card
+
+def test_answered_card_leaves_the_list_at_once(chat):
+    """The page polls right after answering; the card must already be gone even if the SDK loop is busy."""
+    fut = start(chat.permission("Bash", {"command": "git log"}))
+    [req] = wait_pending(chat)
+    release = threading.Event()
+
+    async def block():
+        release.wait(5)
+
+    blocker = start(block())  # the loop can't run the waiting ask() yet
+    time.sleep(0.05)
+    assert chat.approvals.resolve(req["id"], "deny")
+    assert chat.approvals.pending() == []
+    assert chat.approvals.resolve(req["id"], "deny") is False  # a second click is "not waiting any more"
+    assert not fut.done()
+    release.set()
+    blocker.result(2)
+    assert isinstance(fut.result(2), PermissionResultDeny)
+
+
+def test_reset_clears_cards_at_once(chat):
+    start(chat.permission("Bash", {"command": "dir"}))
+    wait_pending(chat)
+    chat.reset()
+    assert chat.approvals.pending() == []
+
+
+def test_page_rerenders_an_empty_pending_list():
+    """Source check only (the JS isn't run by pytest): after an answer the page must reset pendingKey to a
+    value an empty poll can't equal, otherwise ""=="" returns early and a stale card stays."""
+    html = (server.Path(server.__file__).parent / "web" / "index.html").read_text(encoding="utf-8")
+    assert 'pendingKey = "";' not in html
+    assert "let pendingKey = null;" in html and "pendingKey = null; pollPending()" in html
+
+
+def test_http_answer_leaves_empty_list_and_second_answer_404s(project, http):
+    c = server.chat(project)
+    base = f"{http}/api/p/{project.slug}"
+    fut = start(c.permission("Bash", {"command": "git log -3"}))
+    [req] = wait_pending(c)
+    assert post(f"{base}/pending/{req['id']}", {"action": "deny"}) == {"ok": True}
+    assert get(base + "/pending") == {"pending": []}
+    assert isinstance(fut.result(2), PermissionResultDeny)
+    assert post(f"{base}/pending/{req['id']}", {"action": "deny"})["error"].startswith("that request isn't waiting")
