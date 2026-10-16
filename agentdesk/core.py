@@ -123,7 +123,6 @@ kind = "subscription"
 config_dir = ""
 
 [limits]
-pause_at_utilization = 0.85
 usage_max_age_min = 30
 run_budget_usd = 40.0
 retries_per_tier = 2
@@ -155,11 +154,14 @@ budget_usd = 12.0
 [chat.assistant]
 model = "haiku"
 
-# Coworker: autonomous chat (no approval cards), guarded like the workers; budget_usd is per message.
+# Coworker: the project's curator, autonomous (no approval cards); budget_usd is per message.
+# full_access = true: works in the project checkout itself (main included) with every tool and command, no guard.
+# full_access = false: guarded like the workers, in its own worktree (branch auto/cowork).
 [chat.coworker]
+full_access = true
 model = "sonnet"
 effort = "medium"
-budget_usd = 2.0
+budget_usd = 5.0
 
 # Auto-runner: the dashboard starts the next ready task of every project by itself (no model calls),
 # recovers runs that died, retries a crashed task retry_crashed times, and flags the rest.
@@ -364,20 +366,6 @@ def set_manual_usage(name: str, percent: float) -> None:
     save_reading(name, percent / 100, "manual")
 
 
-def usage_gate(name: str) -> str | None:
-    """Why no work may start for this account: no fresh reading, or the reading is at the pause threshold."""
-    try:
-        refresh_usage(name)  # real figures when possible; failures fall back to the saved/manual reading
-    except Exception:  # never let the usage lookup break a run
-        pass
-    r = current_reading(name)
-    if r is None or r["age_min"] > usage_max_age_min():
-        return "usage unknown — enter it under Accounts"
-    if r["utilization"] >= float(settings()["limits"]["pause_at_utilization"]):
-        return f"usage limit {r['utilization']:.0%} reached the pause threshold"
-    return None
-
-
 def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
 
@@ -474,7 +462,9 @@ def setup_local_git(repo: str) -> str:
 CHAT_MODES = ("assistant", "coworker")
 CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet"}
 # Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
-CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 2.0, "max_turns": 40}}
+# full_access: the Coworker curates the whole project: it works in the project checkout itself (main included),
+# with every tool and command and no guard. false = the older guarded mode in its own worktree (auto/cowork).
+CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True}}
 COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
 # On top of `[guard] deny`: the Coworker may not touch AgentDesk's own config from the shell (the
 # orchestrator runs project.toml's gate commands unguarded, and settings.toml holds the guard itself).
@@ -1100,8 +1090,6 @@ class Meter:
             self.store.save(self.state)
 
     def stop_reason(self) -> str | None:
-        if why := usage_gate(self.acct):
-            return why
         if self.state.get("spent_usd", 0.0) >= float(self.limits["run_budget_usd"]) + self.state.get("budget_base", 0.0):
             return f"run budget {self.limits['run_budget_usd']} USD spent"
         return None
@@ -1116,30 +1104,6 @@ def record_rate_limit(acct: str, info) -> None:
     if info.utilization is not None:
         usage["reading"] = {"utilization": float(info.utilization), "at": dt.datetime.now().isoformat(timespec="seconds"), "source": "sdk"}
     save_account_usage(acct, usage)
-
-
-def over_pause(utilization: float | None) -> str | None:
-    """Why work pauses at this usage reading (`[limits] pause_at_utilization`), or None."""
-    at = float(settings()["limits"]["pause_at_utilization"])
-    if utilization is not None and float(utilization) >= at:
-        return f"account usage {float(utilization):.0%} reached the pause threshold ({at:.0%})"
-    return None
-
-
-def usage_paused(acct: str, now: float | None = None) -> str | None:
-    """The pause reason from the account's saved readings that still apply (window not reset yet; readings
-    without a reset time count for 5 hours)."""
-    now = dt.datetime.now().timestamp() if now is None else now
-    for kind, r in account_usage(acct).get("rate_limits", {}).items():
-        resets = r.get("resets_at")
-        if resets is None:
-            try:
-                resets = dt.datetime.fromisoformat(str(r.get("seen"))).timestamp() + 5 * 3600
-            except ValueError:
-                continue
-        if float(resets) > now and (why := over_pause(r.get("utilization"))):
-            return f"{why} ({kind})"
-    return None
 
 
 SHELL_TOOLS = ("Bash", "PowerShell")

@@ -165,6 +165,37 @@ say what you wanted to do and let the user do it. You have a budget per message
 (${budget:.2f}); finish with a short summary of what you did and what's left. Never invent results.
 """
 
+COWORKER_FULL_PROMPT = """You are the Coworker on the user's AgentDesk dashboard for the project "{name}": its curator. You
+work above the whole project, on your own, with full access: every tool and every shell command runs
+without asking, in the project's own checkout {repo} (base branch "{base}", currently checked out there
+unless you switch) and anywhere else on this computer. Be brief and plain; answer in the user's language.
+
+Your job is to look after the project and keep it moving:
+- Keep the picture true: read the code, the project's instructions (CLAUDE.md / AGENTS.md / README),
+  the git state (branches, worktrees, uncommitted changes, what the workers' auto/* branches hold), the
+  queue and the reports. Say what is actually going on; never invent results, read the files.
+- Curate the work: decide what is next, write and reorder tasks, hand bigger pieces to the workers and
+  review what they bring back (read the diff, run the checks), then merge the good branches into
+  "{base}", fix what needs fixing, and clean up what is finished or stale (merged branches, worktrees).
+- Do small things yourself, directly in the checkout, on "{base}" when that is right: edit, run the
+  checks, commit. Use a branch when a change is risky or the user asked to review first.
+- Keep the user's work safe even though nothing stops you: look at the target before deleting or
+  overwriting, don't discard uncommitted changes you didn't make, prefer commands you can undo, and run
+  the project's checks before committing to "{base}". Pushing, publishing, opening pull requests and
+  changing remotes are allowed, but do them when the user asks for it or the task clearly includes it,
+  and say plainly that you did.
+
+The project's AgentDesk folder is {folder}:
+- state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
+  finished tasks. agentdesk.log: what happened. notes.md: durable facts (append what future you needs).
+- tasks/*.md: the queue. project.toml: repo, base branch, checks (you may edit it; keep it valid TOML).
+Your tools for the workers (the agentdesk server): add_task, queue_status, run_next, run_task(id),
+run_all, plan_task(id), stop_run. Only one run per project goes at a time.
+
+You have a budget per message (${budget:.2f}); finish with a short summary of what you did and what's
+left. Workers run in their own worktrees, so your edits in the checkout don't collide with theirs.
+"""
+
 MCP = "agentdesk"
 MCP_PREFIX = f"mcp__{MCP}__"
 NEEDS_APPROVAL = {"run_next": "Start a run of the next ready task", "run_task": "Start a run of task {id}",
@@ -280,7 +311,7 @@ class Chat:
     async def coworker_permission(self, name: str, args: dict, ctx=None):
         """Coworker: no approval cards. Its own run/queue tools are allowed; everything else goes through
         the workers' guard, with edits limited to its worktree, tasks/ and notes.md."""
-        if name.startswith(MCP_PREFIX):
+        if name.startswith(MCP_PREFIX) or core.chat_settings("coworker").get("full_access"):
             return PermissionResultAllow()
         wt = core.cowork_path(self.p)
         check = core.guard(wt, also=(self.p.dir / "tasks", self.p.dir / "notes.md"), never=(Path(self.p.cfg["repo"]["worktrees"]),),
@@ -290,6 +321,8 @@ class Chat:
     async def coworker_hook(self, data: dict, _tool_use_id=None, _ctx=None) -> dict:
         """PreToolUse hook running the same check for every tool call, including those the CLI allows on its
         own without asking can_use_tool (e.g. commands it thinks are read-only, like `echo`)."""
+        if core.chat_settings("coworker").get("full_access"):
+            return {}
         r = await self.coworker_permission(str(data.get("tool_name", "")), dict(data.get("tool_input") or {}))
         if isinstance(r, PermissionResultDeny):
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": r.message}}
@@ -385,6 +418,17 @@ class Chat:
     def _coworker_options(self):
         cs = core.chat_settings("coworker")
         self.model = cs["model"]
+        if cs.get("full_access"):
+            prompt = COWORKER_FULL_PROMPT.format(name=self.p.name, repo=self.p.repo, base=self.p.cfg["repo"]["base"],
+                                                 folder=self.p.dir, budget=float(cs["budget_usd"]))
+            gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
+            # Everything is allowed through can_use_tool (no guard, no hook); the project checkout is the working directory.
+            return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt,
+                                max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
+                                allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
+                                mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
+                                disallowed_tools=[], permission_mode="default",
+                                can_use_tool=self.coworker_permission, setting_sources=[], env=gate_env)
         wt = core.cowork_worktree(self.p)
         prompt = COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"]))
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
@@ -426,20 +470,14 @@ class Chat:
         acct = self.p.account.get("name", "default")
         gen = self.generation
         if coworker:
-            if why := core.usage_paused(acct):
-                self.model = core.chat_settings("coworker")["model"]
-                return self._answer(f"Paused: {why}. The Coworker doesn't start new work until the account's usage "
-                                    "window resets (`[limits] pause_at_utilization` in settings.toml).")
             await self._close()  # a fresh process per message, so the budget counts this message only
         client = await self._client(mode)
-        reply, calls, result, paused = [], {}, None, None
+        reply, calls, result = [], {}, None
         try:
             await client.query(text)
             async for msg in client.receive_response():
                 if isinstance(msg, RateLimitEvent):
                     core.record_rate_limit(acct, msg.rate_limit_info)
-                    if coworker and not paused and (paused := core.over_pause(msg.rate_limit_info.utilization)):
-                        await client.interrupt()
                 elif isinstance(msg, AssistantMessage):
                     for b in msg.content:
                         if isinstance(b, TextBlock):
@@ -471,8 +509,6 @@ class Chat:
             u.setdefault("tokens", {})[k] = u.get("tokens", {}).get(k, 0) + v
         self.p.path("chat_usage.json").write_text(json.dumps(u), encoding="utf-8")
         parts = ["\n\n".join(reply).strip()]
-        if paused:
-            parts.append(f"Paused: {paused}. The Coworker stopped here instead of continuing.")
         if coworker and (note := budget_note(result, cost)):
             parts.append(note)
         return self._answer("\n\n".join(x for x in parts if x) or "(no answer)", calls.values(), cost, tokens)
@@ -518,7 +554,10 @@ class Chat:
         cs = core.chat_settings(mode)
         out = {"history": self.history, "mode": mode, "busy": self.busy, "model": cs["model"]}
         if mode == "coworker":
-            out.update(budget_usd=float(cs["budget_usd"]), worktree=str(core.cowork_path(self.p)), branch=f"auto/{core.COWORK}")
+            full = bool(cs.get("full_access"))
+            out.update(budget_usd=float(cs["budget_usd"]), full_access=full,
+                       worktree=str(self.p.repo if full else core.cowork_path(self.p)),
+                       branch=self.p.cfg["repo"]["base"] if full else f"auto/{core.COWORK}")
         return out
 
 
@@ -707,7 +746,7 @@ def project_state(p: core.Project) -> dict:
                         "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
             "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
-            "limits": {"pause_at": s["limits"]["pause_at_utilization"], "run_budget": s["limits"]["run_budget_usd"]},
+            "limits": {"run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
             "reading": reading_view(p.account.get("name", "default")), "max_age_min": core.usage_max_age_min(),
             "auto_error": auto_error(p.account.get("name", "default")) if p.account.get("kind") != "api_key" else None,
@@ -761,8 +800,6 @@ def autorun_status(p: core.Project, items: list[dict] | None = None) -> str:
     cfg = core.autorunner_cfg(p)
     if not cfg["enabled"]:
         return "Auto: off"
-    if core.usage_paused(p.account.get("name", "default")):
-        return "paused: usage limit"
     if items if items is not None else project_attention(p):
         return "waiting: needs attention"
     return "Auto: on"
@@ -794,8 +831,6 @@ def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
             seen.add(key)
             store.log(f"needs attention: {it['task']} ({it['kind']}): {it['reason']}")
     if not cfg["enabled"]:
-        return did
-    if core.usage_paused(p.account.get("name", "default")):
         return did
     if chat(p).approvals.pending():
         return did

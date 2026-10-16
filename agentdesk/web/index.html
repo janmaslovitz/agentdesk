@@ -302,8 +302,8 @@ function shell() {
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 0"></div>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
-    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Works on its own in its own worktree: runs commands and starts runs without asking, within the guard and a budget per message">Coworker</button></span>
-        <span class="badge" id="coworkBadge" hidden>Coworker: runs commands without asking</span>
+    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button></span>
+        <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
       <div class="modenote" id="modeNote" hidden></div>
       <div class="msgs" id="msgs"></div>
@@ -414,8 +414,8 @@ async function refresh() {
   if (rd) {
     const u = rd.utilization;
     $("rl").textContent = Math.round(u*100) + "%"; $("rlbar").style.width = Math.min(100, u*100) + "%";
-    $("rlbar").style.background = rd.stale ? "var(--muted)" : u >= st.limits.pause_at ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
-    $("rld").innerHTML = readingText(rd, st.max_age_min, st.auto_error) + `; pauses at ${Math.round(st.limits.pause_at*100)}%`;
+    $("rlbar").style.background = rd.stale ? "var(--muted)" : u >= .9 ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
+    $("rld").innerHTML = readingText(rd, st.max_age_min, st.auto_error);
   } else {
     $("rl").textContent = "unknown"; $("rlbar").style.width = "0";
     $("rld").textContent = "usage unknown — enter it under Accounts";
@@ -500,7 +500,7 @@ function showMode(p) {
   $("coworkBadge").hidden = !cw;
   $("chatModel").textContent = p.chat_model || "";
   $("modeNote").hidden = !cw;
-  if (cw) $("modeNote").textContent = `Edits and commits only in ${p.cowork} (branch auto/cowork); never pushes. Budget $${Number(p.chat_budget ?? 2).toFixed(2)} per message; pauses at the account usage threshold.`;
+  if (cw) $("modeNote").textContent = `Full access: works in the project checkout (main included), runs any command without asking. Budget $${Number(p.chat_budget ?? 5).toFixed(2)} per message.`;
 }
 async function setMode(mode) {
   const r = await api(`/api/p/${cur}/chat/mode`, {mode});

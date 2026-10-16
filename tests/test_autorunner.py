@@ -78,8 +78,7 @@ def test_new_project_is_auto_managed_without_keys(project):
     assert "autorunner" not in (project.dir / "project.toml").read_text(encoding="utf-8")
     assert core.autorunner_cfg(project) == {"enabled": True, "interval_s": 30, "retry_crashed": 1}
     assert core.settings()["autorunner"]["enabled"] is True
-    with mock.patch.object(core, "usage_paused", return_value=None):
-        assert server.autorun_status(project) == "Auto: on"
+    assert server.autorun_status(project) == "Auto: on"
 
 
 def test_per_project_toggle(project):
@@ -119,30 +118,29 @@ def test_two_projects_start_in_sequence_then_retry_once_then_flag(tmp_path):
         s["tasks"].setdefault(tid, {})["status"] = status
         core.Store(p).save(s)
 
-    with mock.patch.object(core, "usage_paused", return_value=None):
-        server.autorun_pass(starter, alive)
-        assert [x[1] for x in started] == [["run", a.slug, "001"], ["run", b.slug, "001"]]
-        server.autorun_pass(starter, alive)  # one run per project: nothing new while they run
-        assert len(started) == 2
-        running.clear()
-        finish(a, "001", "done")
-        finish(b, "001", "done")
-        server.autorun_pass(starter, alive)
-        assert (a.slug, ["run", a.slug, "002"]) in started and len(started) == 3
-        # the run for a/002 is killed (task left working): recovered and retried once
-        finish(a, "002", "working")
-        running.clear()
-        server.autorun_pass(starter, lambda p: (False, 129))
-        assert len(started) == 4
-        s = core.Store(a).load()["tasks"]["002"]
-        assert s["status"] == "pending" and s["crashes"] == 1 and "code 129" in s["last_failure"]
-        finish(a, "002", "working")
-        running.clear()
-        server.autorun_pass(starter, lambda p: (False, 129))
-        assert len(started) == 4  # no second retry
-        assert [(i["task"], i["kind"]) for i in server.project_attention(a) if i["kind"] == "repeated"] == [("002", "repeated")]
-        assert server.autorun_status(a) == "waiting: needs attention"
-        assert "needs attention: 002 (repeated)" in a.path("agentdesk.log").read_text(encoding="utf-8")
+    server.autorun_pass(starter, alive)
+    assert [x[1] for x in started] == [["run", a.slug, "001"], ["run", b.slug, "001"]]
+    server.autorun_pass(starter, alive)  # one run per project: nothing new while they run
+    assert len(started) == 2
+    running.clear()
+    finish(a, "001", "done")
+    finish(b, "001", "done")
+    server.autorun_pass(starter, alive)
+    assert (a.slug, ["run", a.slug, "002"]) in started and len(started) == 3
+    # the run for a/002 is killed (task left working): recovered and retried once
+    finish(a, "002", "working")
+    running.clear()
+    server.autorun_pass(starter, lambda p: (False, 129))
+    assert len(started) == 4
+    s = core.Store(a).load()["tasks"]["002"]
+    assert s["status"] == "pending" and s["crashes"] == 1 and "code 129" in s["last_failure"]
+    finish(a, "002", "working")
+    running.clear()
+    server.autorun_pass(starter, lambda p: (False, 129))
+    assert len(started) == 4  # no second retry
+    assert [(i["task"], i["kind"]) for i in server.project_attention(a) if i["kind"] == "repeated"] == [("002", "repeated")]
+    assert server.autorun_status(a) == "waiting: needs attention"
+    assert "needs attention: 002 (repeated)" in a.path("agentdesk.log").read_text(encoding="utf-8")
 
 
 def test_usage_pause_pending_approval_and_off_block_starts(project):
@@ -155,19 +153,15 @@ def test_usage_pause_pending_approval_and_off_block_starts(project):
     def idle(p):
         return False, None
 
-    with mock.patch.object(core, "usage_paused", return_value="85% used"):
+    with mock.patch.object(server.chat(project).approvals, "pending", return_value=[{"id": "x"}]):
         server.autorun_project(project, starter, idle)
-        assert started == [] and server.autorun_status(project) == "paused: usage limit"
-    with mock.patch.object(core, "usage_paused", return_value=None):
-        with mock.patch.object(server.chat(project).approvals, "pending", return_value=[{"id": "x"}]):
-            server.autorun_project(project, starter, idle)
-        assert started == []
-        core.set_autorunner(project, False)
-        server.autorun_project(core.project(project.slug), starter, idle)
-        assert started == []
-        core.set_autorunner(core.project(project.slug), True)
-        server.autorun_project(core.project(project.slug), starter, idle)
-        assert started == [["run", project.slug, "001"]]
+    assert started == []
+    core.set_autorunner(project, False)
+    server.autorun_project(core.project(project.slug), starter, idle)
+    assert started == []
+    core.set_autorunner(core.project(project.slug), True)
+    server.autorun_project(core.project(project.slug), starter, idle)
+    assert started == [["run", project.slug, "001"]]
 
 
 def test_gate_failure_and_unmerged_branch_flagged_no_merge(project):
@@ -187,7 +181,7 @@ def test_gate_failure_and_unmerged_branch_flagged_no_merge(project):
         calls.append(args)
         return real(args, cwd)
 
-    with mock.patch.object(core, "git", spy), mock.patch.object(core, "usage_paused", return_value=None):
+    with mock.patch.object(core, "git", spy):
         server.autorun_project(project, lambda p, a: started.append(a), lambda p: (False, None))
     assert {(i["task"], i["kind"]) for i in server.project_attention(project)} >= {("001", "gate"), ("002", "unmerged")}
     assert started == []

@@ -47,13 +47,12 @@ Sidebar → Accounts → **+ Add**:
 Each project uses one account (chosen when adding it; changeable in its `project.toml`). The
 usage gauge is per account: runs pause when the account's usage reaches the threshold.
 
-**Usage reading.** The gauge and the pause use the newest reading of the account's usage, with its
+**Usage reading.** The gauge uses the newest reading of the account's usage, with its
 source and age. Source `sdk`: the percentage Claude Code reports in its rate-limit events during a
 run or chat (often missing, then there is no automatic reading). Source `manual`: type the number
 under **Current usage: [ ] %** in the account row and press **Save**. A reading older than
-`[limits] usage_max_age_min` (default 30) counts as unknown. With no fresh reading a run does not
-start ("usage unknown — enter it under Accounts"); at or above `pause_at_utilization` it stops
-("usage limit N% reached the pause threshold"). Only the percentage, time and source are stored
+`[limits] usage_max_age_min` (default 30) is shown as stale. Usage never blocks or pauses runs or the
+Coworker (there is no threshold); Anthropic's own limit still applies. Only the percentage, time and source are stored
 (`data/accounts/<name>.json`, key `reading`; no credentials).
 
 **Cost per run.** Each run/attempt in `state.json` records `usage_before`, `usage_after` and
@@ -103,24 +102,24 @@ session and keeps the messages on screen.
   hands work to the workers with its own tools: `add_task` and `queue_status` (no approval) and
   `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`, which each show an approval card first.
 - **Coworker** (autonomous; model from `[chat.coworker]`, default `sonnet` at `effort = "medium"`).
-  The chat header shows the badge *Coworker: runs commands without asking*. It reads and analyzes
-  freely, runs shell commands and uses the same tools (`add_task`, `run_next`, `run_task`, `run_all`,
-  `plan_task`, `stop_run`, `queue_status`) **without approval cards**. It changes code only in its
-  own worktree `<worktrees>/cowork` on branch `auto/cowork` (created from the base branch on first
-  use, kept afterwards) and may commit there; review and merge `auto/cowork` like the workers'
-  branches. Limits:
+  The chat header shows the badge *Coworker: full access, no approvals*. It is the project's curator:
+  it works **in the project checkout itself, main included**, with every tool and shell command and
+  the queue tools (`add_task`, `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`,
+  `queue_status`), **without approval cards and without the guard**. It reviews and merges the
+  workers' branches, edits and commits on the base branch, tidies branches and worktrees, and pushes
+  or publishes when asked. Its instructions tell it to protect uncommitted work, prefer reversible
+  commands and run the checks before committing; nothing enforces that. Set
+  `[chat.coworker] full_access = false` to get the older, guarded mode instead: own worktree
+  `<worktrees>/cowork` on branch `auto/cowork`, the limits below. Limits of that guarded mode:
   - the workers' guard (`[guard] deny` in `settings.toml`): no push, remotes, publishing, pull
     requests, hard resets or switching to main; shell commands naming `project.toml` or
     `settings.toml` are refused too. Edits are allowed only in its worktree, `tasks/` and
     `notes.md` of the project folder. The check runs before every tool call (also the ones the
     Claude CLI would allow by itself), and a refused call is reported in the chat.
-  - a budget per message, `[chat.coworker] budget_usd` (default 2.0). Each message runs in a fresh
+  - a budget per message, `[chat.coworker] budget_usd` (default 5.0). Each message runs in a fresh
     Claude process that resumes the conversation, so the budget counts that message only; when it's
     reached the answer ends with *Stopped: … reached the Coworker budget*. The check runs after each
     model turn, so a message can go over by one turn.
-  - the account usage pause (`[limits] pause_at_utilization`): if the account's last reading is at or
-    over the threshold, the Coworker answers *Paused: …* instead of starting; if a reading crosses it
-    during a message, it stops there and says so.
 
 **Approvals** (Assistant mode). When the chat wants to run a shell command (Bash/PowerShell) or start/stop a run, a
 card appears under the messages: **Allow once**, **Always allow** or **Deny**. Nothing runs before

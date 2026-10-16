@@ -92,27 +92,6 @@ def test_expired_token_and_missing_login_give_clear_reasons(tmp_path, monkeypatc
     assert "not signed in" in core.refresh_usage("default", force=True)
 
 
-def test_gate_uses_real_usage_and_pauses_at_threshold(tmp_path, monkeypatch):
-    _login(tmp_path, monkeypatch)
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _Resp(API))  # 70% < 85%
-    assert core.usage_gate("default") is None
-    high = {"five_hour": {"utilization": 91.0, "resets_at": None}}
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _Resp(high))
-    core.refresh_usage("default", force=True)
-    assert "91%" in core.usage_gate("default")
-
-
-def test_gate_still_works_when_the_service_is_down_and_a_manual_value_is_fresh(tmp_path, monkeypatch):
-    _login(tmp_path, monkeypatch)
-    core.set_manual_usage("default", 30)
-
-    def down(req, timeout=0):
-        raise OSError("offline")
-
-    monkeypatch.setattr("urllib.request.urlopen", down)
-    assert core.usage_gate("default") is None
-
-
 def test_auto_reading_can_be_switched_off(tmp_path, monkeypatch):
     _login(tmp_path, monkeypatch)
     monkeypatch.setattr(core, "usage_auto_enabled", lambda: False)  # after the fixture turned it on

@@ -32,6 +32,13 @@ def git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def guarded_mode(monkeypatch):
+    """This file tests the guarded Coworker (`full_access = false`); tests/test_coworker_full.py tests the default."""
+    orig = core.chat_settings
+    monkeypatch.setattr(core, "chat_settings", lambda mode: {**orig(mode), **({"full_access": False} if mode == "coworker" else {})})
+
+
 @pytest.fixture
 def proj(project):
     """The scratch project with one commit on main, so worktrees can be made."""
@@ -58,16 +65,16 @@ def allowed(chat, name, args):
 
 def test_coworker_settings(monkeypatch):
     s = tomllib.loads(core.DEFAULT_SETTINGS)["chat"]["coworker"]
-    assert s == {"model": "sonnet", "effort": "medium", "budget_usd": 2.0}
+    assert s == {"full_access": True, "model": "sonnet", "effort": "medium", "budget_usd": 5.0}
     monkeypatch.setattr(core, "settings", lambda: {"chat": {"model": "haiku"}})  # older settings.toml: no [chat.coworker]
     cs = core.chat_settings("coworker")
-    assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("sonnet", "medium", 2.0)
+    assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("sonnet", "medium", 5.0)
     monkeypatch.setattr(core, "settings", lambda: {"chat": {"coworker": {"model": "opus", "budget_usd": 0.5}}})
     cs = core.chat_settings("coworker")
     assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("opus", "medium", 0.5)
     # The defaults written for a new install have the keys too (the user's own settings.toml is never read by tests).
     default = tomllib.loads(core.DEFAULT_SETTINGS)
-    assert default["chat"]["coworker"]["budget_usd"] == 2.0 and core.chat_settings("assistant")["model"] == "haiku"
+    assert default["chat"]["coworker"]["budget_usd"] == 5.0 and core.chat_settings("assistant")["model"] == "haiku"
 
 
 # ----------------------------------------------------------------------------- guard: no approval cards, but the workers' deny list
@@ -211,7 +218,7 @@ def test_coworker_session_options_and_costs(chat, fake):
     assert out["text"] == "done" and out["cost"] == pytest.approx(0.10) and out["model"] == "sonnet"
     [c] = fake.made
     o = c.options
-    assert (o.model, o.effort, o.max_budget_usd, o.permission_mode) == ("sonnet", "medium", 2.0, "default")
+    assert (o.model, o.effort, o.max_budget_usd, o.permission_mode) == ("sonnet", "medium", 5.0, "default")
     assert Path(o.cwd) == core.cowork_path(chat.p) and git(o.cwd, "branch", "--show-current") == "auto/cowork"
     assert o.can_use_tool == chat.coworker_permission and o.resume is None
     assert not {"Bash", "PowerShell", "Write", "Edit"} & set(o.allowed_tools)
@@ -229,10 +236,10 @@ def test_coworker_session_options_and_costs(chat, fake):
 
 
 def test_budget_stop(chat, fake):
-    fake.script = [say("Working on it"), result(2.04, subtype="error_max_budget_usd")]
+    fake.script = [say("Working on it"), result(5.04, subtype="error_max_budget_usd")]
     out = chat.ask("do a lot")
     assert out["text"].startswith("Working on it")
-    assert "Stopped" in out["text"] and "budget of $2.00 per message" in out["text"] and "$2.04" in out["text"]
+    assert "Stopped" in out["text"] and "budget of $5.00 per message" in out["text"] and "$5.04" in out["text"]
     assert chat.history[-1]["text"] == out["text"]
 
 
@@ -249,32 +256,6 @@ def test_assistant_has_no_budget_note(chat, fake):
     fake.script = [say("hi"), result(0.01, subtype="error_max_budget_usd")]
     out = chat.ask("x")
     assert "Stopped" not in out["text"] and fake.made[0].options.can_use_tool == chat.permission
-
-
-def usage_reading(proj, utilization, resets_at):
-    core.save_account_usage(proj.account["name"], {"rate_limits": {"five_hour": {
-        "utilization": utilization, "status": "allowed_warning", "resets_at": resets_at, "seen": "2026-01-01T00:00:00"}}})
-
-
-def test_paused_before_starting(chat, fake):
-    usage_reading(chat.p, 0.9, int(time.time()) + 3600)
-    out = chat.ask("go")
-    assert out["text"].startswith("Paused:") and "90%" in out["text"] and fake.made == []
-    usage_reading(chat.p, 0.9, int(time.time()) - 60)  # that window has reset
-    fake.script = [say("ok"), result(0.01)]
-    assert chat.ask("go")["text"] == "ok"
-    usage_reading(chat.p, 0.5, int(time.time()) + 3600)
-    assert core.usage_paused(chat.p.account["name"]) is None
-
-
-def test_paused_midway(chat, fake):
-    info = RateLimitInfo(status="allowed_warning", utilization=0.95, rate_limit_type="five_hour", resets_at=int(time.time()) + 600)
-    fake.script = [say("step 1"), RateLimitEvent(rate_limit_info=info, uuid="u", session_id="s1"), result(0.3)]
-    out = chat.ask("go")
-    assert fake.made[0].interrupted and "Paused:" in out["text"] and "95%" in out["text"]
-    saved = core.account_usage(chat.p.account["name"])["rate_limits"]["five_hour"]
-    assert saved["utilization"] == 0.95  # the dashboard gauge sees it, and the next message won't start
-    assert chat.ask("again")["text"].startswith("Paused:") and len(fake.made) == 1
 
 
 def test_mode_switch_resets_session_keeps_history(chat, fake):
@@ -312,11 +293,11 @@ def test_http_switch_shows_coworker(proj, fake):
         c.history, c.session_id = [{"role": "user", "text": "hello"}], "old"
         assert post(base + "/chat/mode", {"mode": "coworker"}) == {"ok": True, "mode": "coworker"}
         info = get(base + "/chat")
-        assert info["mode"] == "coworker" and info["model"] == "sonnet" and info["budget_usd"] == 2.0
+        assert info["mode"] == "coworker" and info["model"] == "sonnet" and info["budget_usd"] == 5.0
         assert info["history"] == [{"role": "user", "text": "hello"}] and c.session_id is None
         st = get(base + "/state")["project"]
-        assert st["chat_mode"] == "coworker" and st["chat_model"] == "sonnet (medium)" and st["chat_budget"] == 2.0
+        assert st["chat_mode"] == "coworker" and st["chat_model"] == "sonnet (medium)" and st["chat_budget"] == 5.0
     finally:
         srv.shutdown()
     html = (Path(server.WEB) / "index.html").read_text(encoding="utf-8")
-    assert "Coworker: runs commands without asking" in html and 'id="coworkBadge"' in html
+    assert "Coworker: full access, no approvals" in html and 'id="coworkBadge"' in html
