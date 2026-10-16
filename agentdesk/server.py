@@ -140,6 +140,43 @@ When the user asks for work, write a clear task (ask one short question first on
 unclear), then say it's queued, and offer to start it. Never invent results: read the files.
 """
 
+MEMORY_SECTIONS = ("Decisions", "Facts about the project", "Open questions", "User preferences")
+MEMORY_MAX_WORDS = 1500
+MEMORY_HEADING = "What you remember from earlier conversations"
+
+MEMORY_PROMPT = """You maintain the running memory of a project chat assistant. Below are the current memory and the latest
+exchange. Return the full updated memory and nothing else, as Markdown with exactly these sections, in this order:
+{sections}
+Rules: key facts, decisions, open threads and user preferences only, as short bullet points. Drop what is outdated or
+trivial. Never store secrets (keys, tokens, passwords) or file contents. Keep it under {words} words in total.
+{extra}
+Current memory:
+{memory}
+
+Latest exchange:
+User: {user}
+Assistant: {reply}
+"""
+
+
+def valid_memory(text: str) -> bool:
+    """A usable memory: every section heading present, within the word cap."""
+    return all(f"## {s}" in text for s in MEMORY_SECTIONS) and len(text.split()) <= MEMORY_MAX_WORDS
+
+
+async def memory_call(p: core.Project, model: str, prompt: str) -> str:
+    """One short call without tools or permission callbacks; its cost is not counted in chat_usage.json."""
+    opts = core.options(p, model=model, max_turns=1, allowed_tools=[], disallowed_tools=list(MEMORY_NO_TOOLS), system_prompt="You write concise Markdown memory notes.",
+                        cwd=str(p.dir), permission_mode="default", setting_sources=[])
+    out = ""
+    async for msg in core.query(prompt=prompt, options=opts):
+        if isinstance(msg, ResultMessage) and not msg.is_error:
+            out = msg.result or ""
+    return out.strip()
+
+
+MEMORY_NO_TOOLS = ("Bash", "PowerShell", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent")
+
 COWORKER_PROMPT = """You are the Coworker on the user's AgentDesk dashboard for the project "{name}". You work on
 your own: nothing you do waits for the user's approval, so act carefully. Be brief and plain; answer
 in the user's language.
@@ -267,6 +304,43 @@ class Chat:
         tmp.write_text(json.dumps(self.history, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(f)
 
+    # -- the running memory, kept in chat_memory.md: this (not the transcript) goes back to the model
+
+    def load_memory(self) -> str:
+        try:
+            return self.p.path("chat_memory.md").read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return ""
+
+    def save_memory(self, text: str) -> None:
+        f = self.p.path("chat_memory.md")
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(text.strip() + "\n", encoding="utf-8")
+        tmp.replace(f)
+
+    def with_memory(self, prompt: str) -> str:
+        """The system prompt plus the memory as it is now (read when a session is created)."""
+        memory = self.load_memory()
+        return f"{prompt}\n# {MEMORY_HEADING}\n{memory}\n" if memory else prompt
+
+    def update_memory(self, user: str, reply: str) -> None:
+        """Ask a tool-free model call for the updated memory; on any failure keep the old one."""
+        try:
+            old = self.load_memory()
+            model = core.chat_settings(core.chat_mode(self.p))["model"] or "haiku"
+            extra = ""
+            for _ in range(2):  # one retry
+                prompt = MEMORY_PROMPT.format(sections="\n".join(f"## {s}" for s in MEMORY_SECTIONS), words=MEMORY_MAX_WORDS - 200,
+                                              extra=extra, memory=old or "(empty)", user=user, reply=reply)
+                new = asyncio.run_coroutine_threadsafe(memory_call(self.p, model, prompt), self.loop).result(timeout=120).strip()
+                if valid_memory(new):
+                    self.save_memory(new)
+                    return
+                extra = "Your previous reply was empty, lacked a section heading or was too long. Follow the format and the word limit exactly.\n"
+            core.Store(self.p).log("chat memory update rejected; kept the old memory")
+        except Exception as e:  # the chat keeps working without it
+            core.Store(self.p).log(f"chat memory update failed: {e or type(e).__name__}")
+
     # -- permissions: everything the chat may do without the user, and the approval cards for the rest
 
     async def permission(self, name: str, args: dict, _ctx=None):
@@ -390,7 +464,7 @@ class Chat:
 
     def _assistant_options(self):
         self.model = core.chat_settings("assistant")["model"]
-        prompt = CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p))
+        prompt = self.with_memory(CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p)))
         # Only read-only tools go in allowed_tools: anything listed there skips can_use_tool.
         return core.options(self.p, model=self.model, cwd=str(self.p.dir), system_prompt=prompt, max_turns=15,
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
@@ -402,7 +476,7 @@ class Chat:
         cs = core.chat_settings("coworker")
         self.model = cs["model"]
         wt = core.cowork_worktree(self.p)
-        prompt = COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"]))
+        prompt = self.with_memory(COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"])))
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
         # Shell, edit and run tools must not go in allowed_tools (that skips can_use_tool, i.e. the guard).
         # No setting_sources: a project's .claude/settings.json could allow commands past the guard.
@@ -503,6 +577,7 @@ class Chat:
             self.save_history()
             self.busy = True
             fut = asyncio.run_coroutine_threadsafe(self._ask(text), self.loop)
+            ok = True
             try:
                 # Approvals can wait up to 10 minutes each, so the answer may take a while.
                 out = fut.result(timeout=3 * APPROVAL_TIMEOUT_S)
@@ -510,10 +585,13 @@ class Chat:
                 fut.cancel()
                 out = {"text": f"Error: {e or type(e).__name__}", "tools": [], "cost": 0.0}
                 self.client = None
+                ok = False
             finally:
                 self.busy = False
             self.history.append({"role": "assistant", **out})
             self.save_history()
+            if ok and out.get("text") and out["text"] != "(no answer)":
+                self.update_memory(text, out["text"])  # reset() waits for this lock, so it can't be undone by a stale write
             return out
 
     def reset(self, keep_history: bool = False) -> None:
@@ -531,6 +609,7 @@ class Chat:
             if not keep_history:
                 self.history = []
                 self.p.path("chat.json").unlink(missing_ok=True)
+                self.p.path("chat_memory.md").unlink(missing_ok=True)
 
     def info(self) -> dict:
         mode = core.chat_mode(self.p)

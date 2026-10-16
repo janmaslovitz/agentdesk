@@ -29,3 +29,14 @@ def project(tmp_path):
     name = f"scratch-{tmp_path.name}"
     p = core.add_project(name, str(repo), "main")
     yield p
+
+
+@pytest.fixture(autouse=True)
+def no_real_memory_call(monkeypatch):
+    """The chat's memory update is a real model call: tests never make it unless they patch it themselves."""
+    from agentdesk import server
+
+    async def none(p, model, prompt):
+        return ""
+
+    monkeypatch.setattr(server, "memory_call", none)
