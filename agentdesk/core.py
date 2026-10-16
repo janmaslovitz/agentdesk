@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +36,8 @@ from claude_agent_sdk import (
     query,
 )
 
-APP = Path(__file__).resolve().parent.parent
+FROZEN = bool(getattr(sys, "frozen", False))  # PyInstaller program
+APP = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 
 
 def _hide_sdk_console() -> None:

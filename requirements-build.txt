@@ -1,0 +1,2 @@
+# Only needed to build AgentDesk.exe (see build_exe.ps1); the runtime needs just requirements.txt.
+pyinstaller>=6
