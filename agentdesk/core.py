@@ -197,14 +197,60 @@ def toml_str(s: str) -> str:
     return json.dumps(s, ensure_ascii=False)
 
 
+class NeedsLocalGit(ValueError):
+    """The folder needs local version tracking set up first; `reason` is "not_a_repo" or "no_commits"."""
+
+    def __init__(self, reason: str, repo: str):
+        self.reason = reason
+        super().__init__(f"{repo} is not a git repository" if reason == "not_a_repo"
+                         else f"{repo} is a git repository with no commits yet")
+
+
+GITIGNORE = "node_modules\ntarget\ndist\nbuild\n.venv\n__pycache__\n*.log\n.DS_Store\n"
+
+
+def repo_state(repo: str) -> str:
+    """"plain" (not a git repo), "empty" (repo without commits) or "ready"."""
+    if not (Path(repo) / ".git").exists():
+        return "plain"
+    code, _ = git(["rev-parse", "--verify", "-q", "HEAD"], Path(repo))
+    return "ready" if code == 0 else "empty"
+
+
+def setup_local_git(repo: str) -> str:
+    """Local-only version tracking: init if needed, .gitignore if absent, one first commit. Returns the base branch.
+    Never adds remotes, never pushes, never touches global config."""
+    path = Path(repo)
+    if repo_state(repo) == "plain":
+        code, out = git(["init"], path)
+        if code != 0:
+            raise RuntimeError(f"git init failed: {out}")
+    if not (path / ".gitignore").exists():
+        (path / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
+    for key, val in (("user.name", "AgentDesk"), ("user.email", "agentdesk@localhost")):
+        if not git(["config", key], path)[1].strip():
+            git(["config", "--local", key, val], path)
+    git(["add", "-A"], path)
+    code, out = git(["commit", "--allow-empty", "-m", "AgentDesk: starting point"], path)
+    if code != 0:
+        raise RuntimeError(f"git commit failed: {out}")
+    return git(["symbolic-ref", "--short", "HEAD"], path)[1].strip()
+
+
 def add_project(name: str, repo: str, base: str, preset: str = "none", account_name: str = "default",
-                quick: list[str] | None = None, final: list[str] | None = None, env: dict | None = None) -> Project:
+                quick: list[str] | None = None, final: list[str] | None = None, env: dict | None = None,
+                local_git: bool = False) -> Project:
     s = slug(name)
     d = DATA / "projects" / s
     if (d / "project.toml").exists():
         raise ValueError(f"a project named {s} exists")
-    if not (Path(repo) / ".git").exists():
-        raise ValueError(f"{repo} is not a git repository")
+    if not Path(repo).is_dir():
+        raise ValueError(f"{repo} is not a folder")
+    state = repo_state(repo)
+    if state != "ready":
+        if not local_git:
+            raise NeedsLocalGit("not_a_repo" if state == "plain" else "no_commits", repo)
+        base = setup_local_git(repo)
     gates = PRESETS.get(preset, PRESETS["none"])
     quick = quick if quick is not None else gates["quick"]
     final = final if final is not None else gates["final"]

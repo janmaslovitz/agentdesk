@@ -104,6 +104,8 @@ def main() -> None:
     sub.add_parser("projects")
     a = sub.add_parser("add-project"); a.add_argument("name"); a.add_argument("repo"); a.add_argument("base")
     a.add_argument("--preset", default="none", choices=list(core.PRESETS)); a.add_argument("--account", default="default")
+    a.add_argument("--local-git", action="store_true",
+                   help="if the folder isn't a git repo (or has no commits), set up local version tracking (stays on this computer)")
     s = sub.add_parser("status"); s.add_argument("project")
     r = sub.add_parser("run"); r.add_argument("project"); r.add_argument("task", nargs="?"); r.add_argument("--max", type=int)
     pl = sub.add_parser("plan"); pl.add_argument("project"); pl.add_argument("task", nargs="?")
@@ -120,7 +122,11 @@ def main() -> None:
         for p in core.projects():
             print(f"{p.slug:<20} {p.cfg['repo']['path']}  (base {p.cfg['repo']['base']}, account {p.account.get('name')})")
     elif args.cmd == "add-project":
-        print(core.add_project(args.name, args.repo, args.base, args.preset, args.account).dir)
+        try:
+            print(core.add_project(args.name, args.repo, args.base, args.preset, args.account, local_git=args.local_git).dir)
+        except core.NeedsLocalGit as e:
+            sys.exit(f"{e}.\nAgentDesk can set up local version tracking (stays on this computer; nothing is pushed, no remote is added).\n"
+                     "Run again with --local-git to accept.")
     elif args.cmd == "status":
         cmd_status(core.project(args.project))
     elif args.cmd == "run":
