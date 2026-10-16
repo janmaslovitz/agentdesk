@@ -28,7 +28,3 @@ Traceback (most recent call last):
     raise RuntimeError(f"git worktree add failed: {out}")
 RuntimeError: git worktree add failed: fatal: invalid reference: auto/001
 
-001      working   standard      0.004$  Dashboard and runs don't need a console window kept open
-project total 0.004 USD
-001      working   standard      0.004$  Dashboard and runs don't need a console window kept open
-project total 0.004 USD

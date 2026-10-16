@@ -40,12 +40,6 @@ budget_usd = 12.0
 [chat]
 model = "haiku"
 
-# Coworker: autonomous chat (no approval cards), guarded like the workers; budget_usd is per message.
-[chat.coworker]
-model = "sonnet"
-effort = "medium"
-budget_usd = 2.0
-
 [guard]
 deny = [
   'git\s+push', 'git\s+remote', 'gh\s+(pr|release|repo|api|issue|workflow)', 'git\s+reset\s+--hard',
