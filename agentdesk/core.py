@@ -1389,3 +1389,199 @@ def import_project(src: Path | str, repo: str, new_name: str | None = None, acco
         shutil.rmtree(d, ignore_errors=True)
         raise
     return project(s)
+# ----------------------------------------------------------------------------- build panel (user actions only)
+# The command is never taken from a request: it is the built-in build_exe.ps1 of the checked-out source, or
+# `[build] command` from the project's config. The build runs in its own worktree under <project>/build/src.
+
+import sys  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+BUILD_KINDS = ("build", "clean", "custom")
+BUILD_SCRIPT = "build_exe.ps1"
+BUILD_RESULT = "dist/AgentDesk/AgentDesk.exe"
+
+
+class BuildJob:
+    def __init__(self, p: "Project"):
+        self.p = p
+        self.dir = p.dir / "build"
+        self.wt = self.dir / "src"
+        self.logf = self.dir / "build.log"
+        self.statf = self.dir / "status.json"
+        self.lock = threading.Lock()
+        self.proc: subprocess.Popen | None = None
+        self.stopped = False
+        self.thread: threading.Thread | None = None
+        self.st: dict = {"status": "idle"}
+        if self.statf.exists():
+            try:
+                self.st = json.loads(self.statf.read_text(encoding="utf-8"))
+                if self.st.get("status") == "running":  # the dashboard died mid-build
+                    self.st["status"] = "failed"
+            except (OSError, ValueError):
+                pass
+
+    def running(self) -> bool:
+        return self.st.get("status") == "running"
+
+    def _set(self, **kw) -> None:
+        self.st.update(kw)
+        try:
+            self.statf.write_text(json.dumps(self.st), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _say(self, msg: str) -> None:
+        with self.logf.open("a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+
+    def command(self, kind: str) -> tuple[object, bool]:
+        """(argv or shell string, use_shell). Only ever the built-in script or the project's own config."""
+        if kind == "custom":
+            cmd = str(self.p.cfg.get("build", {}).get("command", "")).strip()
+            if not cmd:
+                raise ValueError("no [build] command is set in this project's config")
+            return cmd, True
+        if sys.platform == "win32":
+            return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", BUILD_SCRIPT], False
+        return ["pwsh", "-NoProfile", "-File", BUILD_SCRIPT], False
+
+    def result_path(self) -> Path:
+        return self.wt / self.p.cfg.get("build", {}).get("result", BUILD_RESULT)
+
+    def start(self, kind: str, ref: str, blocked: str | None = None) -> str | None:
+        """Returns an error message, or None when the build was started."""
+        if kind not in BUILD_KINDS:
+            return "unknown build kind"
+        ref = (ref or "").strip() or self.p.cfg["repo"]["base"]
+        if ref.startswith("-"):
+            return "bad branch or commit"
+        if blocked:
+            return blocked
+        with self.lock:
+            if self.running():
+                return "a build is already running"
+            try:
+                cmd, shell = self.command(kind)
+            except ValueError as e:
+                return str(e)
+            code, sha = _g(self.p, "rev-parse", "--verify", "-q", f"{ref}^{{commit}}")
+            if code != 0:
+                return f"'{ref}' is not a branch or commit of this repository"
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self.logf.write_text("", encoding="utf-8")
+            self.stopped = False
+            self._set(status="running", kind=kind, ref=ref, commit=sha[:12], started=time.time(), ended=None, exit=None)
+            self.thread = threading.Thread(target=self._work, args=(kind, sha, cmd, shell), daemon=True)
+            self.thread.start()
+        return None
+
+    def _prepare(self, kind: str, sha: str) -> None:
+        if kind == "clean" and self.wt.exists():
+            self._say("== clean: removing the build worktree")
+            git(["worktree", "remove", "--force", str(self.wt)], self.p.repo)
+            shutil.rmtree(self.wt, ignore_errors=True)
+        git(["worktree", "prune"], self.p.repo)
+        if (self.wt / ".git").exists():
+            code, out = git(["checkout", "--detach", "--force", sha], self.wt)
+        else:
+            shutil.rmtree(self.wt, ignore_errors=True)
+            code, out = git(["worktree", "add", "--detach", "--force", str(self.wt), sha], self.p.repo)
+        if code != 0:
+            raise RuntimeError(f"could not prepare the build worktree: {out.strip()}")
+
+    def _work(self, kind: str, sha: str, cmd, shell: bool) -> None:
+        code = 1
+        try:
+            self._say(f"== {kind} of {self.st.get('ref')} ({sha[:12]}) in {self.wt}")
+            self._prepare(kind, sha)
+            if self.stopped:
+                raise RuntimeError("stopped")
+            if not shell and not (self.wt / BUILD_SCRIPT).exists():
+                raise RuntimeError(f"{BUILD_SCRIPT} does not exist in that revision")
+            kw: dict = {}
+            if sys.platform == "win32":
+                kw["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                kw["start_new_session"] = True
+            env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "AGENTDESK_HOME": scratch_home()}
+            with self.logf.open("a", encoding="utf-8", errors="replace") as out:
+                with self.lock:
+                    if self.stopped:
+                        raise RuntimeError("stopped")
+                    self.proc = subprocess.Popen(cmd, cwd=self.wt, shell=shell, stdin=subprocess.DEVNULL, stdout=out,
+                                                 stderr=subprocess.STDOUT, env=env, **kw)
+                code = self.proc.wait()
+            self._say(f"== exit code {code}")
+        except Exception as e:  # noqa: BLE001
+            self._say(f"== {'build stopped' if self.stopped else 'build could not run'}: {e}")
+        self.proc = None
+        self._set(status="stopped" if self.stopped else ("ok" if code == 0 else "failed"), ended=time.time(), exit=code)
+
+    def stop(self) -> str | None:
+        with self.lock:
+            if not self.running():
+                return "no build is running"
+            self.stopped = True
+            proc = self.proc
+        if proc is not None and proc.poll() is None:
+            kill_tree(proc)
+        return None
+
+    def info(self, tail: int = 20000) -> dict:
+        st = dict(self.st)
+        st["running"] = self.running()
+        end = st.get("ended") or time.time()
+        st["duration"] = round(end - st["started"], 1) if st.get("started") else None
+        st["has_custom"] = bool(str(self.p.cfg.get("build", {}).get("command", "")).strip())
+        st["base"] = self.p.cfg["repo"]["base"]
+        st["result"] = str(self.result_path())
+        st["result_exists"] = self.result_path().exists()
+        st["log"] = ""
+        if self.logf.exists():
+            with self.logf.open("rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - tail))
+                st["log"] = f.read().decode("utf-8", errors="replace")
+        return st
+
+    def open_folder(self) -> str | None:
+        r = self.result_path()
+        folder = r.parent if r.parent.is_dir() else (self.wt if self.wt.is_dir() else None)
+        if folder is None:
+            return "there is no build output yet"
+        if sys.platform == "win32":
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+        return None
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the process and all its descendants (PowerShell -> PyInstaller on Windows)."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        import signal
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+BUILDS: dict[str, BuildJob] = {}
+_BUILDS_LOCK = threading.Lock()
+
+
+def build_job(p: "Project") -> BuildJob:
+    with _BUILDS_LOCK:
+        job = BUILDS.get(p.slug)
+        if job is None:
+            job = BUILDS[p.slug] = BuildJob(p)
+        job.p = p
+        return job
