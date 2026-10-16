@@ -389,7 +389,7 @@ async function refresh() {
   try { st = await api(`/api/p/${cur}/state`); } catch { return; }
   if (st.error) return;
   if (chatFor !== cur) {
-    chatFor = cur; pendingKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
+    chatFor = cur; pendingKey = null; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
     const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
   }
   showMode(st.project);
@@ -510,7 +510,7 @@ async function setMode(mode) {
 }
 
 // Approval cards: tool calls waiting for the user. Re-rendered only when the set changes (keeps typing in the prefix box).
-let pendingKey = "";
+let pendingKey = null;  // null = page may show a stale card: next poll always renders, even an empty list
 async function pollPending() {
   if (!cur || !$("pending")) return;
   let r; try { r = await api(`/api/p/${cur}/pending`); } catch { return; }
@@ -530,7 +530,7 @@ async function pollPending() {
 async function answer(id, action) {
   const pre = $("pre-" + id), r = await api(`/api/p/${cur}/pending/${encodeURIComponent(id)}`, {action, prefix: pre ? pre.value : ""});
   if (r.error) note(r.error);
-  pendingKey = ""; pollPending(); setTimeout(refresh, 800);
+  pendingKey = null; pollPending(); setTimeout(refresh, 800);
 }
 
 refreshAll();
