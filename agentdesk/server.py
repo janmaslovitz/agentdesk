@@ -681,8 +681,124 @@ def overview() -> dict:
             st = state["tasks"].get(t.id, {}).get("status", "pending")
             counts[st] = counts.get(st, 0) + 1
         rows.append({"slug": p.slug, "name": p.name, "repo": str(p.repo), "account": p.account.get("name"), "counts": counts,
-                     "spent_usd": state.get("spent_usd", 0.0), "running": runner(p).running()})
-    return {"projects": rows, "accounts": account_rows(), "presets": list(core.PRESETS), "data": str(core.DATA)}
+                     "spent_usd": state.get("spent_usd", 0.0), "running": runner(p).running(),
+                     "auto": autorun_status(p), "auto_enabled": core.autorunner_cfg(p)["enabled"]})
+    return {"auto_global": core.autorunner_cfg()["enabled"], "attention": attention_all(), "projects": rows, "accounts": account_rows(), "presets": list(core.PRESETS), "data": str(core.DATA)}
+
+
+# ----------------------------------------------------------------------------- auto-runner
+
+QUIT = threading.Event()  # set when the dashboard shuts down; stops the auto-runner loop
+FLAGGED: dict[str, set[str]] = {}  # project -> flags already written to its log
+
+
+def run_alive(p: core.Project) -> tuple[bool, int | None]:
+    """(is a run process alive, its exit code if this dashboard started it and it has ended)."""
+    r = runner(p)
+    if r.running():
+        return True, None
+    try:
+        pid = int(p.path("runner.pid").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pid = 0
+    if r.proc is not None and r.proc.pid == pid:
+        return False, r.proc.returncode
+    return core.pid_alive(pid), None
+
+
+def project_attention(p: core.Project, state: dict | None = None, tasks: list | None = None) -> list[dict]:
+    state = state if state is not None else core.Store(p).load()
+    tasks = tasks if tasks is not None else core.load_tasks(p)
+    merged = {t.id: core.branch_merged(p, e["branch"]) for t in tasks
+              if (e := state["tasks"].get(t.id, {})).get("status") == "done" and e.get("branch")}
+    return core.attention_items(p.slug, tasks, state, merged, core.autorunner_cfg(p)["retry_crashed"])
+
+
+def autorun_status(p: core.Project, items: list[dict] | None = None) -> str:
+    cfg = core.autorunner_cfg(p)
+    if not cfg["enabled"]:
+        return "Auto: off"
+    if core.usage_paused(p.account.get("name", "default")):
+        return "paused: usage limit"
+    if items if items is not None else project_attention(p):
+        return "waiting: needs attention"
+    return "Auto: on"
+
+
+def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
+    """One pass for one project. Returns what it did (for tests/logs). It only reads state and pids; the one
+    mutation besides starting a run is putting a dead run's tasks back to pending."""
+    starter = starter or (lambda proj, args: runner(proj).start(args))
+    alive = alive or run_alive
+    did = []
+    cfg = core.autorunner_cfg(p)
+    store = core.Store(p)
+    state = store.load()
+    tasks = core.load_tasks(p)
+    running, code = alive(p)
+    if cfg["enabled"]:
+        stale = core.recover_stale(state, running, code)
+        if stale:
+            store.save(state)
+            for tid in stale:
+                store.log(f"auto-runner: {tid} was working but its run is gone; set back to pending ({state['tasks'][tid]['last_failure']})")
+                did.append(f"recovered {tid}")
+    items = project_attention(p, state, tasks)
+    seen = FLAGGED.setdefault(p.slug, set())
+    for it in items:  # flags go to the project's log once; nothing else is done about them
+        key = f"{it['task']}|{it['kind']}|{it['reason']}"
+        if key not in seen:
+            seen.add(key)
+            store.log(f"needs attention: {it['task']} ({it['kind']}): {it['reason']}")
+    if not cfg["enabled"]:
+        return did
+    if core.usage_paused(p.account.get("name", "default")):
+        return did
+    if chat(p).approvals.pending():
+        return did
+    t = core.next_startable(tasks, state, running, cfg["retry_crashed"])
+    if t is None:
+        return did
+    again = int(state["tasks"].get(t.id, {}).get("crashes", 0)) > 0
+    err = starter(p, run_args(p, "task", t.id) or [])
+    if err:
+        store.log(f"auto-runner: could not start {t.id}: {err}")
+    else:
+        store.log(f"auto-runner: started {t.id}" + (" (retry after crash)" if again else ""))
+        did.append(f"started {t.id}")
+    return did
+
+
+def autorun_pass(starter=None, alive=None) -> dict[str, list[str]]:
+    out = {}
+    for p in core.projects():
+        try:
+            out[p.slug] = autorun_project(p, starter, alive)
+        except Exception as e:  # one broken project must not stop the loop
+            log_error(f"auto-runner: {p.slug}: {type(e).__name__}: {e}")
+    return out
+
+
+def autorun_loop() -> None:
+    """Waits first (a short-lived dashboard never acts), then one pass per interval until QUIT is set."""
+    interval = core.autorunner_cfg()["interval_s"]
+    while not QUIT.wait(interval):
+        try:
+            cfg = core.autorunner_cfg()
+            interval = cfg["interval_s"]
+            if cfg["enabled"]:
+                autorun_pass()
+        except Exception as e:
+            log_error(f"auto-runner: {type(e).__name__}: {e}")
+            interval = 30
+
+
+def attention_all() -> dict:
+    items = []
+    for p in core.projects():
+        for it in project_attention(p):
+            items.append({**it, "name": p.name})
+    return {"count": len(items), "items": items}
 
 
 # ----------------------------------------------------------------------------- http
@@ -760,6 +876,8 @@ class Handler(BaseHTTPRequestHandler):
         parts = [x for x in self.path.split("?")[0].split("/") if x]
         if not parts or parts == ["index.html"]:
             return self.send(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
+        if parts == ["api", "attention"]:
+            return self.json(attention_all())
         if parts == ["api", "overview"]:
             return self.json(overview())
         if len(parts) >= 3 and parts[:2] == ["api", "p"]:
@@ -819,6 +937,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"ok": True, "file": str(core.export_project(p, str(d["file"]), logs))})
                 return self.send(200, core.export_project(p, None, logs), "application/zip",
                                  {"Content-Disposition": f'attachment; filename="{p.slug}.agentdesk.zip"'})
+            if parts == ["api", "autorunner"]:
+                core.set_autorunner(None, d.get("enabled") is True)
+                return self.json({"ok": True, "enabled": core.autorunner_cfg()["enabled"]})
             if parts == ["api", "accounts"]:
                 err = add_account(str(d.get("name", "")).strip(), str(d.get("kind", "subscription")), str(d.get("value", "")).strip())
                 return self.json({"error": err} if err else {"ok": True})
@@ -868,6 +989,9 @@ class Handler(BaseHTTPRequestHandler):
                         blocked = "a task run is in progress for this project; stop it first" if runner(p).running() else None
                         err = job.start(str(d.get("kind") or "build"), str(d.get("ref") or ""), blocked)
                     return self.json({"ok": False, "message": err} if err else {"ok": True})
+                if act == "autorunner" and len(parts) == 4:
+                    core.set_autorunner(p, d.get("enabled") is True)
+                    return self.json({"ok": True, "enabled": core.autorunner_cfg(core.project(p.slug))["enabled"]})
                 if act == "stop":
                     err = runner(p).stop()
                     return self.json({"error": err} if err else {"ok": True})
@@ -1012,6 +1136,9 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     print(f"AgentDesk at {url}  (data: {core.DATA}; stop with `python -m agentdesk stop` — runs keep going)")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    QUIT.clear()
+    # Only this process (the one that owns the port, checked above) runs the loop.
+    threading.Thread(target=autorun_loop, daemon=True, name="autorunner").start()
     try:
         if browser:
             webbrowser.open(url)
@@ -1023,6 +1150,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        QUIT.set()
         if thread.is_alive():
             server.shutdown()
         pid_file().unlink(missing_ok=True)
