@@ -39,7 +39,7 @@ from claude_agent_sdk import (
 
 from . import core
 
-WEB = Path(__file__).resolve().parent / "web"
+WEB = (Path(sys._MEIPASS) / "agentdesk" / "web") if core.FROZEN else Path(__file__).resolve().parent / "web"
 ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
@@ -64,7 +64,7 @@ class Runner:
             kw: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW}
         else:
             kw = {"start_new_session": True}
-        self.proc = subprocess.Popen([sys.executable, "-m", "agentdesk", *args], cwd=core.APP, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **kw)
+        self.proc = subprocess.Popen([sys.executable, *([] if core.FROZEN else ["-m", "agentdesk"]), *args], cwd=core.APP, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=env, **kw)
         out.close()
         try:
             self.p.path("runner.pid").write_text(str(self.proc.pid), encoding="utf-8")
@@ -942,7 +942,7 @@ def open_window(url: str, tray: bool = False) -> bool:
             if icon is not None:
                 win.events.closing += closing
         try:
-            webview.start()
+            webview.start(icon=str(WEB / "agentdesk.ico")) if (WEB / "agentdesk.ico").exists() else webview.start()
         finally:
             if icon is not None:
                 icon.stop()

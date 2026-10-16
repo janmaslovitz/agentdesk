@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,8 +36,55 @@ from claude_agent_sdk import (
     query,
 )
 
-APP = Path(__file__).resolve().parent.parent
-DATA = Path(os.environ.get("AGENTDESK_HOME") or APP / "data")
+FROZEN = bool(getattr(sys, "frozen", False))  # PyInstaller program
+APP = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
+
+
+def _hide_sdk_console() -> None:
+    """Windows: start the SDK's claude.exe with CREATE_NO_WINDOW.
+
+    Without a console (pythonw), every console child gets its own visible window.
+    The SDK calls anyio.open_process without creationflags, so only the SDK
+    module's `anyio` name is swapped for a proxy that adds the flag.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import anyio
+        from claude_agent_sdk._internal.transport import subprocess_cli as sc
+    except Exception:
+        return
+    if getattr(sc.anyio, "_agentdesk_nowindow", False):
+        return
+
+    class _Proxy:
+        _agentdesk_nowindow = True
+
+        def __getattr__(self, name):
+            return getattr(anyio, name)
+
+        @staticmethod
+        async def open_process(*args, **kw):
+            kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+            return await anyio.open_process(*args, **kw)
+
+    sc.anyio = _Proxy()
+
+
+_hide_sdk_console()
+
+
+def _data_home() -> Path:
+    """AGENTDESK_HOME, else `data` next to the app. The packaged program (often under Program Files, which
+    users can't write to) uses `data` next to the .exe only if it already exists there, else the AgentDesk folder in LOCALAPPDATA."""
+    if os.environ.get("AGENTDESK_HOME"):
+        return Path(os.environ["AGENTDESK_HOME"])
+    if FROZEN and not (APP / "data").is_dir():
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AgentDesk"
+    return APP / "data"
+
+
+DATA = _data_home()
 TIER_ORDER = ["mechanical", "standard", "hard"]
 
 DEFAULT_SETTINGS = """# AgentDesk settings. Edit here or in the dashboard.

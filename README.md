@@ -128,6 +128,46 @@ anything with `; & | > < ( ) { } $` or a backtick or newline always asks, and so
 Every tool call shows in the chat (command or arguments, with its output folded under it), and
 each answer shows its cost and tokens; the chat's totals are in the **Chat** card.
 
+## Build the program
+
+Make `AgentDesk.exe` (Windows) so AgentDesk starts without Python or `.venv`:
+
+```powershell
+.\build_exe.ps1                      # builds dist\AgentDesk\AgentDesk.exe and a Desktop shortcut "AgentDesk"
+.\build_exe.ps1 -NoDesktopShortcut   # build only
+```
+
+The script makes a build venv (`.venv-build`), installs `requirements.txt` + `requirements-build.txt` (PyInstaller) and runs `agentdesk.spec`.
+Run the whole `dist\AgentDesk` folder from anywhere (copy it as a whole). Double-click `AgentDesk.exe` to open the window; the icon is `agentdesk\web\agentdesk.ico`.
+The shortcut is created if missing and updated on re-runs.
+
+Data goes in `AGENTDESK_HOME` if set; otherwise the program uses a `data` folder next to the `.exe` if one is already there (copy an existing `data\` in by hand), else `%LOCALAPPDATA%\AgentDesk`. From source it is `data\` in the repo as before.
+The build never contains `data\`, accounts, logins or keys.
+The `.cmd`/`.sh` launchers still run the source version.
+
+## Build the installer
+
+Make `AgentDesk-Setup.exe` (Windows) from a clean checkout. It needs Python 3.11+ and [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`):
+
+```powershell
+.\build_installer.ps1               # runs build_exe.ps1, then ISCC.exe on installer\AgentDesk.iss
+.\build_installer.ps1 -Version 1.2  # version shown in Apps & features
+```
+
+The result is `dist\installer\AgentDesk-Setup.exe`. It packs the program only (`dist\AgentDesk`): no `data\`, logins, keys, projects, `.venv`, worktrees or `__pycache__`.
+It installs neither Python nor Claude Code.
+
+## Install
+
+Run `AgentDesk-Setup.exe`. It asks for administrator rights and installs to `C:\Program Files\AgentDesk`; the folder page lets you pick another folder.
+Choose "install for me only" (or run with `/CURRENTUSER`) to install without elevation, e.g. into your own folder.
+It adds a Start menu entry "AgentDesk" (opens the window, with the tray icon), an optional desktop icon (unchecked), and an entry in Apps & features.
+If the Claude Code CLI or the WebView2 runtime is missing, setup says so with a download link and carries on.
+
+- **Data** goes to `%LOCALAPPDATA%\AgentDesk` (logins, projects, settings), never into Program Files. A `data` folder next to `AgentDesk.exe` is used instead if you put one there. Setup never deletes or overwrites it.
+- **Uninstall** from Apps & features (or the Start menu). It removes the program files and asks "Also remove my data?"; `%LOCALAPPDATA%\AgentDesk` stays unless you answer Yes. A silent uninstall keeps it unless `/REMOVEDATA` is given.
+- Upgrade by running a newer setup over the old one; the data is kept.
+
 ## Command line
 
 ```
