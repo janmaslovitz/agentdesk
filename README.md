@@ -90,16 +90,6 @@ Limits: a budget per call and per run, and a pause at the account's usage thresh
 (`data/settings.toml`, `[limits]`). Workers can't push, change remotes, publish or edit outside
 their worktree (`[guard]`).
 
-## Proxy
-
-The Claude CLI that AgentDesk starts ignores the Windows proxy setting, so AgentDesk passes it on: when
-the Windows proxy (Settings > Network > Proxy, as set by Hiddify, v2rayN, Clash ...) is switched on **and
-something is listening at its address**, the CLI gets `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` for that
-proxy. A switched-off or dead proxy is ignored (so it can't cause `ECONNREFUSED`). `HTTPS_PROXY` etc. already
-set in AgentDesk's own environment win. Override in `settings.toml`: `[network] proxy = "auto"` (default),
-`"off"`, or a URL such as `"http://127.0.0.1:12334"`. Only a `host:port` / `http=...;https=...` proxy is
-used; PAC scripts and SOCKS-only proxies are not.
-
 ## The chat: Assistant and Coworker modes
 
 Each project has a chat with a mode switch in its header, saved in the project's `project.toml`
