@@ -36,6 +36,40 @@ from claude_agent_sdk import (
 )
 
 APP = Path(__file__).resolve().parent.parent
+
+
+def _hide_sdk_console() -> None:
+    """Windows: start the SDK's claude.exe with CREATE_NO_WINDOW.
+
+    Without a console (pythonw), every console child gets its own visible window.
+    The SDK calls anyio.open_process without creationflags, so only the SDK
+    module's `anyio` name is swapped for a proxy that adds the flag.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import anyio
+        from claude_agent_sdk._internal.transport import subprocess_cli as sc
+    except Exception:
+        return
+    if getattr(sc.anyio, "_agentdesk_nowindow", False):
+        return
+
+    class _Proxy:
+        _agentdesk_nowindow = True
+
+        def __getattr__(self, name):
+            return getattr(anyio, name)
+
+        @staticmethod
+        async def open_process(*args, **kw):
+            kw["creationflags"] = kw.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+            return await anyio.open_process(*args, **kw)
+
+    sc.anyio = _Proxy()
+
+
+_hide_sdk_console()
 DATA = Path(os.environ.get("AGENTDESK_HOME") or APP / "data")
 TIER_ORDER = ["mechanical", "standard", "hard"]
 
