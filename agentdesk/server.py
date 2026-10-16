@@ -23,8 +23,10 @@ from pathlib import Path
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
+    RateLimitEvent,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
@@ -136,6 +138,31 @@ When the user asks for work, write a clear task (ask one short question first on
 unclear), then say it's queued, and offer to start it. Never invent results: read the files.
 """
 
+COWORKER_PROMPT = """You are the Coworker on the user's AgentDesk dashboard for the project "{name}". You work on
+your own: nothing you do waits for the user's approval, so act carefully. Be brief and plain; answer
+in the user's language.
+
+Your working directory {wt} is your own git worktree of the repository on branch auto/cowork. Make
+code changes only there, and commit them there when a piece of work is done (git add / git commit);
+the user reviews auto/cowork and merges what they want. Never touch the user's checkout ({repo}).
+Before changing code, read the project's instructions (CLAUDE.md / AGENTS.md / README) in your
+worktree and follow them; run the relevant checks after a change.
+
+The project's AgentDesk folder is {folder}:
+- state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
+  finished tasks. agentdesk.log: what happened. You may read all of it.
+- tasks/*.md: the queue; you may write task files there and append to notes.md (durable facts).
+Your tools for the workers (the agentdesk server), no approval needed: add_task, queue_status,
+run_next, run_task(id), run_all, plan_task(id), stop_run. Only one run per project goes at a time.
+Delegate bigger pieces of work to the workers as tasks; do small things yourself.
+
+Shell commands (Bash/PowerShell) run without asking, but a guard refuses pushing, changing remotes,
+publishing, pull requests, resetting or switching to main, and editing AgentDesk's config; edits
+outside your worktree, tasks/ and notes.md are refused too. Don't try to work around a refusal:
+say what you wanted to do and let the user do it. You have a budget per message
+(${budget:.2f}); finish with a short summary of what you did and what's left. Never invent results.
+"""
+
 MCP = "agentdesk"
 MCP_PREFIX = f"mcp__{MCP}__"
 NEEDS_APPROVAL = {"run_next": "Start a run of the next ready task", "run_task": "Start a run of task {id}",
@@ -217,6 +244,10 @@ class Chat:
         self.approvals = Approvals(loop)
         self.busy = False
         self.model = ""
+        self.mode = ""  # the mode the current session was started in
+        self.session_id: str | None = None  # the CLI session; coworker messages resume it in a new process
+        self.session_cost = 0.0  # the session's running total_cost_usd (the CLI reports totals, not per message)
+        self.generation = 0  # bumped by reset, so an answer still coming in doesn't revive the old session
 
     # -- permissions: everything the chat may do without the user, and the approval cards for the rest
 
@@ -244,6 +275,24 @@ class Chat:
             return self._verdict(answer)
         return PermissionResultAllow()
 
+    async def coworker_permission(self, name: str, args: dict, ctx=None):
+        """Coworker: no approval cards. Its own run/queue tools are allowed; everything else goes through
+        the workers' guard, with edits limited to its worktree, tasks/ and notes.md."""
+        if name.startswith(MCP_PREFIX):
+            return PermissionResultAllow()
+        wt = core.cowork_path(self.p)
+        check = core.guard(wt, also=(self.p.dir / "tasks", self.p.dir / "notes.md"), never=(Path(self.p.cfg["repo"]["worktrees"]),),
+                           extra_deny=core.COWORK_DENY, who="the Coworker")
+        return await check(name, args, ctx)
+
+    async def coworker_hook(self, data: dict, _tool_use_id=None, _ctx=None) -> dict:
+        """PreToolUse hook running the same check for every tool call, including those the CLI allows on its
+        own without asking can_use_tool (e.g. commands it thinks are read-only, like `echo`)."""
+        r = await self.coworker_permission(str(data.get("tool_name", "")), dict(data.get("tool_input") or {}))
+        if isinstance(r, PermissionResultDeny):
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": r.message}}
+        return {}
+
     @staticmethod
     def _verdict(answer: dict):
         if answer["action"] in ("allow_once", "always_allow"):
@@ -254,8 +303,9 @@ class Chat:
 
     # -- custom tools: the chat delegates to the workers through the same runner as the dashboard buttons
 
-    def tools(self) -> list:
+    def tools(self, approval: bool = True) -> list:
         p = self.p
+        needs = " (needs the user's approval)" if approval else ""
 
         def ok(text: str) -> dict:
             return {"content": [{"type": "text", "text": text}]}
@@ -294,70 +344,136 @@ class Chat:
                 lines.append(f"{t.id} {e.get('status', 'pending')} {e.get('tier') or t.tier or 'auto'} — {t.title}")
             return ok("\n".join(lines))
 
-        @tool("run_next", "Start a run of the next ready task (needs the user's approval).", {})
+        @tool("run_next", f"Start a run of the next ready task{needs}.", {})
         async def run_next(_a):
             return start("next")
 
-        @tool("run_task", "Start a run of one task (needs the user's approval).", {"id": str})
+        @tool("run_task", f"Start a run of one task{needs}.", {"id": str})
         async def run_task(a):
             return start("task", str(a.get("id", "")))
 
-        @tool("run_all", "Start a run of all ready tasks, one after another (needs the user's approval).", {})
+        @tool("run_all", f"Start a run of all ready tasks, one after another{needs}.", {})
         async def run_all(_a):
             return start("all")
 
-        @tool("plan_task", "Preview the router's tier and brief for a task, without doing it (needs the user's approval).", {"id": str})
+        @tool("plan_task", f"Preview the router's tier and brief for a task, without doing it{needs}.", {"id": str})
         async def plan_task(a):
             return start("plan", str(a.get("id", "")))
 
-        @tool("stop_run", "Stop the current run (needs the user's approval).", {})
+        @tool("stop_run", f"Stop the current run{needs}.", {})
         async def stop_run(_a):
             e = runner(p).stop()
             return err(e) if e else ok("run stopped")
 
         return [add_task, queue_status, run_next, run_task, run_all, plan_task, stop_run]
 
-    async def _client(self) -> ClaudeSDKClient:
+    # -- sessions: the Assistant keeps one CLI process; the Coworker starts one per message (resuming the
+    # session), because --max-budget-usd counts the spend of the process, which makes it a per-message budget.
+
+    def _assistant_options(self):
+        self.model = core.chat_settings("assistant")["model"]
+        prompt = CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p))
+        # Only read-only tools go in allowed_tools: anything listed there skips can_use_tool.
+        return core.options(self.p, model=self.model, cwd=str(self.p.dir), system_prompt=prompt, max_turns=15,
+                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
+                            mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools())},
+                            disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
+                            can_use_tool=self.permission, setting_sources=[])
+
+    def _coworker_options(self):
+        cs = core.chat_settings("coworker")
+        self.model = cs["model"]
+        wt = core.cowork_worktree(self.p)
+        prompt = COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"]))
+        gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
+        # Shell, edit and run tools must not go in allowed_tools (that skips can_use_tool, i.e. the guard).
+        # No setting_sources: a project's .claude/settings.json could allow commands past the guard.
+        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(wt), system_prompt=prompt,
+                            max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
+                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir)],
+                            mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
+                            disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
+                            can_use_tool=self.coworker_permission, setting_sources=[], env=gate_env,
+                            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.coworker_hook])]})
+
+    async def _client(self, mode: str) -> ClaudeSDKClient:
+        if self.client is not None and self.mode != mode:
+            await self._close()
         if self.client is None:
-            # Coworker mode is task 004; until then the chat behaves as the Assistant in both modes.
-            self.model = core.chat_settings("assistant")["model"]
-            prompt = CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p))
-            # Only read-only tools go in allowed_tools: anything listed there skips can_use_tool.
-            opts = core.options(self.p, model=self.model, cwd=str(self.p.dir), system_prompt=prompt, max_turns=15,
-                                allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
-                                mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools())},
-                                disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
-                                can_use_tool=self.permission, setting_sources=[])
+            self.mode = mode
+            # The coworker's worktree may need a `git worktree add` first: off the event loop.
+            opts = await asyncio.to_thread(self._coworker_options) if mode == "coworker" else self._assistant_options()
             self.client = ClaudeSDKClient(options=opts)
             await self.client.connect()
         return self.client
 
+    async def _close(self) -> None:
+        client, self.client = self.client, None
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:  # the process may be gone already
+                pass
+
+    def _answer(self, text: str, tools=(), cost: float = 0.0, tokens: dict | None = None) -> dict:
+        return {"text": text, "tools": list(tools), "cost": cost, "tokens": tokens or {}, "model": self.model}
+
     async def _ask(self, text: str) -> dict:
-        client = await self._client()
-        await client.query(text)
-        reply, calls, cost, tokens = [], {}, 0.0, {}
-        async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
-                for b in msg.content:
-                    if isinstance(b, TextBlock):
-                        reply.append(b.text)
-                    elif isinstance(b, ToolUseBlock):
-                        name = b.name[len(MCP_PREFIX):] if b.name.startswith(MCP_PREFIX) else b.name
-                        calls[b.id] = {"name": name, "input": tool_summary(b.name, b.input or {}), "output": "", "error": False}
-            elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
-                for b in msg.content:
-                    if isinstance(b, ToolResultBlock) and b.tool_use_id in calls:
-                        out = result_text(b.content)
-                        calls[b.tool_use_id].update(output=out[:2000] + ("\n…" if len(out) > 2000 else ""), error=bool(b.is_error))
-            elif isinstance(msg, ResultMessage):
-                cost, tokens = msg.total_cost_usd or 0.0, core.usage_tokens(msg.usage)
+        mode = core.chat_mode(self.p)
+        coworker = mode == "coworker"
+        acct = self.p.account.get("name", "default")
+        gen = self.generation
+        if coworker:
+            if why := core.usage_paused(acct):
+                self.model = core.chat_settings("coworker")["model"]
+                return self._answer(f"Paused: {why}. The Coworker doesn't start new work until the account's usage "
+                                    "window resets (`[limits] pause_at_utilization` in settings.toml).")
+            await self._close()  # a fresh process per message, so the budget counts this message only
+        client = await self._client(mode)
+        reply, calls, result, paused = [], {}, None, None
+        try:
+            await client.query(text)
+            async for msg in client.receive_response():
+                if isinstance(msg, RateLimitEvent):
+                    core.record_rate_limit(acct, msg.rate_limit_info)
+                    if coworker and not paused and (paused := core.over_pause(msg.rate_limit_info.utilization)):
+                        await client.interrupt()
+                elif isinstance(msg, AssistantMessage):
+                    for b in msg.content:
+                        if isinstance(b, TextBlock):
+                            reply.append(b.text)
+                        elif isinstance(b, ToolUseBlock):
+                            name = b.name[len(MCP_PREFIX):] if b.name.startswith(MCP_PREFIX) else b.name
+                            calls[b.id] = {"name": name, "input": tool_summary(b.name, b.input or {}), "output": "", "error": False}
+                elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+                    for b in msg.content:
+                        if isinstance(b, ToolResultBlock) and b.tool_use_id in calls:
+                            out = result_text(b.content)
+                            calls[b.tool_use_id].update(output=out[:2000] + ("\n…" if len(out) > 2000 else ""), error=bool(b.is_error))
+                elif isinstance(msg, ResultMessage):
+                    result = msg
+        finally:
+            if coworker and self.client is client:
+                await self._close()
+        cost, tokens = 0.0, {}
+        if result is not None:
+            # total_cost_usd is the session's running total (also across a resume): this message is the difference.
+            total = float(result.total_cost_usd or 0.0)
+            cost = total - self.session_cost if total >= self.session_cost else total
+            tokens = core.usage_tokens(result.usage)
+            if gen == self.generation:  # not reset (e.g. a mode switch) meanwhile
+                self.session_cost, self.session_id = total, result.session_id
         u = self.usage()
         u["spent_usd"] = round(u.get("spent_usd", 0.0) + cost, 4)
         for k, v in tokens.items():
             u.setdefault("tokens", {})[k] = u.get("tokens", {}).get(k, 0) + v
         self.p.path("chat_usage.json").write_text(json.dumps(u), encoding="utf-8")
-        return {"text": "\n\n".join(reply).strip() or "(no answer)", "tools": list(calls.values()), "cost": cost, "tokens": tokens,
-                "model": self.model}
+        parts = ["\n\n".join(reply).strip()]
+        if paused:
+            parts.append(f"Paused: {paused}. The Coworker stopped here instead of continuing.")
+        if coworker and (note := budget_note(result, cost)):
+            parts.append(note)
+        return self._answer("\n\n".join(x for x in parts if x) or "(no answer)", calls.values(), cost, tokens)
 
     def usage(self) -> dict:
         f = self.p.path("chat_usage.json")
@@ -390,11 +506,31 @@ class Chat:
             if self.client is not None:
                 asyncio.run_coroutine_threadsafe(self.client.disconnect(), self.loop)
                 self.client = None
+            self.generation += 1
+            self.mode, self.session_id, self.session_cost = "", None, 0.0
             if not keep_history:
                 self.history = []
 
     def info(self) -> dict:
-        return {"history": self.history, "mode": core.chat_mode(self.p), "busy": self.busy, "model": core.chat_settings("assistant")["model"]}
+        mode = core.chat_mode(self.p)
+        cs = core.chat_settings(mode)
+        out = {"history": self.history, "mode": mode, "busy": self.busy, "model": cs["model"]}
+        if mode == "coworker":
+            out.update(budget_usd=float(cs["budget_usd"]), worktree=str(core.cowork_path(self.p)), branch=f"auto/{core.COWORK}")
+        return out
+
+
+def budget_note(result, cost: float) -> str | None:
+    """The chat's message when a coworker message hit `[chat.coworker] budget_usd`."""
+    if result is None or result.subtype != "error_max_budget_usd":
+        return None
+    budget = float(core.chat_settings("coworker")["budget_usd"])
+    return (f"Stopped: this message spent {usd(cost)} and reached the Coworker budget of {usd(budget)} per message "
+            "(`[chat.coworker] budget_usd` in settings.toml). Send another message to continue.")
+
+
+def usd(x: float) -> str:
+    return f"${x:.2f}" if x >= 0.1 or x == 0 else f"${x:.4f}"
 
 
 LOOP = asyncio.new_event_loop()
@@ -493,8 +629,12 @@ def project_state(p: core.Project) -> dict:
                       "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
                       "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", "")})
     s = core.settings()
+    mode = core.chat_mode(p)
+    cs = core.chat_settings(mode)
     return {"project": {"slug": p.slug, "name": p.name, "repo": str(p.repo), "base": p.cfg["repo"]["base"], "account": p.account.get("name"),
-                        "gates": p.cfg.get("gates", {}).get("quick", []), "chat_mode": core.chat_mode(p)},
+                        "gates": p.cfg.get("gates", {}).get("quick", []), "chat_mode": mode,
+                        "chat_model": cs["model"] + (f" ({cs['effort']})" if cs.get("effort") else ""),
+                        "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
             "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"pause_at": s["limits"]["pause_at_utilization"], "run_budget": s["limits"]["run_budget_usd"]},

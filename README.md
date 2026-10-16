@@ -86,10 +86,27 @@ session and keeps the messages on screen.
   It never edits your code: it may only write task files (`tasks/*.md`) and add to `notes.md`. It
   hands work to the workers with its own tools: `add_task` and `queue_status` (no approval) and
   `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`, which each show an approval card first.
-- **Coworker** (autonomous) is planned for a later version; until then choosing it is saved but the
-  chat behaves as the Assistant.
+- **Coworker** (autonomous; model from `[chat.coworker]`, default `sonnet` at `effort = "medium"`).
+  The chat header shows the badge *Coworker: runs commands without asking*. It reads and analyzes
+  freely, runs shell commands and uses the same tools (`add_task`, `run_next`, `run_task`, `run_all`,
+  `plan_task`, `stop_run`, `queue_status`) **without approval cards**. It changes code only in its
+  own worktree `<worktrees>/cowork` on branch `auto/cowork` (created from the base branch on first
+  use, kept afterwards) and may commit there; review and merge `auto/cowork` like the workers'
+  branches. Limits:
+  - the workers' guard (`[guard] deny` in `settings.toml`): no push, remotes, publishing, pull
+    requests, hard resets or switching to main; shell commands naming `project.toml` or
+    `settings.toml` are refused too. Edits are allowed only in its worktree, `tasks/` and
+    `notes.md` of the project folder. The check runs before every tool call (also the ones the
+    Claude CLI would allow by itself), and a refused call is reported in the chat.
+  - a budget per message, `[chat.coworker] budget_usd` (default 2.0). Each message runs in a fresh
+    Claude process that resumes the conversation, so the budget counts that message only; when it's
+    reached the answer ends with *Stopped: … reached the Coworker budget*. The check runs after each
+    model turn, so a message can go over by one turn.
+  - the account usage pause (`[limits] pause_at_utilization`): if the account's last reading is at or
+    over the threshold, the Coworker answers *Paused: …* instead of starting; if a reading crosses it
+    during a message, it stops there and says so.
 
-**Approvals.** When the chat wants to run a shell command (Bash/PowerShell) or start/stop a run, a
+**Approvals** (Assistant mode). When the chat wants to run a shell command (Bash/PowerShell) or start/stop a run, a
 card appears under the messages: **Allow once**, **Always allow** or **Deny**. Nothing runs before
 you answer; no answer within 10 minutes counts as Deny.
 

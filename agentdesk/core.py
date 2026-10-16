@@ -81,6 +81,12 @@ budget_usd = 12.0
 [chat.assistant]
 model = "haiku"
 
+# Coworker: autonomous chat (no approval cards), guarded like the workers; budget_usd is per message.
+[chat.coworker]
+model = "sonnet"
+effort = "medium"
+budget_usd = 2.0
+
 [guard]
 deny = [
   'git\\s+push', 'git\\s+remote', 'gh\\s+(pr|release|repo|api|issue|workflow)', 'git\\s+reset\\s+--hard',
@@ -241,15 +247,22 @@ def setup_local_git(repo: str) -> str:
 
 CHAT_MODES = ("assistant", "coworker")
 CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet"}
+# Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
+CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 2.0, "max_turns": 40}}
+COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
+# On top of `[guard] deny`: the Coworker may not touch AgentDesk's own config from the shell (the
+# orchestrator runs project.toml's gate commands unguarded, and settings.toml holds the guard itself).
+COWORK_DENY = (r"project\.toml", r"settings\.toml")
 # Auto-approving a command by prefix is only safe for a single plain command: anything that could
 # chain, pipe, redirect or evaluate a second command (also PowerShell's (...), $(...), {...}) asks.
 SHELL_META = re.compile(r"[;&|`<>(){}$\n\r]")
 
 
 def chat_settings(mode: str) -> dict:
-    """`[chat.<mode>]` from settings.toml, with the model defaulting to `[chat] model`, then haiku/sonnet."""
+    """`[chat.<mode>]` from settings.toml over CHAT_DEFAULTS; the assistant's model falls back to the older
+    `[chat] model`, then haiku (coworker: sonnet)."""
     chat = settings().get("chat", {})
-    out = dict(chat.get(mode, {}))
+    out = {**CHAT_DEFAULTS.get(mode, {}), **chat.get(mode, {})}
     legacy = chat.get("model") if mode == "assistant" else None  # older settings.toml: [chat] model
     out["model"] = out.get("model") or legacy or CHAT_DEFAULT_MODELS.get(mode, "haiku")
     return out
@@ -469,16 +482,9 @@ def git(args: list[str], cwd: Path) -> tuple[int, str]:
     return run(["git", *args], cwd)
 
 
-def ensure_worktree(p: Project, store: Store, task: Task) -> Path:
-    wt = Path(p.cfg["repo"]["worktrees"]) / task.id
-    if wt.exists():
-        return wt
+def add_worktree(p: Project, wt: Path, branch: str, base: str) -> None:
+    """`git worktree add` at `wt` on a new `branch` from `base` (or on `branch` if it exists already)."""
     wt.parent.mkdir(parents=True, exist_ok=True)
-    branch, base = f"auto/{task.id}", p.cfg["repo"]["base"]
-    state = store.load()
-    for dep in task.depends:
-        if state["tasks"].get(dep, {}).get("status") == "done":
-            base = f"auto/{dep}"
     code, out = git(["worktree", "add", str(wt), "-b", branch, base], p.repo)
     if code != 0:
         code, out = git(["worktree", "add", str(wt), branch], p.repo)
@@ -488,7 +494,33 @@ def ensure_worktree(p: Project, store: Store, task: Task) -> Path:
         src = p.repo / name
         if src.is_file():
             (wt / name).write_bytes(src.read_bytes())
+
+
+def ensure_worktree(p: Project, store: Store, task: Task) -> Path:
+    wt = Path(p.cfg["repo"]["worktrees"]) / task.id
+    if wt.exists():
+        return wt
+    branch, base = f"auto/{task.id}", p.cfg["repo"]["base"]
+    state = store.load()
+    for dep in task.depends:
+        if state["tasks"].get(dep, {}).get("status") == "done":
+            base = f"auto/{dep}"
+    add_worktree(p, wt, branch, base)
     store.log(f"{task.id}: worktree {wt} on {branch} from {base}")
+    return wt
+
+
+def cowork_path(p: Project) -> Path:
+    return Path(p.cfg["repo"]["worktrees"]) / COWORK
+
+
+def cowork_worktree(p: Project) -> Path:
+    """The Coworker chat's own worktree `<worktrees>/cowork` on branch `auto/cowork` (created from the base
+    branch on first use, then kept): it edits and commits there, never in the user's checkout."""
+    wt = cowork_path(p)
+    if not wt.exists():
+        add_worktree(p, wt, f"auto/{COWORK}", p.cfg["repo"]["base"])
+        Store(p).log(f"chat: coworker worktree {wt} on auto/{COWORK}")
     return wt
 
 
@@ -558,11 +590,7 @@ class Meter:
             info = msg.rate_limit_info
             if info.utilization is not None:
                 self.utilization = max(self.utilization, float(info.utilization))
-            usage = account_usage(self.acct)
-            usage.setdefault("rate_limits", {})[str(info.rate_limit_type or "limit")] = {
-                "utilization": info.utilization, "status": str(info.status), "resets_at": info.resets_at,
-                "seen": dt.datetime.now().isoformat(timespec="seconds")}
-            save_account_usage(self.acct, usage)
+            record_rate_limit(self.acct, info)
         if isinstance(msg, ResultMessage):
             if msg.total_cost_usd:
                 self.state["spent_usd"] = round(self.state.get("spent_usd", 0.0) + msg.total_cost_usd, 4)
@@ -579,20 +607,76 @@ class Meter:
         return None
 
 
-def guard(wt: Path):
-    deny = [re.compile(x, re.I) for x in settings()["guard"]["deny"]]
-    root = str(wt.resolve()).lower().replace("\\", "/")
+def record_rate_limit(acct: str, info) -> None:
+    """Save a usage-limit reading (RateLimitInfo) for the account; the dashboard gauge reads it."""
+    usage = account_usage(acct)
+    usage.setdefault("rate_limits", {})[str(info.rate_limit_type or "limit")] = {
+        "utilization": info.utilization, "status": str(info.status), "resets_at": info.resets_at,
+        "seen": dt.datetime.now().isoformat(timespec="seconds")}
+    save_account_usage(acct, usage)
+
+
+def over_pause(utilization: float | None) -> str | None:
+    """Why work pauses at this usage reading (`[limits] pause_at_utilization`), or None."""
+    at = float(settings()["limits"]["pause_at_utilization"])
+    if utilization is not None and float(utilization) >= at:
+        return f"account usage {float(utilization):.0%} reached the pause threshold ({at:.0%})"
+    return None
+
+
+def usage_paused(acct: str, now: float | None = None) -> str | None:
+    """The pause reason from the account's saved readings that still apply (window not reset yet; readings
+    without a reset time count for 5 hours)."""
+    now = dt.datetime.now().timestamp() if now is None else now
+    for kind, r in account_usage(acct).get("rate_limits", {}).items():
+        resets = r.get("resets_at")
+        if resets is None:
+            try:
+                resets = dt.datetime.fromisoformat(str(r.get("seen"))).timestamp() + 5 * 3600
+            except ValueError:
+                continue
+        if float(resets) > now and (why := over_pause(r.get("utilization"))):
+            return f"{why} ({kind})"
+    return None
+
+
+SHELL_TOOLS = ("Bash", "PowerShell")
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+def norm_path(path: str | Path, base: Path) -> str:
+    """Absolute, normalized (`..` and symlinks resolved), lower-case, forward slashes."""
+    p = Path(path)
+    return os.path.realpath(p if p.is_absolute() else base / p).lower().replace("\\", "/")
+
+
+def inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def guard(wt: Path, also: tuple[Path, ...] = (), never: tuple[Path, ...] = (), extra_deny: tuple[str, ...] = (),
+          who: str = "automated workers"):
+    """can_use_tool for agents that work on their own: shell commands matching `[guard] deny` (or
+    `extra_deny`) are refused, and edits must land inside `wt` or one of `also` (folders or files), but
+    never inside `never` (other than `wt` itself). Everything else is allowed."""
+    deny = [re.compile(x, re.I) for x in [*settings()["guard"]["deny"], *extra_deny]]
+    root = norm_path(wt, wt)
+    roots = [norm_path(a, wt) for a in also]
+    blocked = [norm_path(n, wt) for n in never]
 
     async def can_use_tool(name: str, args: dict, _ctx):
-        if name in ("Bash", "PowerShell"):
+        if name in SHELL_TOOLS:
             cmd = str(args.get("command", ""))
             for x in deny:
                 if x.search(cmd):
-                    return PermissionResultDeny(message=f"not allowed for automated workers: {x.pattern}")
-        if name in ("Edit", "Write", "NotebookEdit"):
-            target = str(args.get("file_path", "")).lower().replace("\\", "/")
-            if target and not target.startswith(root):
-                return PermissionResultDeny(message="edit files inside your worktree only")
+                    return PermissionResultDeny(message=f"not allowed for {who}: {x.pattern}")
+        if name in EDIT_TOOLS:
+            raw = str(args.get("file_path") or args.get("notebook_path") or "")
+            target = norm_path(raw, wt) if raw else ""
+            ok = bool(target) and (inside(target, root) or (any(inside(target, r) for r in roots)
+                                                            and not any(inside(target, b) for b in blocked)))
+            if not ok:
+                return PermissionResultDeny(message=f"edit files inside your worktree only ({wt})")
         return PermissionResultAllow()
 
     return can_use_tool
