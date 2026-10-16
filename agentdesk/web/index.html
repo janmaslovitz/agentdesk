@@ -261,12 +261,24 @@ async function refreshAll() {
     const lims = Object.values(a.usage||{}), u = lims.length ? Math.max(...lims.map(l => l.utilization||0)) : null;
     return `<div class="acct"><span class="dot${a.ready?" on":""}"></span><b>${esc(a.name)}</b> <span class="muted">${a.kind==="api_key"?"API key":"subscription"}</span>
       <div class="m" style="color:${a.ready?"var(--ok,#3fb950)":"var(--warn,#d29922)"}">${a.ready?`Connected${a.email?" as "+esc(a.email):""}`:(a.kind==="api_key"?"Key not set":"Not connected")}</div>
-      ${u!=null?` · ${Math.round(u*100)}% used`:""}
       <div class="m">${esc(a.where)}</div>
+      <div class="m">${readingText(a.reading, a.max_age_min)}</div>
+      <div style="margin-top:4px">Current usage: <input id="mu_${esc(a.name)}" type="number" min="0" max="100" step="1" style="width:56px" value="${a.reading&&a.reading.source==="manual"?Math.round(a.reading.utilization*100):""}"> %
+        <button style="padding:2px 8px;font-size:12px" onclick="saveUsage('${esc(a.name)}')">Save</button></div>
       ${a.kind!=="api_key"?`<button style="margin-top:4px;padding:2px 8px;font-size:12px" onclick="login('${esc(a.name)}')">Log in</button>`:""}</div>`;
   }).join("");
   refresh();
 }
+function readingText(r, maxAge) {
+  if (!r) return "usage unknown — enter it under Accounts";
+  const age = r.age_min < 1 ? "just now" : r.age_min < 90 ? Math.round(r.age_min) + " min ago" : Math.round(r.age_min/60) + " h ago";
+  return `${Math.round(r.utilization*100)}% used · source ${esc(r.source)} · ${age}` + (r.stale ? ` — older than ${maxAge} min: usage unknown — enter it under Accounts` : "");
+}
+async function saveUsage(name) {
+  const r = await api(`/api/accounts/${encodeURIComponent(name)}/usage`, {percent: $("mu_" + name).value});
+  if (r.error) note(r.error); else refreshAll();
+}
+const usedText = v => v == null ? "unknown" : "about " + v + "% of your window";
 function pickProject(slug) { cur = slug; selTask = null; localStorage.setItem("agentdesk.project", slug); refreshAll(); }
 
 function shell() {
@@ -284,6 +296,7 @@ function shell() {
   <div class="grid">
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
+      <div class="muted" id="tierAvg" style="margin:6px 0"></div>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
     <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Works on its own in its own worktree: runs commands and starts runs without asking, within the guard and a budget per message">Coworker</button></span>
         <span class="badge" id="coworkBadge" hidden>Coworker: runs commands without asking</span>
@@ -393,21 +406,24 @@ async function refresh() {
   $("tok").textContent = fmt(sumTok(st.tokens));
   $("tokd").textContent = `in ${fmt(st.tokens.input)} · out ${fmt(st.tokens.output)} · cache ${fmt((st.tokens.cache_read||0)+(st.tokens.cache_write||0))}`;
   $("chatc").textContent = money(st.chat.spent_usd); $("chatt").textContent = fmt(sumTok(st.chat.tokens)) + " tokens";
-  const lims = Object.entries(st.usage||{});
-  if (lims.length) {
-    const [name, l] = lims.reduce((a, b) => ((b[1].utilization||0) > (a[1].utilization||0) ? b : a));
-    const u = l.utilization ?? 0;
+  const rd = st.reading, lims = Object.values(st.usage||{}).filter(l => l.resets_at);
+  if (rd) {
+    const u = rd.utilization;
     $("rl").textContent = Math.round(u*100) + "%"; $("rlbar").style.width = Math.min(100, u*100) + "%";
-    $("rlbar").style.background = u >= st.limits.pause_at ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
-    $("rld").textContent = `${name}; pauses at ${Math.round(st.limits.pause_at*100)}%` + (l.resets_at ? `; resets ${new Date(l.resets_at*1000).toLocaleString()}` : "");
+    $("rlbar").style.background = rd.stale ? "var(--muted)" : u >= st.limits.pause_at ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
+    $("rld").innerHTML = readingText(rd, st.max_age_min) + `; pauses at ${Math.round(st.limits.pause_at*100)}%`;
+  } else {
+    $("rl").textContent = "unknown"; $("rlbar").style.width = "0";
+    $("rld").textContent = "usage unknown — enter it under Accounts";
   }
   $("tiers").textContent = Object.entries(st.tiers).map(([k,v]) => `${k}: ${v.model}${v.effort?" ("+v.effort+")":""}`).join(" · ");
+  $("tierAvg").textContent = Object.entries(st.tier_avg||{}).map(([k,v]) => `${k} tasks average ${v.avg_pct}% (${v.tasks})`).join(" · ") || "no per-tier usage averages yet";
   $("tasks").innerHTML = st.tasks.map(t => {
     const models = [...new Set(t.runs.filter(x => x.tier !== "router").map(x => x.model))].join(" → ");
     return `<tr class="task${t.id===selTask?" sel":""}" onclick="pickTask('${esc(t.id)}')"><td class="num">${esc(t.id)}</td>
       <td>${esc(t.title)}${t.depends.length?`<div class="muted">after ${esc(t.depends.join(", "))}</div>`:""}</td>
       <td><span class="st ${esc(t.status)}">${esc(t.status)}</span></td><td>${esc(t.tier||"auto")}${models?`<div class="muted">${esc(models)}</div>`:""}</td>
-      <td class="num">${fmt(sumTok(t.tokens))}</td><td class="num">${money(t.cost)}</td>
+      <td class="num">${fmt(sumTok(t.tokens))}</td><td class="num">${money(t.cost)}<div class="muted">${t.runs.length?usedText(t.used_pct):""}</div></td>
       <td><button onclick="event.stopPropagation();runMode('task','${esc(t.id)}')" ${t.status==="done"||r.running?"disabled":""}>Run</button></td></tr>`;
   }).join("") || `<tr><td colspan="7" class="muted">No tasks yet: press "+ Task" or describe the work in the chat.</td></tr>`;
   const box = $("log").parentElement, atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
@@ -431,10 +447,10 @@ async function showDetail(fetchText) {
   const t = st?.tasks.find(x => x.id === selTask); if (!t) return;
   if (fetchText || !detailCache || detailCache.id !== selTask) detailCache = {id: selTask, ...(await api(`/api/p/${cur}/task/${encodeURIComponent(selTask)}`))};
   const d = detailCache;
-  const runs = t.runs.map(x => `<tr><td>${esc(x.at||"")}</td><td>${esc(x.tier)}</td><td>${esc(x.model)}</td><td class="num">${x.attempt||""}</td><td class="num">${x.turns||""}</td><td class="num">${fmt(sumTok(x.tokens))}</td><td class="num">${money(x.cost_usd)}</td><td>${x.error?"error":""}</td></tr>`).join("");
+  const runs = t.runs.map(x => `<tr><td>${esc(x.at||"")}</td><td>${esc(x.tier)}</td><td>${esc(x.model)}</td><td class="num">${x.attempt||""}</td><td class="num">${x.turns||""}</td><td class="num">${fmt(sumTok(x.tokens))}</td><td class="num">${money(x.cost_usd)}</td><td class="num">${x.usage_used_pct==null?"unknown":x.usage_used_pct+"%"}</td><td>${x.error?"error":""}</td></tr>`).join("");
   $("detail").innerHTML = `<b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span>
     ${t.commit?` <span class="muted">branch ${esc(t.branch)} @ ${esc(t.commit)}</span>`:""}${t.why?`<div class="muted">Router: ${esc(t.why)}</div>`:""}
-    ${runs?`<h4>Runs</h4><table><tr><th>When</th><th>Tier</th><th>Model</th><th>Try</th><th>Turns</th><th>Tokens</th><th>Cost</th><th></th></tr>${runs}</table>`:""}
+    ${runs?`<h4>Runs</h4><table><tr><th>When</th><th>Tier</th><th>Model</th><th>Try</th><th>Turns</th><th>Tokens</th><th>Cost</th><th>Window</th><th></th></tr>${runs}</table>`:""}
     ${t.failure?`<h4>Last failure</h4><pre>${esc(t.failure)}</pre>`:""}
     ${d.report?`<h4>Report</h4><pre>${esc(d.report)}</pre>`:d.brief?`<h4>Brief</h4><pre>${esc(d.brief)}</pre>`:""}
     <h4>Task</h4><pre>${esc(d.body)}</pre>

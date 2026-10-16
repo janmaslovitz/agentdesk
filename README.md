@@ -45,6 +45,20 @@ Sidebar → Accounts → **+ Add**:
 Each project uses one account (chosen when adding it; changeable in its `project.toml`). The
 usage gauge is per account: runs pause when the account's usage reaches the threshold.
 
+**Usage reading.** The gauge and the pause use the newest reading of the account's usage, with its
+source and age. Source `sdk`: the percentage Claude Code reports in its rate-limit events during a
+run or chat (often missing, then there is no automatic reading). Source `manual`: type the number
+under **Current usage: [ ] %** in the account row and press **Save**. A reading older than
+`[limits] usage_max_age_min` (default 30) counts as unknown. With no fresh reading a run does not
+start ("usage unknown — enter it under Accounts"); at or above `pause_at_utilization` it stops
+("usage limit N% reached the pause threshold"). Only the percentage, time and source are stored
+(`data/accounts/<name>.json`, key `reading`; no credentials).
+
+**Cost per run.** Each run/attempt in `state.json` records `usage_before`, `usage_after` and
+`usage_used_pct` (percent points; null = unknown, shown as "unknown", e.g. when no newer reading
+arrived during the run). The dashboard shows per task "used about X% of your window" and, above
+the task list, the average per tier.
+
 ## Projects
 
 Sidebar → Projects → **+ Add**: name, the repository folder (a git repo), the branch tasks start
