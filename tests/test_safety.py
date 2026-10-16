@@ -97,3 +97,14 @@ def test_account_rows_report_real_connection(monkeypatch):
     server._AUTH_CACHE.clear()
     row = server.account_rows()[0]
     assert row["ready"] is False and row["email"] == ""
+
+
+def test_child_processes_get_no_console_window_on_windows():
+    import subprocess as sp
+    if os.name != "nt":
+        return
+    assert core.no_console_flags(0) == sp.CREATE_NO_WINDOW
+    assert core.no_console_flags(sp.CREATE_NEW_PROCESS_GROUP) == sp.CREATE_NEW_PROCESS_GROUP | sp.CREATE_NO_WINDOW
+    assert core.no_console_flags(sp.DETACHED_PROCESS) == sp.DETACHED_PROCESS      # left alone
+    assert core.no_console_flags(sp.CREATE_NEW_CONSOLE) == sp.CREATE_NEW_CONSOLE  # the login window keeps its console
+    assert getattr(sp.Popen, "_agentdesk_nowindow", False)

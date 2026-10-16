@@ -72,6 +72,33 @@ def _hide_sdk_console() -> None:
 
 
 _hide_sdk_console()
+
+
+def no_console_flags(flags: int = 0) -> int:
+    """Windows creationflags for a child process: no console window unless it asked for its own
+    (CREATE_NEW_CONSOLE / DETACHED_PROCESS). The packaged AgentDesk.exe has no console, so without this
+    every `git` or shell command it runs pops up a window."""
+    if os.name != "nt":
+        return flags
+    own = subprocess.CREATE_NEW_CONSOLE | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+    return flags if flags & own else flags | subprocess.CREATE_NO_WINDOW
+
+
+def _hide_child_consoles() -> None:
+    """Make every subprocess.Popen in this program (git, checks, taskkill, the CLI ...) windowless on Windows."""
+    if os.name != "nt" or getattr(subprocess.Popen, "_agentdesk_nowindow", False):
+        return
+    orig = subprocess.Popen.__init__
+
+    def init(self, *args, **kw):
+        kw["creationflags"] = no_console_flags(kw.get("creationflags", 0))
+        orig(self, *args, **kw)
+
+    subprocess.Popen.__init__ = init
+    subprocess.Popen._agentdesk_nowindow = True
+
+
+_hide_child_consoles()
 def _data_home() -> Path:
     """AGENTDESK_HOME, else `data` next to the app. The packaged program (often under Program Files, which
     users can't write to) uses `data` next to the .exe only if it already exists there, else the AgentDesk folder in LOCALAPPDATA."""
