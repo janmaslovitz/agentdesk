@@ -1112,8 +1112,32 @@ def log_error(msg: str) -> None:
         pass
 
 
-def open_window(url: str) -> bool:
-    """Show the dashboard in a native window; blocks until it is closed. False if no window could be shown."""
+QUIT = threading.Event()  # set by the tray "Quit": main() then stops the server
+
+
+def start_tray(win, show, quit_app):
+    """Start a tray icon (Open / Quit) in its own thread; returns the icon, or None (reason logged) if it can't run."""
+    try:
+        import pystray
+        from PIL import Image, ImageDraw
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle((2, 2, 61, 61), radius=14, fill=(37, 99, 235, 255))
+        d.polygon([(18, 46), (32, 16), (46, 46), (39, 46), (32, 31), (25, 46)], fill=(255, 255, 255, 255))
+        menu = pystray.Menu(pystray.MenuItem("Open", lambda icon, item: show(), default=True),
+                            pystray.MenuItem("Quit", lambda icon, item: quit_app()))
+        icon = pystray.Icon("AgentDesk", img, "AgentDesk", menu)
+        icon.run_detached()  # webview.start() must own the main thread
+        return icon
+    except Exception as e:  # not installed, or no tray on this platform / session
+        log_error(f"AgentDesk: no tray icon, closing the window will end it ({type(e).__name__}: {e}). "
+                  f"Install it with `pip install -r requirements-tray.txt`.")
+        return None
+
+
+def open_window(url: str, tray: bool = False) -> bool:
+    """Show the dashboard in a native window; blocks until it is closed. False if no window could be shown.
+    tray=True: closing (X) hides the window to a tray icon instead (if the tray can start); tray Quit sets QUIT."""
     try:
         import webview
         w = window_settings()
@@ -1140,7 +1164,37 @@ def open_window(url: str) -> bool:
         win.events.resized += resized
         win.events.moved += moved
         win.events.closed += closed
+
+        icon = None
+        if tray:
+            state = {"quitting": False}
+
+            def show():
+                win.show()
+                win.restore()
+
+            def quit_app():
+                state["quitting"] = True
+                QUIT.set()
+                try:
+                    icon.stop()
+                finally:
+                    win.destroy()
+
+            def closing():
+                if state["quitting"]:
+                    return True
+                threading.Thread(target=win.hide, daemon=True).start()  # not from inside the close event
+                return False  # cancel the close
+
+            icon = start_tray(win, show, quit_app)
+            if icon is not None:
+                win.events.closing += closing
+        try:
         webview.start()
+        finally:
+            if icon is not None:
+                icon.stop()
         return True
     except Exception as e:  # ImportError, missing WebView2 / engine, no display ...
         log_error(f"AgentDesk: cannot open the native window ({type(e).__name__}: {e}); falling back to the browser. "
@@ -1173,10 +1227,11 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     try:
         if browser:
             webbrowser.open(url)
-        elif window and not open_window(url):
+        elif window and not open_window(url, tray=True):
             webbrowser.open(url)
-        # Closing the window only ends the window: the server (and runs) go on until it is stopped.
-        while thread.is_alive():
+        # Closing the window hides it to the tray (or ends just the window without a tray): the server and runs
+        # go on until tray Quit or `stop`.
+        while thread.is_alive() and not QUIT.is_set():
             thread.join(0.5)
     except KeyboardInterrupt:
         pass
