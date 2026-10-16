@@ -1,1 +1,2 @@
 claude-agent-sdk>=0.2.166
+pywebview>=5.0
