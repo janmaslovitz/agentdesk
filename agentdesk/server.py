@@ -701,6 +701,8 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             if len(parts) == 4 and parts[3] == "state":
                 return self.json(project_state(p))
+            if len(parts) == 4 and parts[3] == "git":
+                return self.json(core.git_status(p))
             if len(parts) == 4 and parts[3] == "chat":
                 return self.json(chat(p).info())
             if len(parts) == 4 and parts[3] == "pending":
@@ -746,6 +748,22 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json({"error": "unknown mode"}, 400)
                     err = runner(p).start(args)
                     return self.json({"error": err} if err else {"ok": True})
+                if act == "git" and len(parts) == 5:
+                    if parts[4] not in ("fetch", "merge", "pull", "push"):
+                        return self.json({"error": "unknown git action"}, 400)
+                    if runner(p).running():
+                        return self.json({"ok": False, "message": "a run is in progress for this project; stop it first"})
+                    if parts[4] != "fetch" and d.get("confirm") is not True:
+                        return self.json({"ok": False, "message": "this needs confirmation"}, 400)
+                    if parts[4] == "fetch":
+                        res = core.git_fetch(p)
+                    elif parts[4] == "merge":
+                        res = core.git_merge(p, str(d.get("branch", "")))
+                    elif parts[4] == "pull":
+                        res = core.git_pull(p)
+                    else:
+                        res = core.git_push(p, str(d.get("branch") or "") or None)
+                    return self.json({**res, "status": core.git_status(p)})
                 if act == "stop":
                     err = runner(p).stop()
                     return self.json({"error": err} if err else {"ok": True})

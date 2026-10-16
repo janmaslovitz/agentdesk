@@ -525,6 +525,109 @@ def git(args: list[str], cwd: Path) -> tuple[int, str]:
     return run(["git", *args], cwd)
 
 
+# ----------------------------------------------------------------------------- git panel (user actions only)
+
+def _g(p: "Project", *args: str, timeout: int = 120) -> tuple[int, str]:
+    code, out = run(["git", *args], p.repo, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=timeout)
+    return code, out.strip()
+
+
+def git_remote(p: "Project") -> tuple[str, str] | None:
+    """(name, url) of the project's remote (origin if present, else the first one), or None for local-only."""
+    code, out = _g(p, "remote")
+    names = out.split() if code == 0 else []
+    if not names:
+        return None
+    name = "origin" if "origin" in names else names[0]
+    code, url = _g(p, "remote", "get-url", name)
+    return name, url if code == 0 else ""
+
+
+def _count(p: "Project", rng: str) -> int:
+    code, out = _g(p, "rev-list", "--count", rng)
+    return int(out) if code == 0 and out.isdigit() else 0
+
+
+def git_status(p: "Project") -> dict:
+    base = p.cfg["repo"]["base"]
+    _, branch = _g(p, "rev-parse", "--abbrev-ref", "HEAD")
+    _, porcelain = _g(p, "status", "--porcelain")
+    remote = git_remote(p)
+    st = {"branch": branch, "base": base, "clean": porcelain == "", "changes": porcelain.splitlines()[:50],
+          "remote": remote[0] if remote else None, "remote_url": remote[1] if remote else None,
+          "upstream": None, "ahead": 0, "behind": 0, "autos": []}
+    code, up = _g(p, "rev-parse", "--abbrev-ref", "@{u}")
+    if code != 0 and remote:
+        cand = f"{remote[0]}/{branch}"
+        if _g(p, "rev-parse", "--verify", "-q", f"refs/remotes/{cand}")[0] == 0:
+            code, up = 0, cand
+    if code == 0 and up:
+        st["upstream"] = up
+        st["ahead"], st["behind"] = _count(p, f"{up}..HEAD"), _count(p, f"HEAD..{up}")
+    _, branches = _g(p, "for-each-ref", "--format=%(refname:short)", "refs/heads/auto/")
+    for b in branches.splitlines():
+        n = _count(p, f"{base}..{b}")
+        if n:
+            st["autos"].append({"branch": b, "ahead": n})
+    return st
+
+
+def git_fetch(p: "Project") -> dict:
+    if git_remote(p) is None:
+        return {"ok": False, "message": "local-only project: there is no remote to fetch from"}
+    code, out = _g(p, "fetch", "--prune")
+    return {"ok": code == 0, "message": out or "Fetched. Nothing new." if code == 0 else out}
+
+
+def git_merge(p: "Project", branch: str) -> dict:
+    """Merge `branch` into the base branch (never rewrites history). A conflict is aborted, leaving the repo as it was."""
+    base = p.cfg["repo"]["base"]
+    if not branch or branch.startswith("-") or _g(p, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")[0] != 0:
+        return {"ok": False, "message": f"there is no local branch '{branch}'"}
+    _, cur = _g(p, "rev-parse", "--abbrev-ref", "HEAD")
+    if cur != base:
+        return {"ok": False, "message": f"the repo is on '{cur}', not on the base branch '{base}'. Switch to '{base}' first."}
+    if _g(p, "status", "--porcelain")[1]:
+        return {"ok": False, "message": "the working tree has uncommitted changes; commit or stash them first"}
+    if _count(p, f"{base}..{branch}") == 0:
+        return {"ok": True, "message": f"'{branch}' has nothing new for '{base}'. Already up to date."}
+    _, before = _g(p, "rev-parse", "HEAD")
+    code, out = _g(p, "merge", "--no-edit", branch)
+    if code == 0:
+        return {"ok": True, "message": out or f"Merged '{branch}' into '{base}'."}
+    _, files = _g(p, "diff", "--name-only", "--diff-filter=U")
+    conflicts = files.splitlines()
+    _g(p, "merge", "--abort")
+    if conflicts:
+        return {"ok": False, "conflicts": conflicts, "message": f"Merge conflict in: {', '.join(conflicts)}. The merge was aborted; nothing changed."}
+    if _g(p, "rev-parse", "HEAD")[1] != before:
+        _g(p, "reset", "--merge", before)
+    return {"ok": False, "message": out}
+
+
+def git_pull(p: "Project", ff_only: bool = True) -> dict:
+    if git_remote(p) is None:
+        return {"ok": False, "message": "local-only project: there is no remote to pull from"}
+    code, out = _g(p, "pull", "--ff-only" if ff_only else "--no-rebase", timeout=300)
+    if code != 0 and ff_only and "fast-forward" in out.lower():
+        out += "\nThe branches have diverged, so a fast-forward is not possible. Nothing was changed."
+    return {"ok": code == 0, "message": out}
+
+
+def git_push(p: "Project", branch: str | None = None) -> dict:
+    """Push the current or base branch to the remote. Never forced."""
+    remote = git_remote(p)
+    if remote is None:
+        return {"ok": False, "message": "local-only project: there is no remote to push to"}
+    _, cur = _g(p, "rev-parse", "--abbrev-ref", "HEAD")
+    base = p.cfg["repo"]["base"]
+    branch = branch or cur
+    if branch not in (cur, base):
+        return {"ok": False, "message": f"only the current branch '{cur}' or the base branch '{base}' can be pushed"}
+    code, out = _g(p, "push", "-u", remote[0], f"refs/heads/{branch}:refs/heads/{branch}", timeout=300)
+    return {"ok": code == 0, "message": out or f"Pushed '{branch}' to {remote[0]}."}
+
+
 def add_worktree(p: Project, wt: Path, branch: str, base: str) -> None:
     """`git worktree add` at `wt` on a new `branch` from `base` (or on `branch` if it exists already)."""
     wt.parent.mkdir(parents=True, exist_ok=True)

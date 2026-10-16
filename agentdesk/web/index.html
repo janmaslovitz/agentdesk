@@ -220,7 +220,44 @@ function shell() {
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
+  <section><h3>Git <span class="muted" id="gitHead"></span><span class="spacer"></span>
+      <button onclick="gitAct('fetch')">Refresh</button>
+      <select id="gitBranch"></select><button id="gitMerge" onclick="gitDo('merge')">Merge into base</button>
+      <button id="gitPull" onclick="gitDo('pull')">Pull</button><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
+    <div style="padding:8px 14px"><div id="gitInfo" class="muted"></div><pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
+}
+
+let gitSt = null, gitFor = null;
+function gitShow(g, msg) {
+  gitSt = g;
+  const ab = g.upstream ? `${g.ahead} ahead, ${g.behind} behind ${g.upstream}` : (g.remote ? "no upstream branch yet" : "local-only project");
+  $("gitHead").textContent = `on ${g.branch} · base ${g.base} · ${g.clean ? "clean" : "dirty (" + g.changes.length + " changed)"}`;
+  $("gitInfo").innerHTML = `${esc(ab)}${g.remote_url ? " · remote " + esc(g.remote_url) : ""}<br>auto branches: ` +
+    (g.autos.length ? g.autos.map(a => `${esc(a.branch)} (+${a.ahead})`).join(", ") : "none ahead of base");
+  $("gitBranch").innerHTML = g.autos.map(a => `<option value="${esc(a.branch)}">${esc(a.branch)} (+${a.ahead})</option>`).join("");
+  $("gitMerge").disabled = !g.autos.length;
+  for (const id of ["gitPull", "gitPush"]) { $(id).disabled = !g.remote; $(id).title = g.remote ? "" : "local-only project"; }
+  if (msg !== undefined) $("gitMsg").textContent = msg;
+}
+async function gitLoad() { gitFor = cur; const g = await api(`/api/p/${cur}/git`); if (!g.error) gitShow(g); }
+async function gitAct(act, body = {}) {
+  const r = await api(`/api/p/${cur}/git/${act}`, body);
+  if (r.status) gitShow(r.status, (r.ok ? "" : "Not done: ") + (r.message || ""));
+  else $("gitMsg").textContent = r.error || r.message || "failed";
+}
+async function gitDo(act) {
+  const g = gitSt; if (!g) return;
+  let text, body = {confirm: true};
+  if (act === "merge") {
+    const b = $("gitBranch").value, n = (g.autos.find(a => a.branch === b) || {}).ahead || 0;
+    body.branch = b; text = `Merge ${b} (${n} commit${n === 1 ? "" : "s"}) into ${g.base}?
+A conflict is aborted and nothing changes.`;
+  } else if (act === "pull") text = `Pull ${g.upstream || g.remote} into ${g.branch} (fast-forward only, ${g.behind} commit${g.behind === 1 ? "" : "s"} behind)?
+Remote: ${g.remote_url}`;
+  else text = `Push ${g.branch} (${g.ahead} commit${g.ahead === 1 ? "" : "s"} ahead) to ${g.remote}?
+Remote: ${g.remote_url}`;
+  if (confirm(text)) await gitAct(act, body);
 }
 
 async function refresh() {
@@ -233,6 +270,7 @@ async function refresh() {
     const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
   }
   showMode(st.project);
+  if (gitFor !== cur) gitLoad();
   const p = st.project, r = st.runner;
   $("pTitle").textContent = p.name;
   $("pMeta").textContent = `${p.repo} · base ${p.base} · account ${p.account}`;
