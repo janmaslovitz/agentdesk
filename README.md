@@ -16,7 +16,9 @@ The Claude command-line tool comes bundled with the SDK; nothing else to install
 **Start:** double-click `AgentDesk.cmd` (Windows) or run `./agentdesk.sh`. The dashboard opens in its own
 window titled "AgentDesk" (pywebview; no browser tab). The server runs in the background with no console
 window at http://127.0.0.1:8765, reachable from this computer only. Closing the window does not stop the
-server or runs; start again to get a window back, or use Quit / `stop`. Size and position are remembered
+server or runs: with the optional tray (`pip install -r requirements-tray.txt`) the X hides the window to a tray icon,
+where click or "Open" shows it again and "Quit" closes the window and stops the server (runs keep going); without it
+the window just closes (reason in `data/agentdesk.log`) and you start again to get a window back, or use `stop`. Size and position are remembered
 under `[window]` in `data/settings.toml` (existing values are only updated when the window closes). If the
 window can't start (e.g. no WebView2), the error goes to `data/agentdesk.log` and the browser opens instead.
 `python -m agentdesk dashboard --browser` always uses a browser tab; `--no-browser` only serves. Runs started from the dashboard are detached too, so they keep going if the dashboard
