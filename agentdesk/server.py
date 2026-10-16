@@ -427,12 +427,89 @@ def answers(port: int) -> bool:
         return False
 
 
-def main(port: int = 8765, browser: bool = True) -> None:
+WINDOW_DEFAULTS = {"width": 1280, "height": 860}
+
+
+def window_settings(save: dict | None = None) -> dict:
+    """The [window] table of settings.toml. Missing keys are added; existing values are never touched,
+    except the ones in `save` (size/position remembered when the window closes)."""
+    path = core.DATA / "settings.toml"
+    core.settings()
+    text = path.read_text(encoding="utf-8")
+    cur = core.settings().get("window", {})
+    want = {**{k: v for k, v in WINDOW_DEFAULTS.items() if k not in cur}, **(save or {})}
+    if not want:
+        return cur
+    lines = text.splitlines()
+    head = next((n for n, ln in enumerate(lines) if ln.strip() == "[window]"), None)
+    if head is None:
+        lines += ["", "[window]"] + [f"{k} = {int(v)}" for k, v in want.items()]
+    else:
+        end = next((n for n in range(head + 1, len(lines)) if lines[n].lstrip().startswith("[")), len(lines))
+        for k, v in want.items():
+            at = next((n for n in range(head + 1, end) if re.match(rf"\s*{k}\s*=", lines[n])), None)
+            if at is None:
+                lines.insert(head + 1, f"{k} = {int(v)}")
+                end += 1
+            else:
+                lines[at] = f"{k} = {int(v)}"
+    path.write_text(os.linesep.join(lines) + os.linesep, encoding="utf-8", newline="")
+    return core.settings().get("window", {})
+
+
+def log_error(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    try:
+        with (core.DATA / "agentdesk.log").open("a", encoding="utf-8") as f:
+            print(msg, file=f)
+    except OSError:
+        pass
+
+
+def open_window(url: str) -> bool:
+    """Show the dashboard in a native window; blocks until it is closed. False if no window could be shown."""
+    try:
+        import webview
+        w = window_settings()
+        geo: dict = {}
+        pos = {k: int(w[k]) for k in ("x", "y") if isinstance(w.get(k), int)}
+        win = webview.create_window("AgentDesk", url, width=int(w.get("width", WINDOW_DEFAULTS["width"])),
+                                    height=int(w.get("height", WINDOW_DEFAULTS["height"])), **pos)
+
+        def resized(width, height):
+            geo.update(width=width, height=height)
+
+        def moved(x, y):
+            geo.update(x=x, y=y)
+
+        def closed():
+            try:
+                for k in ("width", "height", "x", "y"):
+                    if k not in geo and isinstance(getattr(win, k, None), (int, float)):
+                        geo[k] = int(getattr(win, k))
+                window_settings({k: v for k, v in geo.items() if v is not None})
+            except Exception as e:  # best effort
+                log_error(f"AgentDesk: could not save window position: {e}")
+
+        win.events.resized += resized
+        win.events.moved += moved
+        win.events.closed += closed
+        webview.start()
+        return True
+    except Exception as e:  # ImportError, missing WebView2 / engine, no display ...
+        log_error(f"AgentDesk: cannot open the native window ({type(e).__name__}: {e}); falling back to the browser. "
+                  f"Use `python -m agentdesk dashboard --browser` to skip the window.")
+        return False
+
+
+def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
+    """browser=True: open a browser tab. Otherwise window=True shows a native window (browser if that fails);
+    window=False just serves."""
     core.settings()  # creates the data folder and default settings on first start
     url = f"http://127.0.0.1:{port}"
     if answers(port):
         print(f"AgentDesk is already running at {url}")
-        if browser:
+        if browser or (window and not open_window(url)):
             webbrowser.open(url)
         return
     if sys.stdout is None or sys.stderr is None:  # started by pythonw: no console, log to a file
@@ -442,11 +519,19 @@ def main(port: int = 8765, browser: bool = True) -> None:
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     pid_file().write_text(str(os.getpid()), encoding="utf-8")
     print(f"AgentDesk at {url}  (data: {core.DATA}; stop with `python -m agentdesk stop` — runs keep going)")
-    if browser:
-        webbrowser.open(url)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     try:
-        server.serve_forever()
+        if browser:
+            webbrowser.open(url)
+        elif window and not open_window(url):
+            webbrowser.open(url)
+        # Closing the window only ends the window: the server (and runs) go on until it is stopped.
+        while thread.is_alive():
+            thread.join(0.5)
     except KeyboardInterrupt:
         pass
     finally:
+        if thread.is_alive():
+            server.shutdown()
         pid_file().unlink(missing_ok=True)

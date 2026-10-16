@@ -1,5 +1,6 @@
 #!/bin/sh
-# Opens the AgentDesk dashboard (http://127.0.0.1:8765) in the background; it keeps running after the terminal closes.
+# Opens the AgentDesk dashboard in its own window (served at http://127.0.0.1:8765); no browser.
+# Use `./agentdesk.sh dashboard --browser` for a browser tab.
 # Stop it with: ./agentdesk.sh stop   Other commands: ./agentdesk.sh run PROJECT, ...
 cd "$(dirname "$0")"
 if [ -x .venv/bin/python ]; then PY=.venv/bin/python; else PY=python3; fi

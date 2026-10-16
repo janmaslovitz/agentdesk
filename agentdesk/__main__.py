@@ -1,6 +1,6 @@
 """AgentDesk command line.
 
-    python -m agentdesk                          open the dashboard (default)
+    python -m agentdesk [dashboard] [--browser]  open the dashboard in a window (--browser: in a browser tab)
     python -m agentdesk stop [--runs]            end the dashboard (--runs: also stop runs it started)
     python -m agentdesk projects                 list projects
     python -m agentdesk add-project NAME REPO BASE [--preset rust|node|python|go|none] [--account A]
@@ -98,7 +98,8 @@ def main() -> None:
         sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="agentdesk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd")
-    d = sub.add_parser("dashboard"); d.add_argument("--port", type=int, default=8765); d.add_argument("--no-browser", action="store_true")
+    d = sub.add_parser("dashboard"); d.add_argument("--port", type=int, default=8765); d.add_argument("--browser", action="store_true", help="open a browser tab instead of the native window")
+    d.add_argument("--no-browser", action="store_true", help="just serve: no window, no browser")
     st = sub.add_parser("stop"); st.add_argument("--runs", action="store_true", help="also stop runs started from the dashboard")
     sub.add_parser("projects")
     a = sub.add_parser("add-project"); a.add_argument("name"); a.add_argument("repo"); a.add_argument("base")
@@ -111,7 +112,8 @@ def main() -> None:
     args = ap.parse_args()
     if args.cmd in (None, "dashboard"):
         from . import server
-        server.main(port=getattr(args, "port", 8765), browser=not getattr(args, "no_browser", False))
+        server.main(port=getattr(args, "port", 8765), browser=getattr(args, "browser", False),
+                    window=not getattr(args, "no_browser", False))
     elif args.cmd == "stop":
         cmd_stop(args.runs)
     elif args.cmd == "projects":
