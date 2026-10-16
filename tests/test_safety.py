@@ -71,7 +71,7 @@ def test_agents_and_checks_get_a_scratch_data_home(project):
 
 
 def test_is_agentdesk_matches_only_agentdesk_command_lines(monkeypatch):
-    cases = {'".venv\Scripts\pythonw.exe"  -m agentdesk': True,
+    cases = {r'".venv\Scripts\pythonw.exe"  -m agentdesk': True,
              "python -m agentdesk run proj": True,
              "python -m agentdeskx": False,
              "C:\AgentDesk\.venv\Scripts\python.exe -c pass": False}
