@@ -548,6 +548,14 @@ def chat(p: core.Project) -> Chat:
 
 # ----------------------------------------------------------------------------- accounts
 
+def reading_view(name: str) -> dict | None:
+    r = core.current_reading(name)
+    if r is None:
+        return None
+    return {"utilization": r["utilization"], "source": r["source"], "at": r["at"], "age_min": round(r["age_min"], 1),
+            "stale": r["age_min"] > core.usage_max_age_min()}
+
+
 def account_rows() -> list[dict]:
     rows = []
     for a in core.settings().get("accounts", []):
@@ -559,7 +567,8 @@ def account_rows() -> list[dict]:
             ready = (cfg_dir / ".credentials.json").exists() or sys.platform == "darwin"
             where = str(cfg_dir)
         rows.append({"name": a.get("name"), "kind": a.get("kind", "subscription"), "where": where, "ready": ready,
-                     "usage": core.account_usage(a.get("name", "default")).get("rate_limits", {})})
+                     "usage": core.account_usage(a.get("name", "default")).get("rate_limits", {}),
+                     "reading": reading_view(a.get("name", "default")), "max_age_min": core.usage_max_age_min()})
     return rows
 
 
@@ -616,6 +625,20 @@ def tail(path: Path, n: int) -> list[str]:
         return f.read().decode("utf-8", "replace").splitlines()[-n:]
 
 
+def task_used(runs: list[dict]) -> float | None:
+    """Percent of the usage window the task's runs used; None when no run has a known value."""
+    known = [r["usage_used_pct"] for r in runs if r.get("usage_used_pct") is not None]
+    return round(sum(known), 1) if known else None
+
+
+def tier_averages(tasks: list[dict]) -> dict:
+    by: dict[str, list[float]] = {}
+    for t in tasks:
+        if t["used_pct"] is not None and t["tier"]:
+            by.setdefault(t["tier"], []).append(t["used_pct"])
+    return {k: {"avg_pct": round(sum(v) / len(v), 1), "tasks": len(v)} for k, v in by.items()}
+
+
 def project_state(p: core.Project) -> dict:
     state = core.Store(p).load()
     tasks = []
@@ -627,7 +650,7 @@ def project_state(p: core.Project) -> dict:
             for k, v in (r.get("tokens") or {}).items():
                 tok[k] = tok.get(k, 0) + v
         tasks.append({"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "status": e.get("status", "pending"),
-                      "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
+                      "used_pct": task_used(runs), "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
                       "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", "")})
     s = core.settings()
     mode = core.chat_mode(p)
@@ -640,6 +663,8 @@ def project_state(p: core.Project) -> dict:
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"pause_at": s["limits"]["pause_at_utilization"], "run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
+            "reading": reading_view(p.account.get("name", "default")), "max_age_min": core.usage_max_age_min(),
+            "tier_avg": tier_averages(tasks),
             "tiers": {k: {"model": v["model"], "effort": v.get("effort")} for k, v in s["tiers"].items()}}
 
 
@@ -732,6 +757,14 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "accounts"]:
                 err = add_account(str(d.get("name", "")).strip(), str(d.get("kind", "subscription")), str(d.get("value", "")).strip())
                 return self.json({"error": err} if err else {"ok": True})
+            if len(parts) == 4 and parts[:2] == ["api", "accounts"] and parts[3] == "usage":
+                if not any(a.get("name") == parts[2] for a in core.settings().get("accounts", [])):
+                    return self.json({"error": "no such account"}, 404)
+                try:
+                    core.set_manual_usage(parts[2], float(d.get("percent")))
+                except (TypeError, ValueError) as e:
+                    return self.json({"error": str(e) if "between" in str(e) else "enter a number from 0 to 100"}, 400)
+                return self.json({"ok": True})
             if len(parts) == 4 and parts[:2] == ["api", "accounts"] and parts[3] == "login":
                 err = open_login(parts[2])
                 return self.json({"error": err} if err else {"ok": True})

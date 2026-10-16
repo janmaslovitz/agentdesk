@@ -10,6 +10,7 @@ config_dir = ""
 
 [limits]
 pause_at_utilization = 0.85
+usage_max_age_min = 30
 run_budget_usd = 40.0
 retries_per_tier = 2
 

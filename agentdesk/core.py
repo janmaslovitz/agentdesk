@@ -51,6 +51,7 @@ config_dir = ""
 
 [limits]
 pause_at_utilization = 0.85
+usage_max_age_min = 30
 run_budget_usd = 40.0
 retries_per_tier = 2
 
@@ -150,6 +151,58 @@ def save_account_usage(name: str, usage: dict) -> None:
     p = DATA / "accounts" / f"{name}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+
+
+def usage_max_age_min() -> float:
+    return float(settings()["limits"].get("usage_max_age_min", 30))
+
+
+def save_reading(name: str, fraction: float, source: str) -> None:
+    """Save the account's current usage (0.0-1.0), when it was read and where from ("sdk" or "manual")."""
+    usage = account_usage(name)
+    usage["reading"] = {"utilization": float(fraction), "at": dt.datetime.now().isoformat(timespec="seconds"), "source": source}
+    save_account_usage(name, usage)
+
+
+def current_reading(name: str) -> dict | None:
+    """The newest usage reading {utilization, at, source, age_min}, or None when there is none (null values don't count).
+    Old files without "reading" fall back to their rate-limit readings."""
+    usage = account_usage(name)
+    found = []
+    r = usage.get("reading")
+    if isinstance(r, dict) and r.get("utilization") is not None:
+        found.append((r.get("at"), float(r["utilization"]), r.get("source") or "manual"))
+    for r in (usage.get("rate_limits") or {}).values():
+        if isinstance(r, dict) and r.get("utilization") is not None:
+            found.append((r.get("seen"), float(r["utilization"]), "sdk"))
+    best = None
+    for at, u, src in found:
+        try:
+            t = dt.datetime.fromisoformat(str(at))
+        except ValueError:
+            continue
+        if best is None or t > best[0]:
+            best = (t, u, src, at)
+    if best is None:
+        return None
+    return {"utilization": best[1], "at": best[3], "source": best[2],
+            "age_min": max(0.0, (dt.datetime.now() - best[0]).total_seconds() / 60)}
+
+
+def set_manual_usage(name: str, percent: float) -> None:
+    if not 0 <= percent <= 100:
+        raise ValueError("usage must be between 0 and 100")
+    save_reading(name, percent / 100, "manual")
+
+
+def usage_gate(name: str) -> str | None:
+    """Why no work may start for this account: no fresh reading, or the reading is at the pause threshold."""
+    r = current_reading(name)
+    if r is None or r["age_min"] > usage_max_age_min():
+        return "usage unknown — enter it under Accounts"
+    if r["utilization"] >= float(settings()["limits"]["pause_at_utilization"]):
+        return f"usage limit {r['utilization']:.0%} reached the pause threshold"
+    return None
 
 
 def slug(name: str) -> str:
@@ -592,13 +645,24 @@ class Meter:
         self.p, self.store, self.state = p, store, state
         self.limits = settings()["limits"]
         self.acct = p.account.get("name", "default")
-        self.utilization = 0.0
+
+    def mark(self) -> dict | None:
+        """The current usage reading, to compare with a later one."""
+        return current_reading(self.acct)
+
+    def used(self, before: dict | None) -> dict:
+        """usage_before / usage_after / usage_used_pct (percent points; None = unknown) for a run that started at `before`.
+        Unknown unless a newer reading arrived since."""
+        after = current_reading(self.acct)
+        pct = lambda r: None if r is None else round(r["utilization"] * 100, 1)
+        used = None
+        if before and after and after["at"] != before["at"]:
+            used = round(max(0.0, pct(after) - pct(before)), 1)
+        return {"usage_before": pct(before), "usage_after": pct(after), "usage_used_pct": used}
 
     def see(self, msg) -> None:
         if isinstance(msg, RateLimitEvent):
             info = msg.rate_limit_info
-            if info.utilization is not None:
-                self.utilization = max(self.utilization, float(info.utilization))
             record_rate_limit(self.acct, info)
         if isinstance(msg, ResultMessage):
             if msg.total_cost_usd:
@@ -609,8 +673,8 @@ class Meter:
             self.store.save(self.state)
 
     def stop_reason(self) -> str | None:
-        if self.utilization >= float(self.limits["pause_at_utilization"]):
-            return f"usage limit {self.utilization:.0%} reached the pause threshold"
+        if why := usage_gate(self.acct):
+            return why
         if self.state.get("spent_usd", 0.0) >= float(self.limits["run_budget_usd"]) + self.state.get("budget_base", 0.0):
             return f"run budget {self.limits['run_budget_usd']} USD spent"
         return None
@@ -622,6 +686,8 @@ def record_rate_limit(acct: str, info) -> None:
     usage.setdefault("rate_limits", {})[str(info.rate_limit_type or "limit")] = {
         "utilization": info.utilization, "status": str(info.status), "resets_at": info.resets_at,
         "seen": dt.datetime.now().isoformat(timespec="seconds")}
+    if info.utilization is not None:
+        usage["reading"] = {"utilization": float(info.utilization), "at": dt.datetime.now().isoformat(timespec="seconds"), "source": "sdk"}
     save_account_usage(acct, usage)
 
 
@@ -740,12 +806,14 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
                    allowed_tools=["Read", "Grep", "Glob"], disallowed_tools=["Edit", "Write", "Bash", "PowerShell"],
                    permission_mode="default", setting_sources=["project"], output_format={"type": "json_schema", "schema": ROUTER_SCHEMA})
     result = None
+    before = meter.mark()
     async for msg in query(prompt=ROUTER_PROMPT.format(notes=store.notes(), id=task.id, title=task.title, body=task.body), options=opts):
         meter.see(msg)
         if isinstance(msg, ResultMessage):
             entry = meter.state["tasks"].setdefault(task.id, {"title": task.title})
             entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
-                                                 "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds")})
+                                                 "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds"),
+                                                 **meter.used(before)})
             store.save(meter.state)
             if isinstance(msg.structured_output, dict):
                 result = msg.structured_output
@@ -772,6 +840,9 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
     async with ClaudeSDKClient(options=opts) as client:
         message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
         for attempt in range(1, int(s["limits"]["retries_per_tier"]) + 1):
+            if meter.stop_reason():
+                return False, summary
+            before = meter.mark()
             store.log(f"{task.id}: {tier} ({t['model']}{', ' + t['effort'] if t.get('effort') else ''}) attempt {attempt}")
             await client.query(message)
             async for msg in client.receive_response():
@@ -783,7 +854,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                 if isinstance(msg, ResultMessage):
                     entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
                                                          "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
-                                                         "at": dt.datetime.now().isoformat(timespec="seconds")})
+                                                         "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.used(before)})
                     store.save(meter.state)
             ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
             if ok:
