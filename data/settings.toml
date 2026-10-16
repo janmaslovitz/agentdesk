@@ -1,0 +1,49 @@
+# AgentDesk settings. Edit here or in the dashboard.
+
+# Accounts the projects can use. kind = "subscription": a Claude login kept in its own folder
+# (empty config_dir = your normal Claude Code login). kind = "api_key": the key is read from the
+# environment variable named in key_env (never stored here).
+[[accounts]]
+name = "default"
+kind = "subscription"
+config_dir = ""
+
+[limits]
+pause_at_utilization = 0.85
+run_budget_usd = 40.0
+retries_per_tier = 2
+
+[router]
+model = "haiku"
+max_turns = 12
+budget_usd = 0.30
+
+[tiers.mechanical]
+model = "haiku"
+max_turns = 40
+budget_usd = 1.0
+next = "standard"
+
+[tiers.standard]
+model = "sonnet"
+effort = "medium"
+max_turns = 80
+budget_usd = 4.0
+next = "hard"
+
+[tiers.hard]
+model = "opus"
+effort = "high"
+max_turns = 120
+budget_usd = 12.0
+
+[chat]
+model = "haiku"
+
+[guard]
+deny = [
+  'git\s+push', 'git\s+remote', 'gh\s+(pr|release|repo|api|issue|workflow)', 'git\s+reset\s+--hard',
+  'git\s+(checkout|switch)\s+(main|master|release)', 'git\s+branch\s+-D', 'git\s+worktree\s+remove',
+  'rm\s+-rf\s+/', 'curl\s+.*(-T\b|--upload|-d\b|--data|-X\s*POST)', 'Invoke-WebRequest.*-Method\s+Post',
+  'cargo\s+publish', 'npm\s+publish', 'twine\s+upload', 'setup\.exe', 'msiexec',
+]

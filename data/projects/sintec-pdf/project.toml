@@ -1,0 +1,22 @@
+name = "Sintec.PDF"
+account = "default"
+
+[repo]
+path = "C:/Users/kochurin.a/sintec-pdf/.claude/worktrees/sintec-pdf"
+base = "feature/0.2.6"
+worktrees = "C:/Users/kochurin.a/sintec-pdf/agent-worktrees"
+copy_into_worktree = ["zz_rehash.py", "zz_ru_add.py"]
+co_author = "Co-Authored-By: Claude <noreply@anthropic.com>"
+
+[gates]
+quick = ["cargo fmt --all --check", "cargo clippy {crates} --all-targets -- -D warnings", "cargo test {crates}"]
+final = ["cargo clippy --workspace --all-targets -- -D warnings", "cargo test --workspace"]
+max_feedback_chars = 6000
+timeout_s = 3600
+
+[gates.env]
+LANG = "en_US.UTF-8"
+CARGO_TARGET_DIR = "C:/Users/kochurin.a/sintec-pdf/target-agents"
+CARGO_PROFILE_DEV_DEBUG = "0"
+CARGO_PROFILE_TEST_DEBUG = "0"
+CARGO_INCREMENTAL = "0"

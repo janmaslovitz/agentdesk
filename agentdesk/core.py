@@ -1,0 +1,650 @@
+"""AgentDesk core: projects, accounts, and the route → work → check → escalate pipeline.
+
+Data lives in the data folder (`AGENTDESK_HOME`, else `data/` next to the app, so the whole app
+folder can be copied to another computer):
+
+    data/settings.toml                    accounts, default tiers, limits
+    data/accounts/<name>.json             last usage-limit readings for that account
+    data/projects/<slug>/project.toml     repo, base branch, gates, account
+    data/projects/<slug>/tasks/*.md       the queue (TOML header between +++ lines)
+    data/projects/<slug>/state.json, notes.md, reports/, agentdesk.log
+"""
+
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from claude_agent_sdk import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ClaudeSDKClient,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    RateLimitEvent,
+    ResultMessage,
+    TextBlock,
+    query,
+)
+
+APP = Path(__file__).resolve().parent.parent
+DATA = Path(os.environ.get("AGENTDESK_HOME") or APP / "data")
+TIER_ORDER = ["mechanical", "standard", "hard"]
+
+DEFAULT_SETTINGS = """# AgentDesk settings. Edit here or in the dashboard.
+
+# Accounts the projects can use. kind = "subscription": a Claude login kept in its own folder
+# (empty config_dir = your normal Claude Code login). kind = "api_key": the key is read from the
+# environment variable named in key_env (never stored here).
+[[accounts]]
+name = "default"
+kind = "subscription"
+config_dir = ""
+
+[limits]
+pause_at_utilization = 0.85
+run_budget_usd = 40.0
+retries_per_tier = 2
+
+[router]
+model = "haiku"
+max_turns = 12
+budget_usd = 0.30
+
+[tiers.mechanical]
+model = "haiku"
+max_turns = 40
+budget_usd = 1.0
+next = "standard"
+
+[tiers.standard]
+model = "sonnet"
+effort = "medium"
+max_turns = 80
+budget_usd = 4.0
+next = "hard"
+
+[tiers.hard]
+model = "opus"
+effort = "high"
+max_turns = 120
+budget_usd = 12.0
+
+[chat]
+model = "haiku"
+
+[guard]
+deny = [
+  'git\\s+push', 'git\\s+remote', 'gh\\s+(pr|release|repo|api|issue|workflow)', 'git\\s+reset\\s+--hard',
+  'git\\s+(checkout|switch)\\s+(main|master|release)', 'git\\s+branch\\s+-D', 'git\\s+worktree\\s+remove',
+  'rm\\s+-rf\\s+/', 'curl\\s+.*(-T\\b|--upload|-d\\b|--data|-X\\s*POST)', 'Invoke-WebRequest.*-Method\\s+Post',
+  'cargo\\s+publish', 'npm\\s+publish', 'twine\\s+upload', 'setup\\.exe', 'msiexec',
+]
+"""
+
+# Gate presets for new projects. `{crates}` (Rust) becomes `-p a -p b` for changed crates.
+PRESETS = {
+    "rust": {"quick": ["cargo fmt --all --check", "cargo clippy {crates} --all-targets -- -D warnings", "cargo test {crates}"],
+             "final": ["cargo clippy --workspace --all-targets -- -D warnings", "cargo test --workspace"]},
+    "node": {"quick": ["npm run -s lint --if-present", "npm test --silent"], "final": ["npm run -s build --if-present", "npm test --silent"]},
+    "python": {"quick": ["python -m pytest -q -x"], "final": ["python -m pytest -q"]},
+    "go": {"quick": ["go vet ./...", "go test ./..."], "final": ["go test ./..."]},
+    "none": {"quick": [], "final": []},
+}
+
+
+# ----------------------------------------------------------------------------- settings, accounts, projects
+
+def settings() -> dict:
+    p = DATA / "settings.toml"
+    if not p.exists():
+        DATA.mkdir(parents=True, exist_ok=True)
+        p.write_text(DEFAULT_SETTINGS, encoding="utf-8")
+    with p.open("rb") as f:
+        return tomllib.load(f)
+
+
+def account(name: str | None) -> dict:
+    accts = settings().get("accounts", [])
+    return next((a for a in accts if a.get("name") == name), accts[0] if accts else {"name": "default", "kind": "subscription"})
+
+
+def account_env(acct: dict) -> dict[str, str]:
+    """Environment for the Claude CLI so it uses this account."""
+    env: dict[str, str] = {}
+    if acct.get("kind") == "api_key":
+        key = os.environ.get(acct.get("key_env", ""), "")
+        if key:
+            env["ANTHROPIC_API_KEY"] = key
+    elif acct.get("config_dir"):
+        env["CLAUDE_CONFIG_DIR"] = str(Path(acct["config_dir"]).expanduser())
+    return env
+
+
+def bundled_cli() -> str:
+    import claude_agent_sdk
+    p = Path(claude_agent_sdk.__file__).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
+    return str(p) if p.exists() else (shutil.which("claude") or "claude")
+
+
+def account_usage(name: str) -> dict:
+    p = DATA / "accounts" / f"{name}.json"
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+
+def save_account_usage(name: str, usage: dict) -> None:
+    p = DATA / "accounts" / f"{name}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+
+
+def slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
+
+
+@dataclass
+class Project:
+    slug: str
+    dir: Path
+    cfg: dict
+
+    @property
+    def name(self) -> str:
+        return self.cfg.get("name", self.slug)
+
+    @property
+    def repo(self) -> Path:
+        return Path(self.cfg["repo"]["path"])
+
+    @property
+    def tasks_dir(self) -> Path:
+        return self.dir / "tasks"
+
+    @property
+    def account(self) -> dict:
+        return account(self.cfg.get("account"))
+
+    def path(self, name: str) -> Path:
+        return self.dir / name
+
+
+def projects() -> list[Project]:
+    out = []
+    for d in sorted((DATA / "projects").glob("*")):
+        p = d / "project.toml"
+        if p.exists():
+            with p.open("rb") as f:
+                out.append(Project(d.name, d, tomllib.load(f)))
+    return out
+
+
+def project(slug_: str) -> Project:
+    for p in projects():
+        if p.slug == slug_:
+            return p
+    raise KeyError(f"no project {slug_!r}")
+
+
+def toml_str(s: str) -> str:
+    return json.dumps(s, ensure_ascii=False)
+
+
+def add_project(name: str, repo: str, base: str, preset: str = "none", account_name: str = "default",
+                quick: list[str] | None = None, final: list[str] | None = None, env: dict | None = None) -> Project:
+    s = slug(name)
+    d = DATA / "projects" / s
+    if (d / "project.toml").exists():
+        raise ValueError(f"a project named {s} exists")
+    if not (Path(repo) / ".git").exists():
+        raise ValueError(f"{repo} is not a git repository")
+    gates = PRESETS.get(preset, PRESETS["none"])
+    quick = quick if quick is not None else gates["quick"]
+    final = final if final is not None else gates["final"]
+    lines = [
+        f"name = {toml_str(name)}", f"account = {toml_str(account_name)}", "",
+        "[repo]", f"path = {toml_str(Path(repo).as_posix())}", f"base = {toml_str(base)}",
+        f"worktrees = {toml_str((d / 'worktrees').as_posix())}", "copy_into_worktree = []",
+        'co_author = "Co-Authored-By: Claude <noreply@anthropic.com>"', "",
+        "[gates]", "quick = [" + ", ".join(toml_str(c) for c in quick) + "]",
+        "final = [" + ", ".join(toml_str(c) for c in final) + "]", "max_feedback_chars = 6000", "timeout_s = 3600", "",
+        "[gates.env]",
+    ] + [f"{k} = {toml_str(str(v))}" for k, v in (env or {}).items()]
+    (d / "tasks").mkdir(parents=True, exist_ok=True)
+    (d / "project.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (d / "notes.md").write_text(f"# Notes for agents working on {name} (durable facts; finished tasks append here)\n", encoding="utf-8")
+    return project(s)
+
+
+# ----------------------------------------------------------------------------- per-project state
+
+class Store:
+    def __init__(self, p: Project):
+        self.p = p
+
+    def log(self, msg: str) -> None:
+        line = f"[{dt.datetime.now():%m-%d %H:%M:%S}] {msg}"
+        print(line, flush=True)
+        with self.p.path("agentdesk.log").open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    def load(self) -> dict:
+        s = self.p.path("state.json")
+        return json.loads(s.read_text(encoding="utf-8")) if s.exists() else {"tasks": {}, "spent_usd": 0.0}
+
+    def save(self, state: dict) -> None:
+        s = self.p.path("state.json")
+        tmp = s.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(s)
+
+    def notes(self) -> str:
+        n = self.p.path("notes.md")
+        return n.read_text(encoding="utf-8")[-4000:] if n.exists() else "(none yet)"
+
+
+@dataclass
+class Task:
+    id: str
+    title: str
+    body: str
+    tier: str | None = None
+    depends: list[str] = field(default_factory=list)
+    crates: list[str] = field(default_factory=list)
+
+
+def load_tasks(p: Project) -> list[Task]:
+    tasks = []
+    for f in sorted(p.tasks_dir.glob("*.md")):
+        m = re.match(r"\+\+\+\s*\n(.*?)\n\+\+\+\s*\n(.*)", f.read_text(encoding="utf-8"), re.S)
+        if not m:
+            continue
+        try:
+            h = tomllib.loads(m.group(1))
+            tasks.append(Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", []))))
+        except (tomllib.TOMLDecodeError, KeyError):
+            continue
+    return tasks
+
+
+def add_task(p: Project, task_id: str, title: str, body: str, tier: str | None = None, depends: list[str] | None = None) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        raise ValueError("task ids use letters, digits, - and _")
+    head = [f"id = {toml_str(task_id)}", f"title = {toml_str(title)}"]
+    if tier:
+        head.append(f"tier = {toml_str(tier)}")
+    if depends:
+        head.append("depends = [" + ", ".join(toml_str(d) for d in depends) + "]")
+    p.tasks_dir.mkdir(parents=True, exist_ok=True)
+    f = p.tasks_dir / f"{task_id}.md"
+    f.write_text("+++\n" + "\n".join(head) + "\n+++\n\n" + body.strip() + "\n", encoding="utf-8")
+    return f
+
+
+def next_task_id(p: Project) -> str:
+    nums = [int(t.id) for t in load_tasks(p) if t.id.isdigit()]
+    return f"{(max(nums) + 1) if nums else 1:03d}"
+
+
+# ----------------------------------------------------------------------------- processes, worktrees, gates
+
+def run(cmd, cwd: Path, env: dict | None = None, timeout: int = 3600, shell: bool = False) -> tuple[int, str]:
+    try:
+        r = subprocess.run(cmd, cwd=cwd, env={**os.environ, **(env or {})}, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout, shell=shell)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except subprocess.TimeoutExpired as e:
+        return 124, f"timed out after {timeout}s\n{str(e.stdout or '')[-2000:]}"
+    except OSError as e:
+        return 127, str(e)
+
+
+def git(args: list[str], cwd: Path) -> tuple[int, str]:
+    return run(["git", *args], cwd)
+
+
+def ensure_worktree(p: Project, store: Store, task: Task) -> Path:
+    wt = Path(p.cfg["repo"]["worktrees"]) / task.id
+    if wt.exists():
+        return wt
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    branch, base = f"auto/{task.id}", p.cfg["repo"]["base"]
+    state = store.load()
+    for dep in task.depends:
+        if state["tasks"].get(dep, {}).get("status") == "done":
+            base = f"auto/{dep}"
+    code, out = git(["worktree", "add", str(wt), "-b", branch, base], p.repo)
+    if code != 0:
+        code, out = git(["worktree", "add", str(wt), branch], p.repo)
+    if code != 0:
+        raise RuntimeError(f"git worktree add failed: {out}")
+    for name in p.cfg["repo"].get("copy_into_worktree", []):
+        src = p.repo / name
+        if src.is_file():
+            (wt / name).write_bytes(src.read_bytes())
+    store.log(f"{task.id}: worktree {wt} on {branch} from {base}")
+    return wt
+
+
+def changed_crates(wt: Path, base: str) -> list[str] | None:
+    code, out = git(["diff", "--name-only", f"{base}...HEAD"], wt)
+    _, dirty = git(["status", "--porcelain"], wt)
+    files = set(out.split()) if code == 0 else set()
+    files |= {l[3:].strip() for l in dirty.splitlines() if len(l) > 3}
+    crates: set[str] = set()
+    for f in files:
+        f = f.replace("\\", "/")
+        m = re.match(r"crates/([^/]+)/", f)
+        if not m:
+            if f.endswith((".rs", "Cargo.toml", "Cargo.lock")):
+                return None
+            continue
+        manifest = wt / "crates" / m.group(1) / "Cargo.toml"
+        if manifest.exists():
+            name = tomllib.loads(manifest.read_text(encoding="utf-8")).get("package", {}).get("name")
+            if name:
+                crates.add(name)
+    return sorted(crates)
+
+
+def trim(output: str, limit: int) -> str:
+    lines = output.splitlines()
+    keep: list[str] = []
+    for i, l in enumerate(lines):
+        if re.search(r"^\s*(error|warning)(\[|:)|^---- |panicked at|^failures:|test result: FAILED|Diff in|FAILED|Error:|AssertionError|Traceback", l):
+            keep.extend(lines[i:i + 12])
+    text = "\n".join(dict.fromkeys(keep))
+    tail = "\n".join(lines[-40:])
+    return ((text + "\n...\n" + tail) if text else tail)[-limit:]
+
+
+def run_gates(p: Project, store: Store, wt: Path, kind: str, crates: list[str] | None) -> tuple[bool, str]:
+    g = p.cfg.get("gates", {})
+    sel = "--workspace" if not crates else " ".join(f"-p {c}" for c in crates)
+    for cmd in g.get(kind, []):
+        cmd = cmd.replace("{crates}", sel)
+        store.log(f"  gate: {cmd}")
+        code, out = run(cmd, wt, env={k: str(v) for k, v in g.get("env", {}).items()}, timeout=int(g.get("timeout_s", 3600)), shell=True)
+        if code != 0:
+            return False, f"$ {cmd}\n{trim(out, int(g.get('max_feedback_chars', 6000)))}"
+    return True, ""
+
+
+# ----------------------------------------------------------------------------- agents
+
+def usage_tokens(usage) -> dict:
+    u = usage if isinstance(usage, dict) else {}
+    return {"input": int(u.get("input_tokens") or 0), "output": int(u.get("output_tokens") or 0),
+            "cache_read": int(u.get("cache_read_input_tokens") or 0), "cache_write": int(u.get("cache_creation_input_tokens") or 0)}
+
+
+class Meter:
+    """Spend and usage-limit readings: per project (spend) and per account (limits)."""
+
+    def __init__(self, p: Project, store: Store, state: dict):
+        self.p, self.store, self.state = p, store, state
+        self.limits = settings()["limits"]
+        self.acct = p.account.get("name", "default")
+        self.utilization = 0.0
+
+    def see(self, msg) -> None:
+        if isinstance(msg, RateLimitEvent):
+            info = msg.rate_limit_info
+            if info.utilization is not None:
+                self.utilization = max(self.utilization, float(info.utilization))
+            usage = account_usage(self.acct)
+            usage.setdefault("rate_limits", {})[str(info.rate_limit_type or "limit")] = {
+                "utilization": info.utilization, "status": str(info.status), "resets_at": info.resets_at,
+                "seen": dt.datetime.now().isoformat(timespec="seconds")}
+            save_account_usage(self.acct, usage)
+        if isinstance(msg, ResultMessage):
+            if msg.total_cost_usd:
+                self.state["spent_usd"] = round(self.state.get("spent_usd", 0.0) + msg.total_cost_usd, 4)
+            totals = self.state.setdefault("tokens", {})
+            for k, v in usage_tokens(msg.usage).items():
+                totals[k] = totals.get(k, 0) + v
+            self.store.save(self.state)
+
+    def stop_reason(self) -> str | None:
+        if self.utilization >= float(self.limits["pause_at_utilization"]):
+            return f"usage limit {self.utilization:.0%} reached the pause threshold"
+        if self.state.get("spent_usd", 0.0) >= float(self.limits["run_budget_usd"]) + self.state.get("budget_base", 0.0):
+            return f"run budget {self.limits['run_budget_usd']} USD spent"
+        return None
+
+
+def guard(wt: Path):
+    deny = [re.compile(x, re.I) for x in settings()["guard"]["deny"]]
+    root = str(wt.resolve()).lower().replace("\\", "/")
+
+    async def can_use_tool(name: str, args: dict, _ctx):
+        if name in ("Bash", "PowerShell"):
+            cmd = str(args.get("command", ""))
+            for x in deny:
+                if x.search(cmd):
+                    return PermissionResultDeny(message=f"not allowed for automated workers: {x.pattern}")
+        if name in ("Edit", "Write", "NotebookEdit"):
+            target = str(args.get("file_path", "")).lower().replace("\\", "/")
+            if target and not target.startswith(root):
+                return PermissionResultDeny(message="edit files inside your worktree only")
+        return PermissionResultAllow()
+
+    return can_use_tool
+
+
+ROUTER_SCHEMA = {"type": "object", "required": ["tier", "why", "brief"], "properties": {
+    "tier": {"type": "string", "enum": TIER_ORDER}, "why": {"type": "string"}, "brief": {"type": "string"},
+    "crates": {"type": "array", "items": {"type": "string"}}}}
+
+ROUTER_PROMPT = """You route a coding task to the cheapest worker that will do it well, and write its brief.
+
+Tiers: mechanical (clear, local edits: strings, renames, small fixes with an obvious cause, docs),
+standard (normal feature work or debugging in a few files), hard (design across modules, subtle
+algorithms, unclear root causes, UI architecture).
+
+Explore the repository read-only (Read, Grep, Glob; keep it short) to find the files involved. Then
+write the brief: the goal, the relevant files with line hints, constraints from the project's
+instructions (CLAUDE.md, AGENTS.md, README) that matter, and how to tell it's done. At most 400
+words. Don't solve the task.
+
+Project notes from earlier tasks:
+{notes}
+
+Task {id}: {title}
+{body}
+"""
+
+WORKER_PROMPT = """You are an automated worker on task {id}: {title}.
+Your working directory is a dedicated git worktree; edit files only inside it. Follow the project's
+instructions (CLAUDE.md / AGENTS.md / README). Never push, open pull requests, publish, or change git
+remotes; the orchestrator commits for you. Before finishing, format the code and run the tests of
+what you changed.
+Finish with a short summary of what you changed, then a line `NOTES:` followed by at most three
+lines of durable facts later tasks should know (or `NOTES: none`).
+
+Brief:
+{brief}
+
+Full task:
+{body}
+"""
+
+
+def options(p: Project, **kw) -> ClaudeAgentOptions:
+    env = {**account_env(p.account), **kw.pop("env", {})}
+    return ClaudeAgentOptions(env=env, **kw)
+
+
+async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
+    r = settings()["router"]
+    opts = options(p, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
+                   allowed_tools=["Read", "Grep", "Glob"], disallowed_tools=["Edit", "Write", "Bash", "PowerShell"],
+                   permission_mode="default", setting_sources=["project"], output_format={"type": "json_schema", "schema": ROUTER_SCHEMA})
+    result = None
+    async for msg in query(prompt=ROUTER_PROMPT.format(notes=store.notes(), id=task.id, title=task.title, body=task.body), options=opts):
+        meter.see(msg)
+        if isinstance(msg, ResultMessage):
+            entry = meter.state["tasks"].setdefault(task.id, {"title": task.title})
+            entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
+                                                 "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds")})
+            store.save(meter.state)
+            if isinstance(msg.structured_output, dict):
+                result = msg.structured_output
+            elif msg.result and (m := re.search(r"\{.*\}", msg.result, re.S)):
+                try:
+                    result = json.loads(m.group(0))
+                except ValueError:
+                    pass
+    if not result or result.get("tier") not in TIER_ORDER:
+        result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
+    if task.tier in TIER_ORDER:
+        result.update(tier=task.tier, why="set in the task file")
+    return result
+
+
+async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter) -> tuple[bool, str]:
+    s = settings()
+    t = s["tiers"][tier]
+    entry = meter.state["tasks"][task.id]
+    gate_env = {k: str(v) for k, v in p.cfg.get("gates", {}).get("env", {}).items()}
+    opts = options(p, model=t["model"], effort=t.get("effort"), max_turns=int(t["max_turns"]), max_budget_usd=float(t["budget_usd"]),
+                   cwd=str(wt), permission_mode="acceptEdits", setting_sources=["project"], can_use_tool=guard(wt), env=gate_env)
+    summary = ""
+    async with ClaudeSDKClient(options=opts) as client:
+        message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
+        for attempt in range(1, int(s["limits"]["retries_per_tier"]) + 1):
+            store.log(f"{task.id}: {tier} ({t['model']}{', ' + t['effort'] if t.get('effort') else ''}) attempt {attempt}")
+            await client.query(message)
+            async for msg in client.receive_response():
+                meter.see(msg)
+                if isinstance(msg, AssistantMessage):
+                    for b in msg.content:
+                        if isinstance(b, TextBlock):
+                            summary = b.text
+                if isinstance(msg, ResultMessage):
+                    entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
+                                                         "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
+                                                         "at": dt.datetime.now().isoformat(timespec="seconds")})
+                    store.save(meter.state)
+            ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
+            if ok:
+                return True, summary
+            store.log(f"{task.id}: checks failed")
+            entry["last_failure"] = failure[-1500:]
+            store.save(meter.state)
+            if meter.stop_reason():
+                return False, summary
+            message = f"The checks failed. Fix the cause (not the check), then finish as before.\n\n{failure}"
+    return False, summary
+
+
+def commit(p: Project, task: Task, wt: Path, tiers: str) -> str:
+    git(["add", "-A"], wt)
+    code, out = git(["commit", "-q", "-m", f"{task.id}: {task.title}\n\nAutomated by AgentDesk ({tiers}).\n\n{p.cfg['repo']['co_author']}"], wt)
+    if code != 0 and "nothing to commit" not in out:
+        raise RuntimeError(out)
+    return git(["rev-parse", "--short", "HEAD"], wt)[1].strip()
+
+
+def keep_notes(p: Project, task: Task, summary: str) -> None:
+    m = re.search(r"NOTES:\s*(.*)", summary, re.S)
+    if not m or m.group(1).strip().lower().startswith("none"):
+        return
+    with p.path("notes.md").open("a", encoding="utf-8") as f:
+        for l in [l.strip("-• ").strip() for l in m.group(1).strip().splitlines() if l.strip()][:3]:
+            f.write(f"- ({task.id}) {l}\n")
+
+
+def ready(task: Task, state: dict) -> bool:
+    if state["tasks"].get(task.id, {}).get("status") in ("done", "blocked"):
+        return False
+    return all(state["tasks"].get(d, {}).get("status") == "done" for d in task.depends)
+
+
+async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
+    state = meter.state
+    entry = state["tasks"].setdefault(task.id, {"title": task.title})
+    entry.update(status="routing", started=dt.datetime.now().isoformat(timespec="seconds"))
+    store.save(state)
+    plan = await route(p, store, task, meter)
+    entry.update(tier=plan["tier"], why=plan.get("why", ""), brief=plan.get("brief", ""), status="working")
+    if plan.get("crates") and not task.crates:
+        task.crates = [c for c in plan["crates"] if re.fullmatch(r"[A-Za-z0-9_-]+", c)]
+    store.save(state)
+    store.log(f"{task.id}: routed to {plan['tier']} ({plan.get('why', '')})")
+    wt = ensure_worktree(p, store, task)
+    tier, tried = plan["tier"], []
+    while tier:
+        tried.append(tier)
+        ok, summary = await work(p, store, task, wt, tier, plan["brief"], meter)
+        if ok:
+            sha = commit(p, task, wt, " → ".join(tried))
+            keep_notes(p, task, summary)
+            entry.update(status="done", commit=sha, branch=f"auto/{task.id}", finished=dt.datetime.now().isoformat(timespec="seconds"))
+            p.path("reports").mkdir(exist_ok=True)
+            p.path("reports").joinpath(f"{task.id}.md").write_text(
+                f"# {task.id}: {task.title}\n\nBranch `auto/{task.id}` at {sha}; tiers {' → '.join(tried)}.\n\n## Brief\n\n{plan['brief']}\n\n"
+                f"## Worker summary\n\n{summary}\n", encoding="utf-8")
+            store.save(state)
+            store.log(f"{task.id}: done at {sha}")
+            return
+        if meter.stop_reason():
+            entry["status"] = "paused"
+            store.save(state)
+            return
+        tier = settings()["tiers"][tier].get("next")
+        if tier:
+            store.log(f"{task.id}: escalating to {tier}")
+    entry["status"] = "blocked"
+    store.save(state)
+    store.log(f"{task.id}: blocked after {' → '.join(tried)}")
+
+
+async def run_queue(p: Project, only: str | None = None, max_tasks: int | None = None) -> None:
+    store = Store(p)
+    state = store.load()
+    state["budget_base"] = state.get("spent_usd", 0.0)  # the run budget counts from now
+    meter = Meter(p, store, state)
+    done = 0
+    for task in load_tasks(p):
+        if max_tasks and done >= max_tasks:
+            break
+        if only and task.id != only:
+            continue
+        if not only and not ready(task, state):
+            continue
+        if (why := meter.stop_reason()):
+            store.log(f"stopping before {task.id}: {why}")
+            break
+        await do_task(p, store, task, meter)
+        done += 1
+    store.log(f"run finished: {done} task(s); project total {state.get('spent_usd', 0):.2f} USD")
+
+
+async def plan_tasks(p: Project, only: str | None = None) -> None:
+    store = Store(p)
+    meter = Meter(p, store, store.load())
+    for task in load_tasks(p):
+        if only and task.id != only:
+            continue
+        plan = await route(p, store, task, meter)
+        store.log(f"plan {task.id}: {plan['tier']} — {plan.get('why', '')}")
+        meter.state["tasks"].setdefault(task.id, {"title": task.title})["brief"] = plan.get("brief", "")
+        store.save(meter.state)
+
+
+def final_gates(p: Project, task_id: str) -> None:
+    store = Store(p)
+    ok, failure = run_gates(p, store, Path(p.cfg["repo"]["worktrees"]) / task_id, "final", None)
+    store.log(f"final checks for {task_id}: " + ("OK" if ok else "FAILED\n" + failure))
+
+
+def run_async(coro) -> None:
+    asyncio.run(coro)

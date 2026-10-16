@@ -1,0 +1,74 @@
+{
+  "tasks": {
+    "001": {
+      "title": "Finish the font analysis WIP and make the branch green",
+      "status": "working",
+      "started": "2026-10-16T09:37:37",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00435605,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 1940,
+            "cache_read": 43575,
+            "cache_write": 13417
+          },
+          "at": "2026-10-14T17:25:49"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.16645300000000002,
+          "turns": 9,
+          "error": true,
+          "attempt": 1,
+          "tokens": {
+            "input": 10,
+            "output": 1208,
+            "cache_read": 123376,
+            "cache_write": 35425
+          },
+          "at": "2026-10-14T17:26:11"
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00551033,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2349,
+            "cache_read": 45633,
+            "cache_write": 17299
+          },
+          "at": "2026-10-16T09:37:58"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: make branch feature/0.2.6 clippy-clean (`cargo clippy --workspace -- -D warnings`) by wiring the unused font-analysis code, then add the tests and Russian strings listed below. Commit only green states.\n\n1. Wire `suggest_fonts` (crates/ui-egui/src/font_substitute.rs:169). Call it when Edit PDF's text editing is active and a page is shown. Candidate hook: canvas.rs ~2429, where `view.objects.prepare(doc, tool == QuickTool::EditText && can_modify, ...)` runs for `QuickTool::EditText`; or edit_text_ui.rs `page_input` (camera_ui.rs:61 is the input entry point). Pick one that runs once per page view, not every frame. `page_fonts` is cached per `(id, page)` by `edit_generation()`, so the call is cheap, but `suggest_fonts` opens a dialog, so it must not reopen after dismissal (it uses `fonts.suggested`; verify that). Do not change the Match::Other logic.\n2. Tests:\n   - pdfcraft-edit (crates/edit/src/text.rs:169 `font_facts`, :212 `first_unencodable`): synthetic CIDFontType2 whose FontFile2 name table says family \"Rect Font\", weight 700, with /BaseFont \"CIDFont+F1\". Assert family/weight come from the program. Assert `first_unencodable` returns the first unencodable char. Build the font with crates/engine/tests/support/font_fixture.rs (in-memory generator). Check whether that helper is reachable from the edit crate's tests; if not, build the fixture locally.\n   - pdfcraft-engine (crates/engine/src/text_fonts.rs:149 `Wanted::from_facts`): assert program family/weight win over flags.\n   - Styled edit: bold on a paragraph whose real family has an installed or registered bold face must pick that face, not standard Helvetica-Bold. See `styled_face` and `rank` in font_substitute.rs.\n3. Add Russian lines to crates/ui-egui/src/i18n/ru.tsv for every new UI string (the `sintec_guard` test checks coverage), e.g. \"No similar font is installed. Choose the font edited text in it is set in.\" Then run `python zz_rehash.py crates/ui-egui/src/i18n/ru.tsv` and `cargo xtask assets`.\n\nConstraints (CLAUDE.md/AGENTS.md): no unwrap/expect/panic/indexing on input-derived positions in non-test code; use checked arithmetic and `get`. Never commit fonts, Downloads PDFs or corpus files. Use `Result` and existing error enums. No unsafe.\n\nDone when: `cargo fmt --all --check`, `cargo clippy --workspace -- -D warnings`, and `cargo test -p pdfcraft-edit -p pdfcraft-engine -p pdfcraft-ui-egui` (plus the fourth crate you touched) all pass, `cargo xtask assets` passes, and the new tests fail if the feature is reverted. Report the call site you chose and why.",
+      "last_failure": "rceFace { family: pdfcraft_fonts::embedding::family_key(&line.base_font), bold: line.bold, italic: line.italic },\n     }\n }\nDiff in \\\\?\\C:\\Users\\kochurin.a\\sintec-pdf\\agent-worktrees\\001\\crates\\ui-egui\\src\\font_substitute.rs:86:\n \n /// The memory's key for a font in a style.\n fn key_of(wanted: &Wanted) -> String {\n\u001b[31m-    format!(\"{}{}{}\", pdfcraft_engine::text_fonts::family_key(&wanted.base_font), if wanted.bold { \"-b\" } else { \"\" }, if wanted.italic { \"-i\" } else { \"\" })\n\u001b[0m\u001b[32m+    format!(\n\u001b[0m\u001b[32m+        \"{}{}{}\",\n\u001b[0m\u001b[32m+        pdfcraft_engine::text_fonts::family_key(&wanted.base_font),\n\u001b[0m\u001b[32m+        if wanted.bold { \"-b\" } else { \"\" },\n\u001b[0m\u001b[32m+        if wanted.italic { \"-i\" } else { \"\" }\n\u001b[0m\u001b[32m+    )\n\u001b[0m }\n \n /// Choices, the analysis and the open dialog.\nDiff in \\\\?\\C:\\Users\\kochurin.a\\sintec-pdf\\agent-worktrees\\001\\crates\\ui-egui\\src\\font_substitute.rs:408:\n         };\n         ui.label(crate::i18n::fmt(why, &[(\"font\", &format!(\"«{}»\", offer.base_font))]));\n         if offer.pending.is_none() && !offer.paragraph {\n\u001b[31m-            ui.label(egui::RichText::new(tl!(\"No similar font is installed. Choose the font edited text in it is set in.\")).color(t.text_muted).small());\n\u001b[0m\u001b[32m+            ui.label(\n\u001b[0m\u001b[32m+                egui::RichText::new(tl!(\"No similar font is installed. Choose the font edited text in it is set in.\")).color(t.text_muted).small(),\n\u001b[0m\u001b[32m+            );\n\u001b[0m         }\n         ui.add_space(8.0);\n         match &fonts {"
+    }
+  },
+  "spent_usd": 0.1764,
+  "rate_limits": {
+    "seven_day": {
+      "utilization": null,
+      "status": "rejected",
+      "resets_at": 1792116000,
+      "seen": "2026-10-14T17:26:11"
+    }
+  },
+  "tokens": {
+    "input": 22,
+    "output": 5497,
+    "cache_read": 212584,
+    "cache_write": 66141
+  },
+  "budget_base": 0.1709
+}

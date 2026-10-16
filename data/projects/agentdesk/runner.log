@@ -1,0 +1,30 @@
+[10-16 09:37:43] 001: routed to standard (set in the task file)
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\kochurin.a\AgentDesk\agentdesk\__main__.py", line 93, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\kochurin.a\AgentDesk\agentdesk\__main__.py", line 83, in main
+    core.run_async(core.run_queue(core.project(args.project), args.task, args.max))
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\kochurin.a\AgentDesk\agentdesk\core.py", line 650, in run_async
+    asyncio.run(coro)
+    ~~~~~~~~~~~^^^^^^
+  File "C:\Users\kochurin.a\AppData\Local\Python\pythoncore-3.14-64\Lib\asyncio\runners.py", line 205, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\kochurin.a\AppData\Local\Python\pythoncore-3.14-64\Lib\asyncio\runners.py", line 128, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\kochurin.a\AppData\Local\Python\pythoncore-3.14-64\Lib\asyncio\base_events.py", line 719, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\kochurin.a\AgentDesk\agentdesk\core.py", line 626, in run_queue
+    await do_task(p, store, task, meter)
+  File "C:\Users\kochurin.a\AgentDesk\agentdesk\core.py", line 582, in do_task
+    wt = ensure_worktree(p, store, task)
+  File "C:\Users\kochurin.a\AgentDesk\agentdesk\core.py", line 327, in ensure_worktree
+    raise RuntimeError(f"git worktree add failed: {out}")
+RuntimeError: git worktree add failed: fatal: invalid reference: auto/001
+

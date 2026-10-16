@@ -1,0 +1,36 @@
+{
+  "tasks": {
+    "001": {
+      "title": "Dashboard and runs don't need a console window kept open",
+      "status": "working",
+      "started": "2026-10-16T09:37:26",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00392234,
+          "turns": 5,
+          "error": false,
+          "tokens": {
+            "input": 4,
+            "output": 2389,
+            "cache_read": 21424,
+            "cache_write": 10768
+          },
+          "at": "2026-10-16T09:37:43"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: make the AgentDesk dashboard and its runs survive closing the console window that started them (Task 001 in data/projects/agentdesk/tasks/001-run-without-console.md; read its Goal, Constraints, and Done-when sections first).\n\nFiles:\n- AgentDesk.cmd (5 lines): runs `\"%PY%\" -m agentdesk %*` in the foreground. Keep the .venv lookup on lines 3-4. Add a hidden start, e.g. a launcher that uses `start \"\" /min` or a .vbs/pythonw route, while the double-click still opens the browser.\n- agentdesk.sh and install.ps1: the same launcher behaviour for macOS/Linux (nohup/setsid) and Windows.\n- agentdesk/__main__.py: main() at line 58; subparsers at line 66; cmd_status at line 25. Add `stop` (and optionally a request to stop the run) and keep existing commands unchanged.\n- agentdesk/server.py: Runner.start at lines 52-55 currently sets only CREATE_NEW_PROCESS_GROUP. Change it to DETACHED_PROCESS | CREATE_NO_WINDOW (plus CREATE_NEW_PROCESS_GROUP) on win32, and use start_new_session on POSIX. Keep stdout/stderr going to runner.log/agentdesk.log. main() at line 408: if 127.0.0.1:8765 already answers, open the browser and exit instead of raising a port error. Write a PID/lock file in data/ for `stop`.\n- README.md: rewrite the \"Start\" section to match the code (it mentions `AgentDesk.cmd status PROJECT` near line 67).\n\nConstraints:\n- Bind to 127.0.0.1 only.\n- Do not change agentdesk/core.py, the task pipeline, or the run arguments.\n- Do not change the data/settings.toml format or store secrets.\n- Keep `python -m agentdesk status agentdesk` working.\n- Windows is the main platform; keep macOS/Linux working.\n\nDone when:\n1. A hidden start works, and the dashboard stays reachable at http://127.0.0.1:8765 after the starting console closes.\n2. A run started from the dashboard keeps running after the dashboard is closed or restarted. `status` still shows it as running, and runner.log keeps growing.\n3. A second start while the server is up opens the browser to the existing dashboard and exits with no error.\n4. `stop` ends the dashboard (and optionally the run), and the README documents it.\n5. `python -m agentdesk status agentdesk` runs without error.\n\nVerify by starting, closing the console, and checking the port and the PID file. Don't solve it beyond this brief."
+    }
+  },
+  "spent_usd": 0.0039,
+  "budget_base": 0.0,
+  "tokens": {
+    "input": 4,
+    "output": 2389,
+    "cache_read": 21424,
+    "cache_write": 10768
+  }
+}

@@ -1,0 +1,17 @@
+name = "AgentDesk"
+account = "default"
+
+[repo]
+path = "C:/Users/kochurin.a/AgentDesk"
+base = "main"
+worktrees = "C:/Users/kochurin.a/AgentDesk/data/projects/agentdesk/worktrees"
+copy_into_worktree = []
+co_author = "Co-Authored-By: Claude <noreply@anthropic.com>"
+
+[gates]
+quick = ["python -m pytest -q -x"]
+final = ["python -m pytest -q"]
+max_feedback_chars = 6000
+timeout_s = 3600
+
+[gates.env]

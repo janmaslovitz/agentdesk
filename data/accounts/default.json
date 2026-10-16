@@ -1,0 +1,10 @@
+{
+  "rate_limits": {
+    "five_hour": {
+      "utilization": null,
+      "status": "allowed",
+      "resets_at": 1792149000,
+      "seen": "2026-10-16T09:42:29"
+    }
+  }
+}
