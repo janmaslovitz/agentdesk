@@ -1,5 +1,29 @@
-import os
-import tempfile
+"""Tests run against a temporary AGENTDESK_HOME (set before agentdesk is imported) and a scratch git repo."""
 
-# Tests never touch the real data folder: point AGENTDESK_HOME at a temp dir before agentdesk is imported.
-os.environ["AGENTDESK_HOME"] = tempfile.mkdtemp(prefix="agentdesk-test-")
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HOME = Path(tempfile.mkdtemp(prefix="agentdesk-test-"))
+os.environ["AGENTDESK_HOME"] = str(HOME)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest  # noqa: E402
+
+from agentdesk import core  # noqa: E402
+
+assert core.DATA == HOME, "agentdesk was imported before AGENTDESK_HOME was set"
+
+
+@pytest.fixture
+def project(tmp_path):
+    """A fresh project on a scratch git repo."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    core.settings()
+    name = f"scratch-{tmp_path.name}"
+    p = core.add_project(name, str(repo), "main")
+    yield p
