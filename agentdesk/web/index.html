@@ -87,6 +87,9 @@ dialog::backdrop { background: rgb(0 0 0 / .35); }
 dialog h3 { margin: 0 0 12px; } dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 3px; }
 dialog input, dialog select, dialog textarea { width: 100%; } dialog textarea { height: 140px; }
 dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+.attn { padding: 8px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
+.attn .k { font-size: 11px; font-weight: 600; color: var(--warn); text-transform: uppercase; min-width: 70px; }
+.attn .w { flex: 1; min-width: 0; } .attn button { padding: 2px 8px; font-size: 12px; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 code { font: 12px var(--mono); }
 </style>
@@ -96,6 +99,9 @@ code { font: 12px var(--mono); }
   <h1>AgentDesk</h1>
   <h2>Projects <button onclick="openDlg('dProject')">+ Add</button></h2>
   <div id="projects"></div>
+  <h2>Auto-runner</h2>
+  <div class="acct"><label><input type="checkbox" id="autoGlobal" onchange="toggleAuto(null, this.checked)"> Manage all projects automatically</label>
+    <div class="m">Starts the next ready task, recovers and retries a crashed run once, flags the rest. Never merges or pushes.</div></div>
   <h2>Accounts <button onclick="openDlg('dAccount')">+ Add</button></h2>
   <div id="accounts"></div>
   <div class="spacer"></div>
@@ -178,6 +184,7 @@ async function addTask() {
 async function refreshAll() {
   ov = await api("/api/overview");
   $("datadir").textContent = "Data: " + ov.data;
+  $("autoGlobal").checked = ov.auto_global;
   if (!cur || !ov.projects.some(p => p.slug === cur)) cur = ov.projects[0]?.slug || null;
   $("projects").innerHTML = ov.projects.map(p => {
     const c = p.counts, done = c.done||0, total = Object.values(c).reduce((a,b)=>a+b,0);
@@ -198,7 +205,8 @@ function pickProject(slug) { cur = slug; selTask = null; localStorage.setItem("a
 
 function shell() {
   $("main").innerHTML = `
-  <div class="top"><h2 id="pTitle"></h2><span class="m" id="pMeta"></span><span id="runstate" class="pill">idle</span><span class="spacer"></span>
+  <div class="top"><h2 id="pTitle"></h2><span class="m" id="pMeta"></span><span id="runstate" class="pill">idle</span>
+    <label class="pill" title="Start the next ready task by itself"><input type="checkbox" id="autoProj" onchange="toggleAuto(cur, this.checked)"> <span id="autoState">Auto</span></label><span class="spacer"></span>
     <button onclick="openDlg('dTask')">+ Task</button>
     <button class="primary" onclick="run('next')">Run next</button><button onclick="run('all')">Run all</button><button class="danger" onclick="stop()">Stop</button></div>
   <div class="stats">
@@ -220,6 +228,7 @@ function shell() {
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
+  <section><h3>Needs attention <span class="badge" id="attnCount">0</span></h3><div id="attn"></div></section>
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
 }
 
@@ -234,6 +243,12 @@ async function refresh() {
   }
   showMode(st.project);
   const p = st.project, r = st.runner;
+  const po = ov?.projects.find(x => x.slug === cur);
+  if (po) { $("autoProj").checked = po.auto_enabled; $("autoState").textContent = po.auto; }
+  const items = (ov?.attention.items || []).filter(i => i.project === cur);
+  $("attnCount").textContent = items.length + (ov && ov.attention.count > items.length ? ` (${ov.attention.count} in all projects)` : "");
+  $("attn").innerHTML = items.map(i => `<div class="attn"><span class="k">${esc(i.kind)}</span><div class="w"><b>${esc(i.task)}</b> ${esc(i.title)}<div class="muted">${esc(i.reason)}</div></div>
+    <button onclick="openAttention('${esc(i.task)}','${esc(i.open)}')">Open ${i.open === "report" ? "report" : "log"}</button></div>`).join("") || `<div class="empty" style="padding:14px">Nothing needs attention.</div>`;
   $("pTitle").textContent = p.name;
   $("pMeta").textContent = `${p.repo} · base ${p.base} · account ${p.account}`;
   $("runstate").textContent = r.running ? "running: " + r.args.slice(0, 1).concat(r.args.slice(2)).join(" ") : (r.exit != null ? `idle (last exit ${r.exit})` : "idle");
@@ -265,6 +280,15 @@ async function refresh() {
   if (selTask) showDetail(false);
 }
 
+async function toggleAuto(slug, enabled) {
+  const r = await api(slug ? `/api/p/${slug}/autorunner` : "/api/autorunner", {enabled});
+  if (r.error) note(r.error);
+  refreshAll();
+}
+async function openAttention(id, what) {
+  if (what === "log") { $("log").scrollIntoView({block: "center"}); }
+  await pickTask(id);
+}
 async function pickTask(id) { selTask = id; await showDetail(true); refresh(); }
 let detailCache = null;
 async function showDetail(fetchText) {

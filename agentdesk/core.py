@@ -121,6 +121,14 @@ model = "sonnet"
 effort = "medium"
 budget_usd = 2.0
 
+# Auto-runner: the dashboard starts the next ready task of every project by itself (no model calls),
+# recovers runs that died, retries a crashed task retry_crashed times, and flags the rest.
+# A project can override `enabled` in its project.toml under [autorunner].
+[autorunner]
+enabled = true
+interval_s = 30
+retry_crashed = 1
+
 [guard]
 deny = [
   'git\\s+push', 'git\\s+remote', 'gh\\s+(pr|release|repo|api|issue|workflow)', 'git\\s+reset\\s+--hard',
@@ -609,6 +617,157 @@ def run_gates(p: Project, store: Store, wt: Path, kind: str, crates: list[str] |
         if code != 0:
             return False, f"$ {cmd}\n{trim(out, int(g.get('max_feedback_chars', 6000)))}"
     return True, ""
+
+
+# ----------------------------------------------------------------------------- auto-runner (pure logic; the loop is in server.py)
+
+NL = chr(10)
+AUTO_DEFAULTS = {"enabled": True, "interval_s": 30, "retry_crashed": 1}
+
+
+def autorunner_cfg(p: Project | None = None, global_cfg: dict | None = None, project_cfg: dict | None = None) -> dict:
+    """Effective auto-runner settings: code defaults < settings.toml [autorunner] < project.toml [autorunner]."""
+    g = settings().get("autorunner", {}) if global_cfg is None else global_cfg
+    pc = (p.cfg.get("autorunner", {}) if p is not None else {}) if project_cfg is None else project_cfg
+    out = {**AUTO_DEFAULTS, **g, **pc}
+    out["enabled"] = bool(out["enabled"])
+    out["interval_s"] = max(5, int(out["interval_s"]))
+    out["retry_crashed"] = max(0, int(out["retry_crashed"]))
+    return out
+
+
+def _set_toml_key(text: str, table: str, key: str, value: str) -> str:
+    """Set `key = value` inside [table] of a TOML text (the table is added at the end if missing)."""
+    lines = text.splitlines()
+    head = next((n for n, ln in enumerate(lines) if ln.strip() == f"[{table}]"), None)
+    if head is None:
+        return text.rstrip(NL) + f"{NL}{NL}[{table}]{NL}{key} = {value}{NL}"
+    end = next((n for n in range(head + 1, len(lines)) if lines[n].lstrip().startswith("[")), len(lines))
+    at = next((n for n in range(head + 1, end) if re.match(rf"\s*{key}\s*=", lines[n])), None)
+    if at is None:
+        lines.insert(head + 1, f"{key} = {value}")
+    else:
+        lines[at] = f"{key} = {value}"
+    return NL.join(lines) + NL
+
+
+def set_autorunner(p: Project | None, enabled: bool) -> None:
+    """Per project (project.toml) or, with p=None, app-wide (settings.toml). Only called when the user changes it."""
+    val = "true" if enabled else "false"
+    if p is not None:
+        _write_project(p, _set_toml_key(_project_text(p), "autorunner", "enabled", val))
+        return
+    path = DATA / "settings.toml"
+    settings()
+    new = _set_toml_key(path.read_text(encoding="utf-8"), "autorunner", "enabled", val)
+    tomllib.loads(new)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(new, encoding="utf-8")
+    tmp.replace(path)
+
+
+def pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+        k.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def classify_failure(failure: str | None, status: str | None = None, exit_code: int | None = None) -> str:
+    """"crash" (process died / infrastructure: worth one retry), "gate" (the checks failed), "task" (the task
+    itself failed: blocked) or "none"."""
+    f = (failure or "").lstrip()
+    if f.startswith("worker exited unexpectedly"):
+        return "crash"
+    if f.startswith("$ ") or f.startswith("The checks failed"):
+        return "gate"
+    if status == "blocked":
+        return "task"
+    if status in ("working", "routing") and exit_code not in (None, 0):
+        return "crash"
+    return "none"
+
+
+def recover_stale(state: dict, alive: bool, exit_code: int | None = None) -> list[str]:
+    """No run process is alive: tasks still `working`/`routing` go back to `pending` with last_failure noting
+    the exit, and their `crashes` counter goes up. Mutates `state`; returns the task ids changed."""
+    if alive:
+        return []
+    out = []
+    for tid, e in state.get("tasks", {}).items():
+        if e.get("status") in ("working", "routing"):
+            code = f" (code {exit_code})" if exit_code is not None else ""
+            e.update(status="pending", last_failure=f"worker exited unexpectedly{code}", crashes=int(e.get("crashes", 0)) + 1)
+            out.append(tid)
+    return out
+
+
+def next_startable(tasks: list[Task], state: dict, run_going: bool, retry_crashed: int = 1) -> Task | None:
+    """The first pending task whose dependencies are all done; None while a run is going. A task that crashed
+    more than `retry_crashed` times, or whose checks failed, is flagged (attention_items) and never auto-started."""
+    if run_going:
+        return None
+    for t in tasks:
+        e = state.get("tasks", {}).get(t.id, {})
+        if e.get("status", "pending") != "pending" or not ready(t, state):
+            continue
+        if int(e.get("crashes", 0)) > retry_crashed or classify_failure(e.get("last_failure"), "pending") == "gate":
+            continue
+        return t
+    return None
+
+
+def attention_items(slug: str, tasks: list[Task], state: dict, merged: dict[str, bool | None] | None = None,
+                    retry_crashed: int = 1) -> list[dict]:
+    """What needs a human (or the Coworker); nothing here is acted on. `merged`: task id -> branch merged into base
+    (None = unknown). Each item: project, task, kind, reason, open ("report" | "log")."""
+    out = []
+    merged = merged or {}
+    for t in tasks:
+        e = state.get("tasks", {}).get(t.id, {})
+        st, fail = e.get("status", "pending"), e.get("last_failure", "")
+        kind = classify_failure(fail, st)
+
+        def add(k: str, why: str, open_: str = "log") -> None:
+            out.append({"project": slug, "task": t.id, "title": t.title, "kind": k, "reason": why, "open": open_})
+
+        if int(e.get("crashes", 0)) > retry_crashed:
+            add("repeated", f"crashed {e['crashes']} times; auto-retry used up: {fail.splitlines()[0] if fail else ''}".strip())
+        elif kind == "gate" and st != "done":
+            add("gate", "checks failed: " + (fail.splitlines()[0] if fail else ""), "log")
+        elif st == "blocked":
+            add("blocked", "blocked after all tiers: " + (fail.splitlines()[0][:120] if fail else "see the log"))
+        if e.get("merge") == "conflict" or (st != "done" and "merge conflict" in fail.lower()):
+            add("conflict", "merge conflict")
+        if st == "done" and e.get("branch") and merged.get(t.id) is False and not e.get("reviewed"):
+            add("unmerged", f"done, branch {e['branch']} is not merged and not reviewed", "report")
+    return out
+
+
+def branch_merged(p: Project, branch: str) -> bool | None:
+    """Read-only: is `branch` an ancestor of the base branch? None if it can't be told."""
+    base = p.cfg.get("repo", {}).get("base", "main")
+    try:
+        if git(["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], p.repo)[0] != 0:
+            return None
+        return git(["merge-base", "--is-ancestor", branch, base], p.repo)[0] == 0
+    except OSError:
+        return None
 
 
 # ----------------------------------------------------------------------------- agents
