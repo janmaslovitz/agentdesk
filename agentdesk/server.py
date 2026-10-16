@@ -548,6 +548,31 @@ def chat(p: core.Project) -> Chat:
 
 # ----------------------------------------------------------------------------- accounts
 
+_AUTH_CACHE: dict[str, tuple[float, dict]] = {}
+
+
+def auth_status(a: dict, fresh: bool = False) -> dict:
+    """Whether the Claude CLI is really signed in for this account: `claude auth status` run against the
+    account's own login folder. {"connected": bool | None, "email": str, "method": str}; connected is None
+    when the CLI couldn't be asked. Cached for a few seconds because the dashboard polls."""
+    name = a.get("name", "default")
+    hit = _AUTH_CACHE.get(name)
+    if hit and not fresh and time.time() - hit[0] < 15:
+        return hit[1]
+    out: dict = {"connected": None, "email": "", "method": ""}
+    try:
+        kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
+        r = subprocess.run([core.bundled_cli(), "auth", "status"], capture_output=True, text=True, timeout=20,
+                           stdin=subprocess.DEVNULL, env={**os.environ, **core.account_env(a)}, **kw)
+        info = json.loads(r.stdout or "{}")
+        out = {"connected": bool(info.get("loggedIn")), "email": str(info.get("email") or ""),
+               "method": str(info.get("authMethod") or "")}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    _AUTH_CACHE[name] = (time.time(), out)
+    return out
+
+
 def account_rows() -> list[dict]:
     rows = []
     for a in core.settings().get("accounts", []):
@@ -556,9 +581,11 @@ def account_rows() -> list[dict]:
             ready = bool(os.environ.get(a.get("key_env", "")))
             where = f"key from ${a.get('key_env', '')}" + ("" if ready else " (not set)")
         else:
-            ready = (cfg_dir / ".credentials.json").exists() or sys.platform == "darwin"
+            st = auth_status(a)
+            ready = st["connected"] if st["connected"] is not None else ((cfg_dir / ".credentials.json").exists() or sys.platform == "darwin")
             where = str(cfg_dir)
         rows.append({"name": a.get("name"), "kind": a.get("kind", "subscription"), "where": where, "ready": ready,
+                     "email": st["email"] if a.get("kind") != "api_key" else "",
                      "usage": core.account_usage(a.get("name", "default")).get("rate_limits", {})})
     return rows
 
@@ -591,6 +618,7 @@ def open_login(name: str) -> str | None:
         return "API-key accounts don't log in; set the environment variable instead"
     env = {**os.environ, **core.account_env(a)}
     cli = core.bundled_cli()
+    _AUTH_CACHE.pop(name, None)  # the next status check asks the CLI again
     try:
         if sys.platform == "win32":
             subprocess.Popen(["cmd", "/c", "start", "Claude login", "cmd", "/k", cli, "/login"], env=env)

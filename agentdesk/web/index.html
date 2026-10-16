@@ -118,7 +118,7 @@ code { font: 12px var(--mono); }
   <label>Kind</label><select id="aKind" onchange="$('aValueL').textContent = this.value === 'api_key' ? 'Environment variable holding the API key' : 'Login folder (empty: a new folder in AgentDesk data)'">
     <option value="subscription">Claude subscription (separate login)</option><option value="api_key">API key</option></select>
   <label id="aValueL">Login folder (empty: a new folder in AgentDesk data)</label><input id="aValue">
-  <div class="muted" style="font-size:12px;margin-top:8px">Subscription accounts: after adding, press "Log in" and type <code>/login</code> in the window that opens. API keys are never stored by AgentDesk: set the environment variable before starting it.</div>
+  <div class="muted" style="font-size:12px;margin-top:8px">Subscription accounts: after adding, press "Log in", sign in in the browser (paste the code into the window that opens if it asks). The account shows "Connected as ..." when it worked. API keys are never stored by AgentDesk: set the environment variable before starting it.</div>
   <div class="row"><button onclick="closeDlg('dAccount')">Cancel</button><button class="primary" onclick="addAccount()">Add</button></div>
 </dialog>
 
@@ -168,7 +168,12 @@ async function addAccount() {
   if (r.error) return note(r.error);
   closeDlg("dAccount"); refreshAll();
 }
-async function login(name) { const r = await api(`/api/accounts/${encodeURIComponent(name)}/login`, {}); if (r.error) note(r.error); }
+async function login(name) {
+  const r = await api(`/api/accounts/${encodeURIComponent(name)}/login`, {});
+  if (r.error) return note(r.error);
+  let n = 0;  // check every 3 s for up to 3 minutes
+  const t = setInterval(() => { refreshAll(); if (++n > 60) clearInterval(t); }, 3000);
+}
 async function addTask() {
   const r = await api(`/api/p/${cur}/tasks`, {title: $("tTitle").value, tier: $("tTier").value, depends: $("tDeps").value, body: $("tBody").value});
   if (r.error) return note(r.error);
@@ -188,6 +193,7 @@ async function refreshAll() {
   $("accounts").innerHTML = ov.accounts.map(a => {
     const lims = Object.values(a.usage||{}), u = lims.length ? Math.max(...lims.map(l => l.utilization||0)) : null;
     return `<div class="acct"><span class="dot${a.ready?" on":""}"></span><b>${esc(a.name)}</b> <span class="muted">${a.kind==="api_key"?"API key":"subscription"}</span>
+      <div class="m" style="color:${a.ready?"var(--ok,#3fb950)":"var(--warn,#d29922)"}">${a.ready?`Connected${a.email?" as "+esc(a.email):""}`:(a.kind==="api_key"?"Key not set":"Not connected")}</div>
       ${u!=null?` · ${Math.round(u*100)}% used`:""}
       <div class="m">${esc(a.where)}</div>
       ${a.kind!=="api_key"?`<button style="margin-top:4px;padding:2px 8px;font-size:12px" onclick="login('${esc(a.name)}')">Log in</button>`:""}</div>`;

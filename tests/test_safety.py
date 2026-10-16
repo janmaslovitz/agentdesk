@@ -78,3 +78,22 @@ def test_is_agentdesk_matches_only_agentdesk_command_lines(monkeypatch):
     for cmd, want in cases.items():
         monkeypatch.setattr(cli, "process_info", lambda pid, cmd=cmd: (1, cmd))
         assert cli.is_agentdesk(123) is want, cmd
+
+
+def test_account_rows_report_real_connection(monkeypatch):
+    import json as _json
+    calls = []
+
+    class R:
+        stdout = _json.dumps({"loggedIn": True, "email": "me@example.com", "authMethod": "claude.ai"})
+
+    monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: calls.append(k["env"].get("CLAUDE_CONFIG_DIR")) or R())
+    server._AUTH_CACHE.clear()
+    row = server.account_rows()[0]
+    assert row["ready"] is True and row["email"] == "me@example.com"
+    server.account_rows()
+    assert len(calls) == 1  # cached between polls
+    R.stdout = _json.dumps({"loggedIn": False})
+    server._AUTH_CACHE.clear()
+    row = server.account_rows()[0]
+    assert row["ready"] is False and row["email"] == ""
