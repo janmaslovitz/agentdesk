@@ -69,7 +69,8 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
 .seg button { border: 0; border-radius: 0; padding: 3px 10px; font-size: 12px; }
 .seg button.on { background: var(--accent); color: #fff; }
-.modenote { font-size: 12px; color: var(--warn); padding: 6px 14px; border-bottom: 1px solid var(--line); }
+.modenote { font-size: 12px; color: var(--muted); padding: 6px 14px; border-bottom: 1px solid var(--line); }
+.badge { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; color: var(--warn); border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); white-space: nowrap; }
 #pending:empty { display: none; }
 #pending { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 .approve { border: 1px solid var(--warn); border-radius: 10px; padding: 10px 12px; background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
@@ -205,9 +206,10 @@ function shell() {
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
-    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Autonomous mode (coming in a later version)">Coworker</button></span>
+    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Works on its own in its own worktree: runs commands and starts runs without asking, within the guard and a budget per message">Coworker</button></span>
+        <span class="badge" id="coworkBadge" hidden>Coworker: runs commands without asking</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
-      <div class="modenote" id="modeNote" hidden>Coworker mode isn't available yet: the chat behaves as the Assistant (asks before running anything).</div>
+      <div class="modenote" id="modeNote" hidden></div>
       <div class="msgs" id="msgs"></div>
       <div id="pending"></div>
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
@@ -224,9 +226,8 @@ async function refresh() {
   if (chatFor !== cur) {
     chatFor = cur; pendingKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
     const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
-    $("chatModel").textContent = h.model || "";
   }
-  showMode(st.project.chat_mode);
+  showMode(st.project);
   const p = st.project, r = st.runner;
   $("pTitle").textContent = p.name;
   $("pMeta").textContent = `${p.repo} · base ${p.base} · account ${p.account}`;
@@ -307,14 +308,20 @@ async function send() {
 }
 async function resetChat() { await api(`/api/p/${cur}/chat/reset`, {}); $("msgs").innerHTML = ""; }
 
-function showMode(mode) {
+// `p`: the project from /state (chat_mode, chat_model, chat_budget, cowork).
+function showMode(p) {
+  const mode = p.chat_mode, cw = mode === "coworker";
   for (const b of $("modeSeg").children) b.classList.toggle("on", b.dataset.mode === mode);
-  $("modeNote").hidden = mode !== "coworker";
+  $("coworkBadge").hidden = !cw;
+  $("chatModel").textContent = p.chat_model || "";
+  $("modeNote").hidden = !cw;
+  if (cw) $("modeNote").textContent = `Edits and commits only in ${p.cowork} (branch auto/cowork); never pushes. Budget $${Number(p.chat_budget ?? 2).toFixed(2)} per message; pauses at the account usage threshold.`;
 }
 async function setMode(mode) {
   const r = await api(`/api/p/${cur}/chat/mode`, {mode});
   if (r.error) return note(r.error);
-  showMode(r.mode); addMsg("assistant", `Switched to ${r.mode === "coworker" ? "Coworker" : "Assistant"} mode; a new session starts with your next message.`);
+  if (st) { st.project.chat_mode = r.mode; showMode(st.project); }
+  refresh(); addMsg("assistant", `Switched to ${r.mode === "coworker" ? "Coworker" : "Assistant"} mode; a new session starts with your next message.`);
 }
 
 // Approval cards: tool calls waiting for the user. Re-rendered only when the set changes (keeps typing in the prefix box).
