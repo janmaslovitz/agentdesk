@@ -35,7 +35,44 @@ def cmd_status(p: core.Project) -> None:
     print(f"project total {state.get('spent_usd', 0):.3f} USD")
 
 
+def _ps(args: list[str]) -> str:
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=20).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def process_info(pid: int) -> tuple[int, str] | None:
+    """(parent pid, command line) of a live process, or None."""
+    if sys.platform == "win32":
+        out = _ps(["powershell", "-NoProfile", "-Command",
+                   f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}'; if($p){{\"$($p.ParentProcessId)|$($p.CommandLine)\"}}"])
+    else:
+        parts = _ps(["ps", "-p", str(int(pid)), "-o", "ppid=,args="]).split(None, 1)
+        out = "|".join(parts) if len(parts) == 2 else ""
+    ppid, _, cmd = out.partition("|")
+    return (int(ppid), cmd) if ppid.strip().isdigit() else None
+
+
+def is_agentdesk(pid: int) -> bool:
+    """A pid file can be stale and its pid reused: only treat the process as ours if it runs agentdesk."""
+    info = process_info(pid)
+    return bool(info) and re.search(r"-m\s+agentdesk", info[1]) is not None
+
+
+def own_lineage() -> set[int]:
+    """This process and its ancestors: killing any of them (or their tree) would kill the caller."""
+    seen, pid = set(), os.getpid()
+    while pid and pid not in seen and len(seen) < 32:
+        seen.add(pid)
+        info = process_info(pid)
+        pid = info[0] if info else 0
+    return seen
+
+
 def kill(pid: int, tree: bool = False) -> bool:
+    if pid <= 0 or pid in own_lineage() or not is_agentdesk(pid):
+        return False
     if sys.platform == "win32":
         cmd = ["taskkill", "/PID", str(pid), "/F"] + (["/T"] if tree else [])
         return subprocess.run(cmd, capture_output=True).returncode == 0
@@ -54,7 +91,7 @@ def cmd_stop(runs: bool) -> None:
         except ValueError:
             ok = False
         pf.unlink(missing_ok=True)
-        print("dashboard stopped" if ok else "dashboard was not running (stale pid file removed)")
+        print("dashboard stopped" if ok else "dashboard was not running (stale pid file removed; no process was killed)")
     else:
         print("dashboard is not running")
     if runs:

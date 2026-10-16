@@ -467,9 +467,18 @@ def next_task_id(p: Project) -> str:
 
 # ----------------------------------------------------------------------------- processes, worktrees, gates
 
+def scratch_home() -> str:
+    """A throw-away AGENTDESK_HOME for commands run by workers and checks, so tests of AgentDesk itself
+    (or a stray `stop`) can never touch the real data folder, pid files or settings."""
+    import tempfile
+    d = Path(tempfile.gettempdir()) / "agentdesk-worker-home"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
+
+
 def run(cmd, cwd: Path, env: dict | None = None, timeout: int = 3600, shell: bool = False) -> tuple[int, str]:
     try:
-        r = subprocess.run(cmd, cwd=cwd, env={**os.environ, **(env or {})}, capture_output=True, text=True,
+        r = subprocess.run(cmd, cwd=cwd, env={**os.environ, "AGENTDESK_HOME": scratch_home(), **(env or {})}, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout, shell=shell)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired as e:
@@ -721,7 +730,7 @@ Full task:
 
 
 def options(p: Project, **kw) -> ClaudeAgentOptions:
-    env = {**account_env(p.account), **kw.pop("env", {})}
+    env = {**account_env(p.account), "AGENTDESK_HOME": scratch_home(), **kw.pop("env", {})}
     return ClaudeAgentOptions(env=env, **kw)
 
 

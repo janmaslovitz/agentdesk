@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import threading
+import tomllib
 import time
 import uuid
 import webbrowser
@@ -794,11 +795,12 @@ def window_settings(save: dict | None = None) -> dict:
     except the ones in `save` (size/position remembered when the window closes)."""
     path = core.DATA / "settings.toml"
     core.settings()
-    text = path.read_text(encoding="utf-8")
+    text = path.read_bytes().decode("utf-8")  # bytes: keep CRLF visible
     cur = core.settings().get("window", {})
     want = {**{k: v for k, v in WINDOW_DEFAULTS.items() if k not in cur}, **(save or {})}
     if not want:
         return cur
+    nl = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
     head = next((n for n, ln in enumerate(lines) if ln.strip() == "[window]"), None)
     if head is None:
@@ -812,7 +814,15 @@ def window_settings(save: dict | None = None) -> dict:
                 end += 1
             else:
                 lines[at] = f"{k} = {int(v)}"
-    path.write_text(os.linesep.join(lines) + os.linesep, encoding="utf-8", newline="")
+    new = nl.join(lines) + nl
+    try:
+        tomllib.loads(new)  # never write a settings file the app can't read back
+    except tomllib.TOMLDecodeError as e:
+        log_error(f"AgentDesk: not saving window settings, settings.toml would be invalid ({e})")
+        return cur
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(new, encoding="utf-8", newline="")
+    tmp.replace(path)
     return core.settings().get("window", {})
 
 
