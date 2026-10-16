@@ -16,6 +16,7 @@ import sys
 import threading
 import tomllib
 import time
+import urllib.parse
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -690,9 +691,11 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def send(self, code: int, body: bytes, ctype: str) -> None:
+    def send(self, code: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
@@ -717,6 +720,42 @@ class Handler(BaseHTTPRequestHandler):
             self.json({"error": "no such project"}, 404)
             return None
 
+    def import_route(self, d: dict, query: dict) -> dict:
+        """Import a project: an uploaded .zip (raw body, options in the query), or JSON naming a zip/folder/repo
+        (`source`) or a git URL to clone (`source_url`). Never overwrites: a taken name asks for a new one."""
+        upload = None
+        try:
+            if not d and "zip" in (self.headers.get("Content-Type") or ""):
+                import tempfile
+                n = int(self.headers.get("Content-Length") or 0)
+                if n <= 0 or n > core.MAX_TOTAL_BYTES:
+                    return {"ok": False, "message": "the file is empty or too large"}
+                fd, tmp = tempfile.mkstemp(suffix=".zip")
+                with os.fdopen(fd, "wb") as f:
+                    f.write(self.rfile.read(n))
+                upload = Path(tmp)
+                d = query
+            repo = str(d.get("repo") or "").strip()
+            if not repo:
+                return {"ok": False, "message": "choose the repository folder on this computer"}
+            if d.get("repo_url"):  # clone the code repo into `repo` first (must be a new/empty folder)
+                if core.repo_state(repo) != "plain" or (Path(repo).exists() and any(Path(repo).iterdir())):
+                    return {"ok": False, "message": f"{repo} already exists and is not empty; choose a new folder to clone into"}
+                core.clone_for_import(str(d["repo_url"]), Path(repo))
+            src = upload or (core.clone_for_import(str(d["source_url"])) if d.get("source_url") else Path(str(d.get("source") or "")))
+            if not str(src):
+                return {"ok": False, "message": "choose an export file, folder or repository"}
+            p = core.import_project(src, repo, str(d.get("new_name") or ""), str(d.get("account") or "") or None,
+                                    str(d.get("project") or "") or None, d.get("pull") in (True, "true", "1"))
+            return {"ok": True, "slug": p.slug}
+        except core.NameClash as e:
+            return {"ok": False, "name_clash": True, "suggested": e.suggested, "message": str(e)}
+        except ValueError as e:  # BadExport is a ValueError
+            return {"ok": False, "message": str(e)}
+        finally:
+            if upload:
+                upload.unlink(missing_ok=True)
+
     def do_GET(self):
         parts = [x for x in self.path.split("?")[0].split("/") if x]
         if not parts or parts == ["index.html"]:
@@ -729,6 +768,8 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             if len(parts) == 4 and parts[3] == "state":
                 return self.json(project_state(p))
+            if len(parts) == 4 and parts[3] == "git":
+                return self.json(core.git_status(p))
             if len(parts) == 4 and parts[3] == "chat":
                 return self.json(chat(p).info())
             if len(parts) == 4 and parts[3] == "pending":
@@ -747,7 +788,9 @@ class Handler(BaseHTTPRequestHandler):
         if origin and not re.fullmatch(r"http://(127\.0\.0\.1|localhost):\d+", origin):
             return self.json({"error": "forbidden"}, 403)
         parts = [x for x in self.path.split("?")[0].split("/") if x]
-        d = self.body()
+        query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
+        upload = parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")
+        d = {} if upload else self.body()
         try:
             if parts == ["api", "projects"]:
                 try:
@@ -757,6 +800,23 @@ class Handler(BaseHTTPRequestHandler):
                 except core.NeedsLocalGit as e:
                     return self.json({"needs_local_git": True, "reason": e.reason, "message": str(e)})
                 return self.json({"ok": True, "slug": p.slug})
+            if parts == ["api", "projects", "import"]:
+                return self.json(self.import_route(d, query))
+            if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "export":
+                p = self.proj(parts[2])
+                if p is None:
+                    return None
+                if runner(p).running():
+                    return self.json({"ok": False, "message": "a run is in progress for this project; stop it first"})
+                logs = d.get("include_logs") is True
+                if d.get("mode") == "git":
+                    if d.get("confirm") is not True:
+                        return self.json({"ok": False, "message": "this needs confirmation"}, 400)
+                    return self.json(core.export_to_git(p, str(d.get("config_repo") or "").strip() or None, logs, push=d.get("push") is True))
+                if d.get("file"):
+                    return self.json({"ok": True, "file": str(core.export_project(p, str(d["file"]), logs))})
+                return self.send(200, core.export_project(p, None, logs), "application/zip",
+                                 {"Content-Disposition": f'attachment; filename="{p.slug}.agentdesk.zip"'})
             if parts == ["api", "accounts"]:
                 err = add_account(str(d.get("name", "")).strip(), str(d.get("kind", "subscription")), str(d.get("value", "")).strip())
                 return self.json({"error": err} if err else {"ok": True})
@@ -774,6 +834,22 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json({"error": "unknown mode"}, 400)
                     err = runner(p).start(args)
                     return self.json({"error": err} if err else {"ok": True})
+                if act == "git" and len(parts) == 5:
+                    if parts[4] not in ("fetch", "merge", "pull", "push"):
+                        return self.json({"error": "unknown git action"}, 400)
+                    if runner(p).running():
+                        return self.json({"ok": False, "message": "a run is in progress for this project; stop it first"})
+                    if parts[4] != "fetch" and d.get("confirm") is not True:
+                        return self.json({"ok": False, "message": "this needs confirmation"}, 400)
+                    if parts[4] == "fetch":
+                        res = core.git_fetch(p)
+                    elif parts[4] == "merge":
+                        res = core.git_merge(p, str(d.get("branch", "")))
+                    elif parts[4] == "pull":
+                        res = core.git_pull(p)
+                    else:
+                        res = core.git_push(p, str(d.get("branch") or "") or None)
+                    return self.json({**res, "status": core.git_status(p)})
                 if act == "stop":
                     err = runner(p).stop()
                     return self.json({"error": err} if err else {"ok": True})

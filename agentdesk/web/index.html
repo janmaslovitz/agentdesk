@@ -94,7 +94,7 @@ code { font: 12px var(--mono); }
 <body>
 <aside>
   <h1>AgentDesk</h1>
-  <h2>Projects <button onclick="openDlg('dProject')">+ Add</button></h2>
+  <h2>Projects <span><button onclick="openDlg('dImport')">Import</button> <button onclick="openDlg('dProject')">+ Add</button></span></h2>
   <div id="projects"></div>
   <h2>Accounts <button onclick="openDlg('dAccount')">+ Add</button></h2>
   <div id="accounts"></div>
@@ -111,6 +111,29 @@ code { font: 12px var(--mono); }
   <label>Checks</label><select id="pPreset"></select>
   <label>Account</label><select id="pAccount"></select>
   <div class="row"><button onclick="closeDlg('dProject')">Cancel</button><button class="primary" onclick="addProject()">Add</button></div>
+</dialog>
+
+<dialog id="dExport"><h3>Export project</h3>
+  <label><input type="checkbox" id="xLogs"> Include the activity log (agentdesk.log)</label>
+  <div class="muted" style="font-size:12px;margin:6px 0">Accounts, logins, API keys and worktrees are never exported.</div>
+  <div class="row"><button class="primary" onclick="exportZip()">Save as .zip…</button></div>
+  <label style="margin-top:10px">Or commit into git: config repo folder (empty: <code>.agentdesk/</code> in the project's repo)</label>
+  <input id="xRepo" placeholder="C:\path	o\config-repo">
+  <label><input type="checkbox" id="xPush"> Also push to the remote (never forced)</label>
+  <div class="row"><button onclick="closeDlg('dExport')">Close</button><button onclick="exportGit()">Commit export</button></div>
+  <pre id="xMsg" style="white-space:pre-wrap"></pre>
+</dialog>
+
+<dialog id="dImport"><h3>Import project</h3>
+  <label>From a .zip file</label><input type="file" id="iFile" accept=".zip">
+  <label>Or from a repo / folder on this computer (<code>.agentdesk/</code> or a config repo)</label><input id="iSource" placeholder="C:\path	oepo">
+  <label>Or clone a repo from a URL</label><input id="iUrl" placeholder="https://… or path of a bare repo">
+  <label>This project's repository folder on this computer</label><input id="iRepo" placeholder="C:\path	oepo">
+  <label>…or clone the code from a URL into that folder (new or empty)</label><input id="iRepoUrl" placeholder="https://…">
+  <label>Account</label><select id="iAccount"></select>
+  <label>Project name (empty: the exported name)</label><input id="iName">
+  <div class="row"><button onclick="closeDlg('dImport')">Cancel</button><button class="primary" onclick="importProject()">Import</button></div>
+  <pre id="iMsg" style="white-space:pre-wrap"></pre>
 </dialog>
 
 <dialog id="dAccount"><h3>Add account</h3>
@@ -144,6 +167,7 @@ async function api(path, body) {
   return r.json();
 }
 function openDlg(id) {
+  if (id === "dImport") $("iAccount").innerHTML = `<option value="">(none: pick later)</option>` + (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
   if (id === "dProject") {
     $("pPreset").innerHTML = (ov?.presets||[]).map(p => `<option>${esc(p)}</option>`).join("");
     $("pAccount").innerHTML = (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
@@ -162,6 +186,42 @@ async function addProject() {
   }
   if (r.error) return note(r.error);
   closeDlg("dProject"); cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
+}
+async function exportZip() {
+  const r = await fetch(`/api/projects/${cur}/export`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({include_logs: $("xLogs").checked})});
+  if (!r.ok || !(r.headers.get("Content-Type") || "").includes("zip")) { const j = await r.json().catch(() => ({})); return ($("xMsg").textContent = j.message || j.error || "export failed"); }
+  const blob = await r.blob(), name = `${cur}.agentdesk.zip`;
+  if (window.showSaveFilePicker) {  // the user chooses where to save
+    try { const h = await showSaveFilePicker({suggestedName: name, types: [{accept: {"application/zip": [".zip"]}}]}); const w = await h.createWritable(); await w.write(blob); await w.close(); $("xMsg").textContent = "Saved."; return; }
+    catch (e) { if (e.name === "AbortError") return; }
+  }
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); $("xMsg").textContent = "Downloaded " + name;
+}
+async function exportGit() {
+  const push = $("xPush").checked, repo = $("xRepo").value.trim();
+  if (!confirm(`Commit the export into ${repo || ".agentdesk/ of the project's repo"}` + (push ? " and push it to the remote (never forced)?" : "?"))) return;
+  const r = await api(`/api/projects/${cur}/export`, {mode: "git", confirm: true, push, config_repo: repo, include_logs: $("xLogs").checked});
+  $("xMsg").textContent = (r.ok ? "" : "Not done: ") + (r.message || r.error || "");
+}
+async function importProject() {
+  const opts = {repo: $("iRepo").value.trim(), repo_url: $("iRepoUrl").value.trim(), account: $("iAccount").value, new_name: $("iName").value.trim()};
+  const f = $("iFile").files[0];
+  let r;
+  for (;;) {
+    if (f) {
+      const q = new URLSearchParams(Object.entries(opts).filter(([, v]) => v));
+      r = await (await fetch("/api/projects/import?" + q, {method: "POST", headers: {"Content-Type": "application/zip"}, body: f})).json();
+    } else r = await api("/api/projects/import", {...opts, source: $("iSource").value.trim(), source_url: $("iUrl").value.trim()});
+    if (r.name_clash) {  // never overwrites: ask for another name
+      const n = prompt(`${r.message}
+
+New project name:`, r.suggested);
+      if (!n) return; opts.new_name = n; opts.repo_url = ""; continue;
+    }
+    break;
+  }
+  if (!r.ok) return ($("iMsg").textContent = r.message || r.error || "import failed");
+  closeDlg("dImport"); cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
 }
 async function addAccount() {
   const r = await api("/api/accounts", {name: $("aName").value, kind: $("aKind").value, value: $("aValue").value});
@@ -205,7 +265,7 @@ function pickProject(slug) { cur = slug; selTask = null; localStorage.setItem("a
 function shell() {
   $("main").innerHTML = `
   <div class="top"><h2 id="pTitle"></h2><span class="m" id="pMeta"></span><span id="runstate" class="pill">idle</span><span class="spacer"></span>
-    <button onclick="openDlg('dTask')">+ Task</button>
+    <button onclick="openDlg('dTask')">+ Task</button><button onclick="openDlg('dExport')">Export</button>
     <button class="primary" onclick="run('next')">Run next</button><button onclick="run('all')">Run all</button><button class="danger" onclick="stop()">Stop</button></div>
   <div class="stats">
     <div class="card"><div class="k">Spent by agents</div><div class="v num" id="spent"></div><div class="s" id="budget"></div></div>
@@ -226,7 +286,44 @@ function shell() {
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
+  <section><h3>Git <span class="muted" id="gitHead"></span><span class="spacer"></span>
+      <button onclick="gitAct('fetch')">Refresh</button>
+      <select id="gitBranch"></select><button id="gitMerge" onclick="gitDo('merge')">Merge into base</button>
+      <button id="gitPull" onclick="gitDo('pull')">Pull</button><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
+    <div style="padding:8px 14px"><div id="gitInfo" class="muted"></div><pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
+}
+
+let gitSt = null, gitFor = null;
+function gitShow(g, msg) {
+  gitSt = g;
+  const ab = g.upstream ? `${g.ahead} ahead, ${g.behind} behind ${g.upstream}` : (g.remote ? "no upstream branch yet" : "local-only project");
+  $("gitHead").textContent = `on ${g.branch} · base ${g.base} · ${g.clean ? "clean" : "dirty (" + g.changes.length + " changed)"}`;
+  $("gitInfo").innerHTML = `${esc(ab)}${g.remote_url ? " · remote " + esc(g.remote_url) : ""}<br>auto branches: ` +
+    (g.autos.length ? g.autos.map(a => `${esc(a.branch)} (+${a.ahead})`).join(", ") : "none ahead of base");
+  $("gitBranch").innerHTML = g.autos.map(a => `<option value="${esc(a.branch)}">${esc(a.branch)} (+${a.ahead})</option>`).join("");
+  $("gitMerge").disabled = !g.autos.length;
+  for (const id of ["gitPull", "gitPush"]) { $(id).disabled = !g.remote; $(id).title = g.remote ? "" : "local-only project"; }
+  if (msg !== undefined) $("gitMsg").textContent = msg;
+}
+async function gitLoad() { gitFor = cur; const g = await api(`/api/p/${cur}/git`); if (!g.error) gitShow(g); }
+async function gitAct(act, body = {}) {
+  const r = await api(`/api/p/${cur}/git/${act}`, body);
+  if (r.status) gitShow(r.status, (r.ok ? "" : "Not done: ") + (r.message || ""));
+  else $("gitMsg").textContent = r.error || r.message || "failed";
+}
+async function gitDo(act) {
+  const g = gitSt; if (!g) return;
+  let text, body = {confirm: true};
+  if (act === "merge") {
+    const b = $("gitBranch").value, n = (g.autos.find(a => a.branch === b) || {}).ahead || 0;
+    body.branch = b; text = `Merge ${b} (${n} commit${n === 1 ? "" : "s"}) into ${g.base}?
+A conflict is aborted and nothing changes.`;
+  } else if (act === "pull") text = `Pull ${g.upstream || g.remote} into ${g.branch} (fast-forward only, ${g.behind} commit${g.behind === 1 ? "" : "s"} behind)?
+Remote: ${g.remote_url}`;
+  else text = `Push ${g.branch} (${g.ahead} commit${g.ahead === 1 ? "" : "s"} ahead) to ${g.remote}?
+Remote: ${g.remote_url}`;
+  if (confirm(text)) await gitAct(act, body);
 }
 
 async function refresh() {
@@ -239,6 +336,7 @@ async function refresh() {
     const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
   }
   showMode(st.project);
+  if (gitFor !== cur) gitLoad();
   const p = st.project, r = st.runner;
   $("pTitle").textContent = p.name;
   $("pMeta").textContent = `${p.repo} · base ${p.base} · account ${p.account}`;

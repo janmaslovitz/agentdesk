@@ -8,6 +8,8 @@
     python -m agentdesk run PROJECT [TASK] [--max N]
     python -m agentdesk plan PROJECT [TASK]
     python -m agentdesk final PROJECT TASK
+    python -m agentdesk export PROJECT FILE.zip [--logs]   save a project (config, tasks, notes, state, reports, chat) to a file
+    python -m agentdesk import-file FILE.zip --repo PATH [--name N] [--account A]   make a project from such a file
     python -m agentdesk import PROJECT_NAME OLD_ORCHESTRATOR_DIR   bring in a zz_orchestrator queue
 """
 
@@ -148,6 +150,9 @@ def main() -> None:
     pl = sub.add_parser("plan"); pl.add_argument("project"); pl.add_argument("task", nargs="?")
     f = sub.add_parser("final"); f.add_argument("project"); f.add_argument("task")
     i = sub.add_parser("import"); i.add_argument("name"); i.add_argument("old", type=Path)
+    ex = sub.add_parser("export"); ex.add_argument("project"); ex.add_argument("file", type=Path); ex.add_argument("--logs", action="store_true")
+    imf = sub.add_parser("import-file"); imf.add_argument("file", type=Path); imf.add_argument("--repo", required=True)
+    imf.add_argument("--name"); imf.add_argument("--account")
     args = ap.parse_args()
     if args.cmd in (None, "dashboard"):
         from . import server
@@ -174,6 +179,15 @@ def main() -> None:
         core.final_gates(core.project(args.project), args.task)
     elif args.cmd == "import":
         cmd_import(args.name, args.old)
+    elif args.cmd == "export":
+        print(core.export_project(core.project(args.project), args.file, args.logs))
+    elif args.cmd == "import-file":
+        try:
+            print(core.import_project(args.file, args.repo, args.name, args.account).dir)
+        except core.NameClash as e:
+            sys.exit(f"{e}\nNothing was imported (existing projects are never overwritten). Run again with --name NEW_NAME.")
+        except ValueError as e:
+            sys.exit(f"import refused: {e}")
 
 
 if __name__ == "__main__":
