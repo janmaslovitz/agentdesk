@@ -703,6 +703,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(project_state(p))
             if len(parts) == 4 and parts[3] == "git":
                 return self.json(core.git_status(p))
+            if len(parts) == 4 and parts[3] == "build":
+                return self.json(core.build_job(p).info())
             if len(parts) == 4 and parts[3] == "chat":
                 return self.json(chat(p).info())
             if len(parts) == 4 and parts[3] == "pending":
@@ -764,6 +766,22 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         res = core.git_push(p, str(d.get("branch") or "") or None)
                     return self.json({**res, "status": core.git_status(p)})
+                if act == "build" and len(parts) <= 5:
+                    sub = parts[4] if len(parts) == 5 else ""
+                    job = core.build_job(p)
+                    if sub == "open":
+                        err = job.open_folder()
+                        return self.json({"error": err} if err else {"ok": True})
+                    if sub not in ("", "stop"):
+                        return self.json({"error": "unknown build action"}, 400)
+                    if d.get("confirm") is not True:
+                        return self.json({"ok": False, "message": "this needs confirmation"}, 400)
+                    if sub == "stop":
+                        err = job.stop()
+                    else:
+                        blocked = "a task run is in progress for this project; stop it first" if runner(p).running() else None
+                        err = job.start(str(d.get("kind") or "build"), str(d.get("ref") or ""), blocked)
+                    return self.json({"ok": False, "message": err} if err else {"ok": True})
                 if act == "stop":
                     err = runner(p).stop()
                     return self.json({"error": err} if err else {"ok": True})

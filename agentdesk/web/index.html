@@ -225,6 +225,12 @@ function shell() {
       <select id="gitBranch"></select><button id="gitMerge" onclick="gitDo('merge')">Merge into base</button>
       <button id="gitPull" onclick="gitDo('pull')">Pull</button><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
     <div style="padding:8px 14px"><div id="gitInfo" class="muted"></div><pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
+  <section><h3>Build <span class="muted" id="bHead"></span><span class="spacer"></span>
+      <input id="bRef" placeholder="branch or commit (default: base)" size="26">
+      <button id="bBuild" onclick="buildGo('build')">Build</button><button id="bClean" onclick="buildGo('clean')">Clean + rebuild</button>
+      <button id="bCustom" onclick="buildGo('custom')" hidden>Custom build</button>
+      <button id="bStop" onclick="buildStop()" disabled>Stop</button><button onclick="buildOpen()">Open folder</button></h3>
+    <div style="padding:8px 14px"><div id="bInfo" class="muted"></div><pre id="bLog" style="white-space:pre-wrap;max-height:260px;overflow:auto"></pre></div></section>
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
 }
 
@@ -240,6 +246,31 @@ function gitShow(g, msg) {
   for (const id of ["gitPull", "gitPush"]) { $(id).disabled = !g.remote; $(id).title = g.remote ? "" : "local-only project"; }
   if (msg !== undefined) $("gitMsg").textContent = msg;
 }
+let buildFor = null, buildTimer = null;
+function buildShow(b) {
+  const d = b.duration != null ? ` · ${Math.round(b.duration)}s` : "";
+  $("bHead").textContent = b.status + (b.kind ? ` (${b.kind} ${b.ref || ""})` : "") + d;
+  $("bInfo").textContent = (b.started ? "started " + new Date(b.started * 1000).toLocaleString() + " · " : "") + "result: " + b.result + (b.result_exists ? "" : " (not built yet)");
+  const L = $("bLog"), atEnd = L.scrollTop + L.clientHeight >= L.scrollHeight - 20;
+  L.textContent = b.log; if (atEnd) L.scrollTop = L.scrollHeight;
+  for (const id of ["bBuild", "bClean", "bCustom"]) $(id).disabled = b.running;
+  $("bStop").disabled = !b.running; $("bCustom").hidden = !b.has_custom;
+  $("bRef").placeholder = `branch or commit (default: ${b.base})`;
+  clearTimeout(buildTimer);
+  if (b.running) buildTimer = setTimeout(buildLoad, 1000);  // follows the log only while a build runs, not on the poll
+}
+async function buildLoad() { buildFor = cur; const b = await api(`/api/p/${cur}/build`); if (!b.error) buildShow(b); }
+async function buildPost(sub, body) {
+  const r = await api(`/api/p/${cur}/build${sub}`, {...body, confirm: true});
+  if (r.ok === false || r.error) alert(r.message || r.error);
+  await buildLoad();
+}
+async function buildGo(kind) {
+  if (kind === "clean" && !confirm("Delete the build worktree and recompile from scratch?")) return;
+  await buildPost("", {kind, ref: $("bRef").value.trim()});
+}
+async function buildStop() { await buildPost("/stop", {}); }
+async function buildOpen() { const r = await api(`/api/p/${cur}/build/open`, {}); if (r.error) alert(r.error); }
 async function gitLoad() { gitFor = cur; const g = await api(`/api/p/${cur}/git`); if (!g.error) gitShow(g); }
 async function gitAct(act, body = {}) {
   const r = await api(`/api/p/${cur}/git/${act}`, body);
@@ -271,6 +302,7 @@ async function refresh() {
   }
   showMode(st.project);
   if (gitFor !== cur) gitLoad();
+  if (buildFor !== cur) buildLoad();
   const p = st.project, r = st.runner;
   $("pTitle").textContent = p.name;
   $("pMeta").textContent = `${p.repo} · base ${p.base} · account ${p.account}`;
