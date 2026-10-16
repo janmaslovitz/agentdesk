@@ -18,6 +18,12 @@ from agentdesk import core  # noqa: E402
 assert core.DATA == HOME, "agentdesk was imported before AGENTDESK_HOME was set"
 
 
+@pytest.fixture(autouse=True)
+def no_real_usage_lookup(monkeypatch):
+    """Tests never read the real login or call the usage service; tests/test_usage_auto.py turns it on with fakes."""
+    monkeypatch.setattr(core, "usage_auto_enabled", lambda: False)
+
+
 @pytest.fixture
 def project(tmp_path):
     """A fresh project on a scratch git repo."""

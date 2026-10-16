@@ -234,6 +234,93 @@ def save_account_usage(name: str, usage: dict) -> None:
     p.write_text(json.dumps(usage, indent=2), encoding="utf-8")
 
 
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+
+
+class UsageUnavailable(Exception):
+    """The automatic usage reading couldn't be made; the message is safe to show (never contains the token)."""
+
+
+def credentials_file(name: str) -> Path:
+    a = account(name)
+    base = Path(a["config_dir"]).expanduser() if a.get("config_dir") else Path.home() / ".claude"
+    return base / ".credentials.json"
+
+
+def _utilization(block) -> tuple[float, str | None] | None:
+    if isinstance(block, dict) and isinstance(block.get("utilization"), (int, float)):
+        return float(block["utilization"]) / 100, block.get("resets_at")
+    return None
+
+
+def fetch_usage(name: str, timeout: float = 15) -> dict:
+    """The account's real usage from Anthropic's usage endpoint, using the account's own sign-in token (read
+    from its login folder for this one request; never stored, logged or returned). Returns
+    {"five_hour": 0-1, "seven_day": 0-1, "five_hour_resets": str, "seven_day_resets": str} (missing windows left out)."""
+    import urllib.error
+    import urllib.request
+    if account(name).get("kind") == "api_key":
+        raise UsageUnavailable("API-key accounts have no subscription usage to read")
+    try:
+        oauth = json.loads(credentials_file(name).read_text(encoding="utf-8")).get("claudeAiOauth") or {}
+        token = str(oauth["accessToken"])
+    except (OSError, ValueError, KeyError):
+        raise UsageUnavailable("not signed in (no login found for this account): press Log in") from None
+    if float(oauth.get("expiresAt") or 0) / 1000 < time.time():
+        raise UsageUnavailable("sign-in token expired: run something with this account or press Log in")
+    req = urllib.request.Request(USAGE_URL, headers={"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20",
+                                                     "User-Agent": "AgentDesk", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise UsageUnavailable({401: "sign-in rejected: press Log in", 403: "usage not available for this plan",
+                                429: "usage service is busy, will retry"}.get(e.code, f"usage service answered {e.code}")) from None
+    except (OSError, ValueError) as e:  # URLError, timeouts, bad JSON
+        raise UsageUnavailable(f"couldn't reach the usage service ({type(e).__name__})") from None
+    out: dict = {}
+    for key in ("five_hour", "seven_day"):
+        u = _utilization(data.get(key) if isinstance(data, dict) else None)
+        if u:
+            out[key], out[key + "_resets"] = u[0], u[1]
+    if "five_hour" not in out and "seven_day" not in out:
+        raise UsageUnavailable("the usage service returned no figures for this account")
+    return out
+
+
+def usage_auto_enabled() -> bool:
+    return bool(settings().get("limits", {}).get("usage_auto", True))
+
+
+def refresh_usage(name: str, min_interval_s: float = 60, force: bool = False) -> str | None:
+    """Read the real usage now (at most once per `min_interval_s` unless forced) and save it as the account's
+    reading with source "api". Returns None on success or when it's not due, else the reason it failed; a failure
+    is remembered for the dashboard and leaves the previous (e.g. manual) reading in place."""
+    if not usage_auto_enabled() or account(name).get("kind") == "api_key":
+        return None
+    usage = account_usage(name)
+    last = usage.get("auto") or {}
+    try:
+        age = (dt.datetime.now() - dt.datetime.fromisoformat(str(last.get("checked")))).total_seconds()
+    except ValueError:
+        age = float("inf")
+    if not force and age < min_interval_s:
+        return last.get("error")
+    err = None
+    try:
+        got = fetch_usage(name)
+    except UsageUnavailable as e:
+        got, err = None, str(e)
+    usage = account_usage(name)  # re-read: another process may have written meanwhile
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    if got:
+        usage["reading"] = {"utilization": max(v for k, v in got.items() if k in ("five_hour", "seven_day")),
+                            "at": now, "source": "api", **got}
+    usage["auto"] = {"checked": now, "error": err}
+    save_account_usage(name, usage)
+    return err
+
+
 def usage_max_age_min() -> float:
     return float(settings()["limits"].get("usage_max_age_min", 30))
 
@@ -252,21 +339,22 @@ def current_reading(name: str) -> dict | None:
     found = []
     r = usage.get("reading")
     if isinstance(r, dict) and r.get("utilization") is not None:
-        found.append((r.get("at"), float(r["utilization"]), r.get("source") or "manual"))
+        found.append((r.get("at"), float(r["utilization"]), r.get("source") or "manual", r))
     for r in (usage.get("rate_limits") or {}).values():
         if isinstance(r, dict) and r.get("utilization") is not None:
-            found.append((r.get("seen"), float(r["utilization"]), "sdk"))
+            found.append((r.get("seen"), float(r["utilization"]), "sdk", None))
     best = None
-    for at, u, src in found:
+    for at, u, src, raw in found:
         try:
             t = dt.datetime.fromisoformat(str(at))
         except ValueError:
             continue
         if best is None or t > best[0]:
-            best = (t, u, src, at)
+            best = (t, u, src, at, raw)
     if best is None:
         return None
-    return {"utilization": best[1], "at": best[3], "source": best[2],
+    extra = {k: best[4][k] for k in ("five_hour", "seven_day", "five_hour_resets", "seven_day_resets") if best[4] and k in best[4]}
+    return {"utilization": best[1], "at": best[3], "source": best[2], **extra,
             "age_min": max(0.0, (dt.datetime.now() - best[0]).total_seconds() / 60)}
 
 
@@ -278,6 +366,10 @@ def set_manual_usage(name: str, percent: float) -> None:
 
 def usage_gate(name: str) -> str | None:
     """Why no work may start for this account: no fresh reading, or the reading is at the pause threshold."""
+    try:
+        refresh_usage(name)  # real figures when possible; failures fall back to the saved/manual reading
+    except Exception:  # never let the usage lookup break a run
+        pass
     r = current_reading(name)
     if r is None or r["age_min"] > usage_max_age_min():
         return "usage unknown — enter it under Accounts"

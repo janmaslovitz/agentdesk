@@ -262,17 +262,21 @@ async function refreshAll() {
     return `<div class="acct"><span class="dot${a.ready?" on":""}"></span><b>${esc(a.name)}</b> <span class="muted">${a.kind==="api_key"?"API key":"subscription"}</span>
       <div class="m" style="color:${a.ready?"var(--ok,#3fb950)":"var(--warn,#d29922)"}">${a.ready?`Connected${a.email?" as "+esc(a.email):""}`:(a.kind==="api_key"?"Key not set":"Not connected")}</div>
       <div class="m">${esc(a.where)}</div>
-      <div class="m">${readingText(a.reading, a.max_age_min)}</div>
+      <div class="m">${readingText(a.reading, a.max_age_min, a.auto_error)}</div>
       <div style="margin-top:4px">Current usage: <input id="mu_${esc(a.name)}" type="number" min="0" max="100" step="1" style="width:56px" value="${a.reading&&a.reading.source==="manual"?Math.round(a.reading.utilization*100):""}"> %
         <button style="padding:2px 8px;font-size:12px" onclick="saveUsage('${esc(a.name)}')">Save</button></div>
       ${a.kind!=="api_key"?`<button style="margin-top:4px;padding:2px 8px;font-size:12px" onclick="login('${esc(a.name)}')">Log in</button>`:""}</div>`;
   }).join("");
   refresh();
 }
-function readingText(r, maxAge) {
-  if (!r) return "usage unknown — enter it under Accounts";
+function readingText(r, maxAge, autoErr) {
+  const bad = autoErr ? `<br><span style="color:var(--warn,#d29922)">automatic reading failed: ${esc(autoErr)}. Using the last value; you can enter it by hand.</span>` : "";
+  if (!r) return "usage unknown — enter it under Accounts" + bad;
   const age = r.age_min < 1 ? "just now" : r.age_min < 90 ? Math.round(r.age_min) + " min ago" : Math.round(r.age_min/60) + " h ago";
-  return `${Math.round(r.utilization*100)}% used · source ${esc(r.source)} · ${age}` + (r.stale ? ` — older than ${maxAge} min: usage unknown — enter it under Accounts` : "");
+  const win = r.five_hour != null || r.seven_day != null
+    ? [r.five_hour != null ? `5 h window ${Math.round(r.five_hour*100)}%` : "", r.seven_day != null ? `week ${Math.round(r.seven_day*100)}%` : ""].filter(Boolean).join(" · ")
+    : `${Math.round(r.utilization*100)}% used`;
+  return `${win} · source ${esc(r.source)} · ${age}` + (r.stale ? ` — older than ${maxAge} min: usage unknown — enter it under Accounts` : "") + bad;
 }
 async function saveUsage(name) {
   const r = await api(`/api/accounts/${encodeURIComponent(name)}/usage`, {percent: $("mu_" + name).value});
@@ -411,7 +415,7 @@ async function refresh() {
     const u = rd.utilization;
     $("rl").textContent = Math.round(u*100) + "%"; $("rlbar").style.width = Math.min(100, u*100) + "%";
     $("rlbar").style.background = rd.stale ? "var(--muted)" : u >= st.limits.pause_at ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
-    $("rld").innerHTML = readingText(rd, st.max_age_min) + `; pauses at ${Math.round(st.limits.pause_at*100)}%`;
+    $("rld").innerHTML = readingText(rd, st.max_age_min, st.auto_error) + `; pauses at ${Math.round(st.limits.pause_at*100)}%`;
   } else {
     $("rl").textContent = "unknown"; $("rlbar").style.width = "0";
     $("rld").textContent = "usage unknown — enter it under Accounts";

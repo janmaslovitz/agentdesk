@@ -572,12 +572,30 @@ def auth_status(a: dict, fresh: bool = False) -> dict:
         pass
     _AUTH_CACHE[name] = (time.time(), out)
     return out
+def auto_error(name: str) -> str | None:
+    """Why the automatic usage reading last failed (None if it works or is off)."""
+    return (core.account_usage(name).get("auto") or {}).get("error") if core.usage_auto_enabled() else None
+
+
+def usage_loop() -> None:
+    """Reads the real usage of every subscription account about once a minute while the dashboard runs."""
+    while not QUIT.is_set():
+        try:
+            for a in core.settings().get("accounts", []):
+                if a.get("kind") != "api_key":
+                    core.refresh_usage(a.get("name", "default"))
+        except Exception as e:
+            log_error(f"usage reader: {type(e).__name__}: {e}")
+        QUIT.wait(60)
+
+
 def reading_view(name: str) -> dict | None:
     r = core.current_reading(name)
     if r is None:
         return None
     return {"utilization": r["utilization"], "source": r["source"], "at": r["at"], "age_min": round(r["age_min"], 1),
-            "stale": r["age_min"] > core.usage_max_age_min()}
+            "stale": r["age_min"] > core.usage_max_age_min(),
+            **{k: r[k] for k in ("five_hour", "seven_day", "five_hour_resets", "seven_day_resets") if k in r}}
 
 
 def account_rows() -> list[dict]:
@@ -594,7 +612,8 @@ def account_rows() -> list[dict]:
         rows.append({"name": a.get("name"), "kind": a.get("kind", "subscription"), "where": where, "ready": ready,
                      "email": st["email"] if a.get("kind") != "api_key" else "",
                      "usage": core.account_usage(a.get("name", "default")).get("rate_limits", {}),
-                     "reading": reading_view(a.get("name", "default")), "max_age_min": core.usage_max_age_min()})
+                     "reading": reading_view(a.get("name", "default")), "max_age_min": core.usage_max_age_min(),
+                     "auto_error": auto_error(a.get("name", "default")) if a.get("kind") != "api_key" else None})
     return rows
 
 
@@ -691,6 +710,7 @@ def project_state(p: core.Project) -> dict:
             "limits": {"pause_at": s["limits"]["pause_at_utilization"], "run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
             "reading": reading_view(p.account.get("name", "default")), "max_age_min": core.usage_max_age_min(),
+            "auto_error": auto_error(p.account.get("name", "default")) if p.account.get("kind") != "api_key" else None,
             "tier_avg": tier_averages(tasks),
             "tiers": {k: {"model": v["model"], "effort": v.get("effort")} for k, v in s["tiers"].items()}}
 
@@ -1211,6 +1231,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     QUIT.clear()
     # Only this process (the one that owns the port, checked above) runs the loop.
     threading.Thread(target=autorun_loop, daemon=True, name="autorunner").start()
+    threading.Thread(target=usage_loop, daemon=True, name="usage-reader").start()
     try:
         if browser:
             webbrowser.open(url)
