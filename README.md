@@ -142,6 +142,23 @@ anything with `; & | > < ( ) { } $` or a backtick or newline always asks, and so
 Every tool call shows in the chat (command or arguments, with its output folded under it), and
 each answer shows its cost and tokens; the chat's totals are in the **Chat** card.
 
+## Build the program
+
+Make `AgentDesk.exe` (Windows) so AgentDesk starts without Python or `.venv`:
+
+```powershell
+.\build_exe.ps1                      # builds dist\AgentDesk\AgentDesk.exe and a Desktop shortcut "AgentDesk"
+.\build_exe.ps1 -NoDesktopShortcut   # build only
+```
+
+The script makes a build venv (`.venv-build`), installs `requirements.txt` + `requirements-build.txt` (PyInstaller) and runs `agentdesk.spec`.
+Run the whole `dist\AgentDesk` folder from anywhere (copy it as a whole). Double-click `AgentDesk.exe` to open the window; the icon is `agentdesk\web\agentdesk.ico`.
+The shortcut is created if missing and updated on re-runs.
+
+Data goes where it does from source: in `AGENTDESK_HOME` if set, otherwise in a `data` folder next to the `.exe` (so an existing `data\` folder copied there is used as is).
+The build never contains `data\`, accounts, logins or keys.
+The `.cmd`/`.sh` launchers still run the source version.
+
 ## Command line
 
 ```
