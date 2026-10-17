@@ -86,7 +86,7 @@ def release(root: Path = ROOT, part: str | None = None, version: str | None = No
         raise SystemExit(f"not a version: {new}")
     if not newer(new, cur):
         raise SystemExit(f"{new} is not newer than the current {cur}")
-    if git(root, "status", "--porcelain", "--untracked-files=no"):
+    if git(root, "status", "--porcelain", "--untracked-files=no", "--", ".", ":!data"):
         raise SystemExit("the tracked files have uncommitted changes: commit or stash them before releasing")
     if git(root, "tag", "--list", f"v{new}"):
         raise SystemExit(f"tag v{new} already exists")
@@ -105,7 +105,7 @@ def buildinfo(root: Path = ROOT, now: dt.datetime | None = None) -> dict:
     version = read_version(root)
     try:
         commit = git(root, "rev-parse", "--short", "HEAD")
-        if git(root, "status", "--porcelain", "--untracked-files=no"):
+        if git(root, "status", "--porcelain", "--untracked-files=no", "--", ".", ":!data"):
             commit += "+dirty"
     except (SystemExit, OSError):
         commit = ""

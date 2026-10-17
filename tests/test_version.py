@@ -134,3 +134,15 @@ def test_buildinfo_stamps_the_program_and_the_exe_properties(tmp_path):
     vi = (root / "version_info.txt").read_text(encoding="utf-8")
     assert "filevers=(1, 0, 0, 0)" in vi and "StringStruct('FileVersion', '1.0.0')" in vi
     compile(vi.replace("VSVersionInfo(", "dict(ffi=", 1).replace("\n", " "), "v", "eval") if False else None  # (parsed by PyInstaller)
+
+
+def test_a_modified_data_folder_does_not_block_a_release(tmp_path):
+    root = make_repo(tmp_path)
+    (root / "data").mkdir()
+    (root / "data" / "settings.toml").write_text("a = 1
+", encoding="utf-8")
+    for c in (["add", "-A"], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "data"]):
+        subprocess.run(["git", *c], cwd=root, check=True, capture_output=True)
+    (root / "data" / "settings.toml").write_text("a = 2
+", encoding="utf-8")  # the app's own data changes all the time
+    assert rel.release(root, part="patch", today="2026-03-03") == "1.0.1"
