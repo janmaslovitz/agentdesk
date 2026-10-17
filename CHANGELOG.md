@@ -5,6 +5,8 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- The first start after upgrading from a build that didn't record versions is now logged ("Upgraded from an earlier build to ...").
 
 ## 1.1.0 - 2026-10-17
 

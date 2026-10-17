@@ -51,7 +51,11 @@ def test_overview_and_api_carry_the_version():
 def test_upgrade_is_recorded_once():
     f = core.DATA / "app_version.json"
     f.unlink(missing_ok=True)
-    assert core.record_version() == (None, __version__)          # first run: nothing to say about a previous version
+    (core.DATA / "agentdesk.log").unlink(missing_ok=True)
+    assert core.record_version() == (None, __version__)          # a brand-new data folder: nothing to say about a previous version
+    f.unlink()
+    (core.DATA / "agentdesk.log").write_text("x\n", encoding="utf-8")
+    assert core.record_version() == ("an earlier build", __version__)  # data from before versions were recorded
     assert json.loads(f.read_text(encoding="utf-8"))["version"] == __version__
     f.write_text(json.dumps({"version": "0.9.0"}), encoding="utf-8")
     assert core.record_version() == ("0.9.0", __version__)       # upgraded from 0.9.0

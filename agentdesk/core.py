@@ -250,7 +250,8 @@ def record_version() -> tuple[str | None, str]:
     try:
         prev = json.loads(f.read_text(encoding="utf-8")).get("version")
     except (OSError, ValueError, AttributeError):
-        prev = None
+        # no record yet: data that already has a log came from a build before versions were recorded
+        prev = "an earlier build" if (DATA / "agentdesk.log").exists() else None
     if prev == v["version"]:
         return None, v["version"]
     try:

@@ -2061,7 +2061,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     core.settings()  # creates the data folder and default settings on first start
     prev, now = core.record_version()
     if prev is not None or not (core.DATA / "agentdesk.log").exists():
-        log_error(f"AgentDesk {'upgraded ' + prev + ' -> ' if prev else 'first start of '}{core.version_text()}")
+        log_error(f"{'Upgraded from ' + prev + ' to ' if prev else 'First start of '}{core.version_text()}")
     url = f"http://127.0.0.1:{port}"
     if answers(port):
         print(f"AgentDesk is already running at {url}")
