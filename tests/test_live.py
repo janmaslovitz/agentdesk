@@ -254,3 +254,40 @@ def test_http_routes_expose_live_state_and_interrupt(chat):
         assert r == {"ok": False}
     finally:
         srv.shutdown()
+
+
+def test_a_silent_turn_is_reported_once_with_what_the_cli_said(chat):
+    LiveFake.script = [[say("starting")]]  # no result: the turn stays open
+    chat.start("go")
+    assert wait(lambda: chat.busy and any(m["text"] == "starting" for m in entries(chat)))
+    chat._on_stderr("API Error: Connection reset, retrying in 8s (attempt 3/10)")
+    assert chat.idle_s() < 5
+    chat.watch_idle(after_s=120)
+    assert not entries(chat, "progress")                      # not silent long enough yet
+    chat.last_event = time.time() - 200
+    assert chat.idle_s() >= 200
+    chat.watch_idle(after_s=120)
+    chat.watch_idle(after_s=120)                              # only once per silence
+    notes = [m["text"] for m in entries(chat, "progress")]
+    assert len(notes) == 1 and "No reply from Claude for 3 min" in notes[0] and "retrying in 8s" in notes[0]
+    asyncio.run_coroutine_threadsafe(LiveFake.made[0].q.put(say("back")), server.LOOP).result(2)
+    assert wait(lambda: chat.idle_s() < 5 and not chat.idle_warned)  # any message from the session resets it
+
+
+def test_a_tool_that_is_running_is_not_a_silent_turn(chat):
+    LiveFake.script = [[AssistantMessage(content=[ToolUseBlock(id="t1", name="Bash", input={"command": "cargo build"})], model="sonnet")]]
+    chat.start("build")
+    assert wait(lambda: "t1" in chat.live_calls)
+    chat.last_event = time.time() - 600
+    assert chat.idle_s() == 0                                  # a long build is healthy silence
+    chat.watch_idle(after_s=120)
+    assert not entries(chat, "progress")
+
+
+def test_state_and_chat_report_idle_seconds(chat):
+    assert chat.info()["idle_s"] == 0
+    LiveFake.script = [[say("x")]]
+    chat.start("go")
+    assert wait(lambda: chat.busy and entries(chat))
+    chat.last_event = time.time() - 50
+    assert 49 <= chat.info()["idle_s"] <= 60

@@ -6,6 +6,13 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Fixed
+- The usage reader no longer hammers a rate-limited service: it asks every 3 minutes (was 1), and after a "busy"
+  (HTTP 429) answer it waits 2, 4, 8, 15, then 30 minutes (or the service's own Retry-After) and says when it will
+  try again. The dashboard showed "usage service is busy" because it kept retrying every minute.
+- A chat turn that gets no reply no longer sits at "working..." with no explanation: the bar shows how long Claude
+  has been silent, and after 2 minutes the chat says so once, with the last thing the Claude CLI wrote about its
+  connection (it retries a failing connection quietly). A tool that is simply running (a long build) isn't counted
+  as silence.
 - The first start after upgrading from a build that didn't record versions is now logged ("Upgraded from an earlier build to ...").
 
 ## 1.1.0 - 2026-10-17

@@ -413,6 +413,10 @@ class Chat:
         self.drop = False  # the live process hit its spend limit: reconnect (resume) on the next message
         self.last_checkup = 0.0
         self._saved_at = 0.0
+        self.last_event = time.time()  # the last message from the live session (or the start of the burst)
+        self.idle_warned = False
+        self.live_calls: dict = {}  # tool calls started and not answered yet
+        self.cli_err: list[str] = []  # the last lines the CLI wrote to stderr (its own retry messages, errors)
         self.watching_run = False
 
     # -- the visible transcript, kept in chat.json so it survives a restart (the SDK session does not)
@@ -837,7 +841,7 @@ class Chat:
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
                             disallowed_tools=[], permission_mode="default", can_use_tool=self.coworker_permission,
-                            setting_sources=[], env=gate_env, agents=live_agents())
+                            setting_sources=[], env=gate_env, agents=live_agents(), stderr=self._on_stderr)
 
     def daily_spent(self) -> float:
         d = self.usage().get("daily") or {}
@@ -868,7 +872,27 @@ class Chat:
                 except OSError:
                     pass
 
+    def _on_stderr(self, line: str) -> None:
+        line = line.strip()
+        if line:
+            self.cli_err = (self.cli_err + [line[:240]])[-5:]
+
+    def idle_s(self) -> int:
+        """Seconds the live session has been busy without a single message from it (0 when it is not busy)."""
+        # a tool call in flight (a long build, say) is silence too, but a healthy one: only count the wait for the model
+        return int(time.time() - self.last_event) if self.busy and self.client is not None and not self.live_calls else 0
+
+    def watch_idle(self, after_s: float = 120) -> None:
+        """A turn that has been silent for `after_s` seconds is usually the CLI retrying a failing connection: say so
+        in the chat once (with what the CLI last wrote), instead of leaving "working…" for the user to puzzle over."""
+        if self.is_live() and self.busy and not self.idle_warned and self.idle_s() >= after_s:
+            self.idle_warned = True
+            hint = f" Last thing the CLI said: {self.cli_err[-1]}" if self.cli_err else ""
+            self.note(f"⚠ No reply from Claude for {self.idle_s() // 60} min. The connection to Anthropic may be failing or slow "
+                      f"(the CLI retries quietly). Stop cancels the turn; you can send the message again.{hint}")
+
     def _live_event(self, msg, calls: dict, acct: str) -> None:
+        self.last_event, self.idle_warned = time.time(), False
         if isinstance(msg, RateLimitEvent):
             core.record_rate_limit(acct, msg.rate_limit_info)
         elif isinstance(msg, TaskStartedMessage):  # (these are SystemMessages too: check them first)
@@ -931,7 +955,7 @@ class Chat:
     async def _pump(self, client, gen: int) -> None:
         """Read every message of the live session until it ends: answers, tool calls, background-task events and
         the turns the CLI starts by itself when a background job finishes."""
-        calls: dict = {}
+        calls = self.live_calls = {}
         acct = self.p.account.get("name", "default")
         try:
             async for msg in client.receive_messages():
@@ -951,6 +975,7 @@ class Chat:
         finally:
             if gen == self.generation:
                 self.busy = False
+                self.live_calls.clear()
                 if self.client is client:
                     self.client = None
                     self.drop = False
@@ -974,6 +999,7 @@ class Chat:
         if self.pump is None or self.pump.done():
             self.pump = asyncio.ensure_future(self._pump(client, self.generation))
         self.busy = True
+        self.last_event, self.idle_warned = time.time(), False
         await client.query(text)
         return {"started": True, "live": True}
 
@@ -1127,6 +1153,7 @@ class Chat:
         if mode in AUTONOMOUS:
             out.update(budget_usd=float(cs["budget_usd"]))
         out["live"] = self.is_live()
+        out["idle_s"] = self.idle_s()
         if out["live"]:
             out.update(daily_budget_usd=float(cs.get("daily_budget_usd") or 0), daily_spent=round(self.daily_spent(), 4))
         if mode == "coworker":
@@ -1480,7 +1507,7 @@ def project_state(p: core.Project) -> dict:
                         "chat_model": cs["model"] + (f" ({cs['effort']})" if cs.get("effort") else ""),
                         "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
             "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
-            "plan": plan, "chat_seq": chat(p).seq, "chat_busy": chat(p).busy, "chat_live": chat(p).is_live(),
+            "plan": plan, "chat_seq": chat(p).seq, "chat_busy": chat(p).busy, "chat_live": chat(p).is_live(), "chat_idle_s": chat(p).idle_s(),
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
@@ -1636,8 +1663,10 @@ def autorun_pass(starter=None, alive=None) -> dict[str, list[str]]:
 def checkup_loop() -> None:
     """Wakes the live Coworker of each project every `[chat.coworker] checkup_interval_min` minutes, but only while a
     session is open (the user chatted since the dashboard started), it is idle, and today's budget isn't spent."""
-    while not QUIT.wait(60):
+    while not QUIT.wait(30):
         try:
+            for c in list(CHATS.values()):
+                c.watch_idle()
             every = float(core.chat_settings("coworker").get("checkup_interval_min") or 0)
             if every <= 0:
                 continue

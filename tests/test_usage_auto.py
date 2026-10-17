@@ -98,3 +98,51 @@ def test_auto_reading_can_be_switched_off(tmp_path, monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: pytest.fail("must not call the service"))
     assert core.refresh_usage("default", force=True) is None
     assert server.auto_error("default") is None
+
+
+def _http_error(code, retry_after=None):
+    import email.message
+    h = email.message.Message()
+    if retry_after:
+        h["Retry-After"] = str(retry_after)
+    return urllib.error.HTTPError("u", code, "x", h, None)
+
+
+def test_a_busy_service_makes_us_back_off_and_wait(tmp_path, monkeypatch):
+    _login(tmp_path, monkeypatch)
+    calls = []
+
+    def busy(req, timeout=0):
+        calls.append(1)
+        raise _http_error(429)
+
+    monkeypatch.setattr("urllib.request.urlopen", busy)
+    err = core.refresh_usage("default", force=True)
+    assert "rate-limiting" in err and "next try at" in err and len(calls) == 1
+    first = core.account_usage("default")["auto"]
+    assert first["fails"] == 1 and first["next"]
+    assert core.refresh_usage("default", min_interval_s=0) == err and len(calls) == 1  # waits: no new request
+    core.refresh_usage("default", force=True)  # forced (e.g. the user pressed something): asks again, waits longer
+    second = core.account_usage("default")["auto"]
+    assert second["fails"] == 2 and second["next"] > first["next"]
+
+
+def test_the_services_retry_after_is_obeyed_and_success_resets_the_backoff(tmp_path, monkeypatch):
+    import datetime as dt
+    _login(tmp_path, monkeypatch)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: (_ for _ in ()).throw(_http_error(429, 600)))
+    core.refresh_usage("default", force=True)
+    nxt = dt.datetime.fromisoformat(core.account_usage("default")["auto"]["next"])
+    assert 500 < (nxt - dt.datetime.now()).total_seconds() <= 600
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _Resp(API))
+    assert core.refresh_usage("default", force=True) is None
+    auto = core.account_usage("default")["auto"]
+    assert auto["fails"] == 0 and auto["next"] is None and auto["error"] is None
+    assert core.current_reading("default")["source"] == "api"
+
+
+def test_other_failures_do_not_back_off(tmp_path, monkeypatch):
+    _login(tmp_path, monkeypatch)
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: (_ for _ in ()).throw(OSError("offline")))
+    assert "couldn't reach" in core.refresh_usage("default", force=True)
+    assert core.account_usage("default")["auto"]["next"] is None  # next normal poll, no long wait

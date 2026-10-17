@@ -573,6 +573,8 @@ async function interruptChat() { await api(`/api/p/${cur}/chat/interrupt`, {}); 
 function showLive(s) {
   const bar = $("liveBar"); if (!bar) return;
   bar.hidden = !(s.chat_live && s.chat_busy);
+  const idle = s.chat_idle_s || 0;
+  $("liveTxt").textContent = idle >= 30 ? `working… no reply for ${idle}s: Claude or the network may be slow (Stop cancels)` : "working…";
 }
 async function resetChat() { await api(`/api/p/${cur}/chat/reset`, {}); $("msgs").innerHTML = ""; }
 

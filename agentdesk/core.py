@@ -345,7 +345,12 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
 class UsageUnavailable(Exception):
-    """The automatic usage reading couldn't be made; the message is safe to show (never contains the token)."""
+    """The automatic usage reading couldn't be made; the message is safe to show (never contains the token).
+    `busy`: the service asked us to slow down (HTTP 429); `retry_after`: seconds it named, if it did."""
+
+    def __init__(self, message: str, busy: bool = False, retry_after: float | None = None):
+        super().__init__(message)
+        self.busy, self.retry_after = busy, retry_after
 
 
 def credentials_file(name: str) -> Path:
@@ -381,8 +386,14 @@ def fetch_usage(name: str, timeout: float = 15) -> dict:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read())
     except urllib.error.HTTPError as e:
+        wait = None
+        try:
+            wait = float(e.headers.get("Retry-After")) if e.headers is not None and e.headers.get("Retry-After") else None
+        except (TypeError, ValueError):
+            pass
         raise UsageUnavailable({401: "sign-in rejected: press Log in", 403: "usage not available for this plan",
-                                429: "usage service is busy, will retry"}.get(e.code, f"usage service answered {e.code}")) from None
+                                429: "usage service is rate-limiting us"}.get(e.code, f"usage service answered {e.code}"),
+                               busy=e.code == 429, retry_after=wait) from None
     except (OSError, ValueError) as e:  # URLError, timeouts, bad JSON
         raise UsageUnavailable(f"couldn't reach the usage service ({type(e).__name__})") from None
     out: dict = {}
@@ -399,31 +410,45 @@ def usage_auto_enabled() -> bool:
     return bool(settings().get("limits", {}).get("usage_auto", True))
 
 
-def refresh_usage(name: str, min_interval_s: float = 60, force: bool = False) -> str | None:
-    """Read the real usage now (at most once per `min_interval_s` unless forced) and save it as the account's
-    reading with source "api". Returns None on success or when it's not due, else the reason it failed; a failure
-    is remembered for the dashboard and leaves the previous (e.g. manual) reading in place."""
+USAGE_BACKOFF_S = (120, 240, 480, 900, 1800)  # after each failure in a row that the service answered with "busy"
+
+
+def refresh_usage(name: str, min_interval_s: float = 180, force: bool = False) -> str | None:
+    """Read the real usage now (at most once per `min_interval_s`, and not before a "busy" answer's wait is over,
+    unless forced) and save it as the account's reading with source "api". Returns None on success or when it's not
+    due, else the reason it failed; a failure is remembered for the dashboard and leaves the previous (e.g. manual)
+    reading in place. A rate-limited (429) answer backs off 2, 4, 8, 15, then 30 minutes (or the service's Retry-After)."""
     if not usage_auto_enabled() or account(name).get("kind") == "api_key":
         return None
     usage = account_usage(name)
     last = usage.get("auto") or {}
+    nowdt = dt.datetime.now()
     try:
-        age = (dt.datetime.now() - dt.datetime.fromisoformat(str(last.get("checked")))).total_seconds()
+        age = (nowdt - dt.datetime.fromisoformat(str(last.get("checked")))).total_seconds()
     except ValueError:
         age = float("inf")
-    if not force and age < min_interval_s:
+    try:
+        wait_left = (dt.datetime.fromisoformat(str(last.get("next"))) - nowdt).total_seconds() if last.get("next") else 0
+    except ValueError:
+        wait_left = 0
+    if not force and (age < min_interval_s or wait_left > 0):
         return last.get("error")
-    err = None
+    err, fails, nxt = None, 0, None
     try:
         got = fetch_usage(name)
     except UsageUnavailable as e:
         got, err = None, str(e)
+        if e.busy:
+            fails = int(last.get("fails") or 0) + 1
+            wait = e.retry_after or USAGE_BACKOFF_S[min(fails, len(USAGE_BACKOFF_S)) - 1]
+            nxt = (nowdt + dt.timedelta(seconds=wait)).isoformat(timespec="seconds")
+            err = f"{err}: next try at {nxt[11:16]}"
     usage = account_usage(name)  # re-read: another process may have written meanwhile
-    now = dt.datetime.now().isoformat(timespec="seconds")
+    now = nowdt.isoformat(timespec="seconds")
     if got:
         usage["reading"] = {"utilization": max(v for k, v in got.items() if k in ("five_hour", "seven_day")),
                             "at": now, "source": "api", **got}
-    usage["auto"] = {"checked": now, "error": err}
+    usage["auto"] = {"checked": now, "error": err, "fails": fails, "next": nxt}
     save_account_usage(name, usage)
     return err
 
