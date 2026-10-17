@@ -144,6 +144,25 @@ new chat session and keeps the messages on screen.
   card; **Start** goes on; **Close** forgets a stopped or finished plan (its tasks stay in the
   queue). One approved plan per project at a time.
 
+**Live Coworker** (default; `[chat.coworker] live = true`, needs `full_access`). The Coworker is one
+persistent session instead of a fresh process per message, and works like a teammate:
+
+- Its answers, tool calls and background-task events stream into the chat as they happen, and you can
+  keep writing while it works (the **Stop** bar above the input interrupts it).
+- It can run long commands in the background and is woken when they finish, launch **subagents**
+  (`explorer` on Haiku for reading and searching, `reviewer` for diffs and branches, `implementer` for one
+  focused change) and run several in parallel.
+- Its AgentDesk tools: `checkup` (queue, run, failures, unmerged branches, usage and spending in one report),
+  `watch_run` (wakes it when the current run ends; nothing is spent while waiting) and `schedule_checkup`
+  (wakes it in N minutes).
+- With `checkup_interval_min > 0` it checks the project by itself that often, but only while a session is
+  open (you have chatted since the dashboard started), it is idle, and the daily budget isn't used up.
+  Default 0 (never).
+- Spending: `budget_usd` (default $5) is checked at the end of each burst of work (a message or a wake-up);
+  `daily_budget_usd` (default $25, 0 = no cap) caps everything the Coworker and its subagents spend per day
+  and blocks new work when reached. A persistent session reuses the prompt cache, so it is usually cheaper
+  per message than a fresh process each time; waiting is free.
+
 **Approvals** (Assistant mode). When the chat wants to run a shell command (Bash/PowerShell) or start/stop a run, a
 card appears under the messages: **Allow once**, **Always allow** or **Deny**. Nothing runs before
 you answer; no answer within 10 minutes counts as Deny.

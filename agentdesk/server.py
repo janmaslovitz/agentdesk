@@ -7,6 +7,7 @@ project at a time, so closing the dashboard doesn't stop them (Stop does).
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from claude_agent_sdk import (
+    AgentDefinition,
     AssistantMessage,
     ClaudeSDKClient,
     HookMatcher,
@@ -30,6 +32,9 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     RateLimitEvent,
     ResultMessage,
+    SystemMessage,
+    TaskNotificationMessage,
+    TaskStartedMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -267,6 +272,50 @@ ${budget:.2f}. Never invent results: read the files. Each user message starts wi
 state in brackets.
 """
 
+COWORKER_LIVE_ADDENDUM = """
+This is a live session: it stays open between messages, so you can be interactive like a teammate.
+- The user can write to you while you work: read new messages as they come and adapt. Keep replies short.
+- Background work: run long commands in the background (Bash/PowerShell with run_in_background) and keep going;
+  you are woken when they finish. Use watch_run right after starting a worker run: it wakes you when the run
+  ends or fails and costs nothing while waiting. Use schedule_checkup to come back later.
+- Subagents (the Agent tool): "explorer" (cheap, read-only investigation), "reviewer" (reads a branch or diff and
+  reports problems), "implementer" (makes one focused change and runs the checks). Run several in parallel for
+  independent questions; give each a self-contained brief and verify what they report before relying on it.
+- checkup gives you the project's health in one report (queue, run, failures, unmerged branches, usage, spending).
+  When woken by a scheduled checkup, act on what needs attention (queue tasks, merge what passes, tell the user
+  what needs them); if everything is fine, answer with one line.
+Spending: about ${burst:.2f} per burst of work (a message or a wake-up) and ${daily:.2f} per day for everything
+you and your subagents do; keep bursts proportionate and prefer the cheaper subagents for reading and searching.
+"""
+
+CHECKUP_PROMPT = ("[Scheduled checkup] Run the checkup tool and look at the project: failed or blocked tasks, finished work "
+                  "that is not merged yet, the run state, usage and today's spending. Act on what you safely can (queue "
+                  "tasks, merge what passes the checks, restart what crashed) and say what needs the user. If nothing "
+                  "needs attention reply with the single line: All quiet.")
+
+
+def live_agents() -> dict:
+    """Subagents the live Coworker can launch with the Agent tool."""
+    return {
+        "explorer": AgentDefinition(
+            description="Fast read-only investigator: finds files, reads code and logs, answers a specific question about the repository.",
+            prompt="You investigate and report. Read and search only; never change anything. Answer the question in a short, factual "
+                   "report with file paths and line numbers.",
+            tools=["Read", "Grep", "Glob"], model="haiku"),
+        "reviewer": AgentDefinition(
+            description="Reviews a branch, commit range or diff for correctness bugs and missed requirements, and runs the project's checks.",
+            prompt="You review code. Read the diff (git diff / git log), read the surrounding code, run the project's checks when "
+                   "that helps, and report concrete problems with file and line, most serious first. Don't edit files. If it is fine, say so.",
+            tools=["Read", "Grep", "Glob", "Bash", "PowerShell"], model="sonnet"),
+        "implementer": AgentDefinition(
+            description="Makes one focused code change in the checkout and runs the relevant checks, then reports what changed.",
+            prompt="You make exactly the change you are asked for, in the files you are told about, following the project's instructions "
+                   "(CLAUDE.md / AGENTS.md / README). Run the relevant checks. Don't commit unless asked. Report the files changed and the "
+                   "check results.",
+            model="sonnet"),
+    }
+
+
 MCP = "agentdesk"
 MCP_PREFIX = f"mcp__{MCP}__"
 AUTONOMOUS = ("coworker", "planner")  # modes without approval cards: a budget per message and the usage pause
@@ -360,6 +409,10 @@ class Chat:
         self.seq = 0  # numbers the progress notes, so the page can fetch the new ones
         self.note_lock = threading.Lock()
         self.watcher: threading.Thread | None = None
+        self.pump: asyncio.Future | None = None  # reads the live session's messages (coworker live mode)
+        self.drop = False  # the live process hit its spend limit: reconnect (resume) on the next message
+        self.last_checkup = 0.0
+        self.watching_run = False
 
     # -- the visible transcript, kept in chat.json so it survives a restart (the SDK session does not)
 
@@ -545,7 +598,35 @@ class Chat:
             e = runner(p).stop()
             return err(e) if e else ok("run stopped")
 
-        return [add_task, queue_status, run_next, run_task, run_all, plan_task, stop_run]
+        base = [add_task, queue_status, run_next, run_task, run_all, plan_task, stop_run]
+        if approval:
+            return base
+
+        @tool("checkup", "A health report of the project: run state, task counts, what needs attention (failed or unmerged work), "
+                         "account usage and the Coworker's spending today.", {})
+        async def checkup(_a):
+            return ok(self.checkup_report())
+
+        @tool("watch_run", "Wake me when the current worker run ends or fails. Use right after starting a run; costs nothing while waiting.", {})
+        async def watch_run(_a):
+            if not runner(p).running():
+                return ok("no run is going")
+            self.watch_run_bg()
+            return ok("watching: I will be woken with a report when the run ends")
+
+        @tool("schedule_checkup", "Wake me for a project checkup in N minutes (5 to 1440).", {"type": "object", "required": ["minutes"],
+              "properties": {"minutes": {"type": "number"}}})
+        async def schedule_checkup(a):
+            try:
+                m = float(a.get("minutes"))
+            except (TypeError, ValueError):
+                return err("minutes must be a number")
+            if not 5 <= m <= 1440:
+                return err("minutes must be between 5 and 1440")
+            self.schedule_checkup(m)
+            return ok(f"checkup scheduled in {m:g} minutes")
+
+        return base + [checkup, watch_run, schedule_checkup]
 
     def planner_tools(self) -> list:
         """The Planner's tools: they only write the draft plan (plan.json and tasks/drafts/)."""
@@ -661,7 +742,8 @@ class Chat:
         if self.client is None:
             self.mode = mode
             # The coworker's worktree may need a `git worktree add` first: off the event loop.
-            opts = (await asyncio.to_thread(self._coworker_options) if mode == "coworker"
+            opts = (self._live_options() if mode == "coworker" and self.is_live()
+                    else await asyncio.to_thread(self._coworker_options) if mode == "coworker"
                     else self._planner_options() if mode == "planner" else self._assistant_options())
             self.client = ClaudeSDKClient(options=opts)
             await self.client.connect()
@@ -669,6 +751,9 @@ class Chat:
 
     async def _close(self) -> None:
         client, self.client = self.client, None
+        if self.pump is not None and not self.pump.done():
+            self.pump.cancel()
+        self.pump = None
         if client is not None:
             try:
                 await client.disconnect()
@@ -730,6 +815,236 @@ class Chat:
             parts.append(note)
         return self._answer("\n\n".join(x for x in parts if x) or "(no answer)", calls.values(), cost, tokens)
 
+    # -- the live Coworker: one persistent session whose messages are read continuously and shown as they arrive
+
+    def is_live(self) -> bool:
+        cs = core.chat_settings("coworker")
+        return core.chat_mode(self.p) == "coworker" and bool(cs.get("full_access")) and bool(cs.get("live", True))
+
+    def _live_options(self):
+        cs = core.chat_settings("coworker")
+        self.model = cs["model"]
+        prompt = COWORKER_FULL_PROMPT.format(name=self.p.name, repo=self.p.repo, base=self.p.cfg["repo"]["base"],
+                                             folder=self.p.dir, budget=float(cs["budget_usd"]))
+        prompt += COWORKER_LIVE_ADDENDUM.format(burst=float(cs["budget_usd"]), daily=float(cs.get("daily_budget_usd") or 0))
+        gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
+        daily = float(cs.get("daily_budget_usd") or 0)
+        # The process-wide limit is only a backstop (the CLI counts the spend of the whole process); the bursts are
+        # checked when they end, the day's total before each new burst.
+        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo),
+                            system_prompt=self.with_memory(prompt) + ACK_RULE, max_turns=int(cs["max_turns"]),
+                            max_budget_usd=daily or None, resume=self.session_id,
+                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
+                            mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
+                            disallowed_tools=[], permission_mode="default", can_use_tool=self.coworker_permission,
+                            setting_sources=[], env=gate_env, agents=live_agents())
+
+    def daily_spent(self) -> float:
+        d = self.usage().get("daily") or {}
+        return float(d.get("usd", 0.0)) if d.get("date") == dt.date.today().isoformat() else 0.0
+
+    def _record_usage(self, cost: float, tokens: dict) -> None:
+        u = self.usage()
+        u["spent_usd"] = round(u.get("spent_usd", 0.0) + cost, 4)
+        for k, v in tokens.items():
+            u.setdefault("tokens", {})[k] = u.get("tokens", {}).get(k, 0) + v
+        today = dt.date.today().isoformat()
+        d = u.get("daily") if (u.get("daily") or {}).get("date") == today else {"date": today, "usd": 0.0}
+        d["usd"] = round(float(d["usd"]) + cost, 4)
+        u["daily"] = d
+        self.p.path("chat_usage.json").write_text(json.dumps(u), encoding="utf-8")
+
+    def _live_add(self, entry: dict) -> None:
+        """Add an entry to the transcript; the page fetches the ones newer than its last seq."""
+        with self.note_lock:
+            self.seq += 1
+            self.history.append({**entry, "seq": self.seq})
+            try:
+                self.save_history()
+            except OSError:
+                pass
+
+    def _live_event(self, msg, calls: dict, acct: str) -> None:
+        if isinstance(msg, RateLimitEvent):
+            core.record_rate_limit(acct, msg.rate_limit_info)
+        elif isinstance(msg, TaskStartedMessage):  # (these are SystemMessages too: check them first)
+            self.note(f"▶ Background task started: {msg.description}")
+        elif isinstance(msg, TaskNotificationMessage):
+            mark = "✓" if str(msg.status) in ("completed", "done", "success") else "✗"
+            self.note(f"{mark} Background task {msg.status}: {(msg.summary or msg.task_id or '')[:300]}")
+        elif isinstance(msg, SystemMessage):
+            sid = (msg.data or {}).get("session_id") if isinstance(msg.data, dict) else None
+            if sid:
+                self.session_id = str(sid)
+        elif isinstance(msg, AssistantMessage):
+            self.busy = True  # also when the CLI started a turn by itself (a finished background job)
+            sub = bool(getattr(msg, "parent_tool_use_id", None))
+            texts = []
+            for b in msg.content:
+                if isinstance(b, TextBlock) and b.text.strip():
+                    texts.append(b.text)
+                elif isinstance(b, ToolUseBlock):
+                    name = b.name[len(MCP_PREFIX):] if b.name.startswith(MCP_PREFIX) else b.name
+                    calls[b.id] = {"name": ("↳ " if sub else "") + name, "input": tool_summary(b.name, b.input or {}), "output": "", "error": False}
+            if texts:
+                self._live_add({"role": "assistant", "kind": "live", "text": ("↳ " if sub else "") + "\n\n".join(texts)})
+        elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+            done = []
+            for b in msg.content:
+                if isinstance(b, ToolResultBlock) and b.tool_use_id in calls:
+                    call = calls.pop(b.tool_use_id)
+                    out = result_text(b.content)
+                    call.update(output=out[:2000] + ("\n…" if len(out) > 2000 else ""), error=bool(b.is_error))
+                    done.append(call)
+            if done:
+                self._live_add({"role": "assistant", "kind": "live", "text": "", "tools": done})
+        elif isinstance(msg, ResultMessage):
+            self._live_result(msg)
+
+    def _live_result(self, msg) -> None:
+        total = float(msg.total_cost_usd or 0.0)
+        cost = total - self.session_cost if total >= self.session_cost else total
+        tokens = core.usage_tokens(msg.usage)
+        self.session_cost, self.session_id = total, msg.session_id or self.session_id
+        self._record_usage(cost, tokens)
+        self.busy = False
+        cs = core.chat_settings("coworker")
+        burst, daily = float(cs["budget_usd"]), float(cs.get("daily_budget_usd") or 0)
+        notes = []
+        if msg.subtype == "error_max_budget_usd":
+            self.drop = True
+            notes.append("Stopped: the Coworker process reached its spend limit; the next message starts a fresh process "
+                         "(the conversation resumes).")
+        elif msg.subtype == "error_max_turns":
+            notes.append("Stopped: reached the turn limit for one burst (`[chat.coworker] max_turns`). Send another message to continue.")
+        elif cost > burst:
+            notes.append(f"This burst cost ${cost:.2f}, over the ${burst:.2f} per-burst budget (`[chat.coworker] budget_usd`).")
+        if daily and self.daily_spent() >= daily:
+            notes.append(f"Today's Coworker spending reached the daily budget of ${daily:.2f} (`[chat.coworker] daily_budget_usd`); "
+                         "it takes no new work until tomorrow or until you raise it.")
+        self._live_add({"role": "assistant", "kind": "live", "text": "\n".join(notes), "cost": cost, "tokens": tokens, "model": self.model})
+
+    async def _pump(self, client, gen: int) -> None:
+        """Read every message of the live session until it ends: answers, tool calls, background-task events and
+        the turns the CLI starts by itself when a background job finishes."""
+        calls: dict = {}
+        acct = self.p.account.get("name", "default")
+        try:
+            async for msg in client.receive_messages():
+                if gen != self.generation or self.client is not client:
+                    break
+                try:
+                    self._live_event(msg, calls, acct)
+                except Exception as e:  # one odd message must not end the session
+                    core.Store(self.p).log(f"live chat: could not show a message: {e}")
+                if self.drop:
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if gen == self.generation:
+                self.note(f"⚠ The live session ended: {e or type(e).__name__}. The next message starts it again.")
+        finally:
+            if gen == self.generation:
+                self.busy = False
+                if self.client is client:
+                    self.client = None
+                    self.drop = False
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+
+    async def _live_send(self, text: str) -> dict:
+        cs = core.chat_settings("coworker")
+        cap = float(cs.get("daily_budget_usd") or 0)
+        if cap and self.daily_spent() >= cap:
+            why = (f"Today's Coworker spending reached the daily budget of ${cap:.2f}. Raise `[chat.coworker] daily_budget_usd` "
+                   "in settings.toml (0 = no cap) to go on today.")
+            self.note(why)
+            return {"error": why}
+        if self.drop:
+            await self._close()
+            self.drop = False
+        client = await self._client("coworker")
+        if self.pump is None or self.pump.done():
+            self.pump = asyncio.ensure_future(self._pump(client, self.generation))
+        self.busy = True
+        await client.query(text)
+        return {"started": True, "live": True}
+
+    def inject(self, text: str, label: str) -> None:
+        """Wake the live Coworker with a message that is not from the user (a finished run, a checkup)."""
+        if not self.is_live():
+            self.note(f"{label}: {text[:300]}")
+            return
+        self.note(label)
+        try:
+            out = asyncio.run_coroutine_threadsafe(self._live_send(text), self.loop).result(timeout=90)
+            if out.get("error"):
+                return
+        except Exception as e:
+            self.note(f"{label}: couldn't reach the Coworker ({e or type(e).__name__})")
+
+    def interrupt(self) -> bool:
+        client = self.client
+        if client is None or not self.busy:
+            return False
+        asyncio.run_coroutine_threadsafe(client.interrupt(), self.loop)
+        self.note("■ Interrupted by you.")
+        return True
+
+    def checkup_report(self) -> str:
+        p = self.p
+        state = core.Store(p).load()
+        tasks = core.load_tasks(p)
+        by: dict[str, int] = {}
+        for t in tasks:
+            s = state["tasks"].get(t.id, {}).get("status", "pending")
+            by[s] = by.get(s, 0) + 1
+        r = runner(p).info()
+        lines = [f"Run: {'running ' + ' '.join(r['args']) if r['running'] else 'idle'}",
+                 "Tasks: " + (", ".join(f"{n} {s}" for s, n in sorted(by.items())) or "none")]
+        items = project_attention(p, state, tasks)
+        lines.append("Needs attention: " + ("nothing" if not items else ""))
+        for i in items[:15]:
+            lines.append(f"- {i.get('task')}: {i.get('kind')} — {str(i.get('reason') or i.get('title') or '')[:160]}")
+        rd = reading_view(p.account.get("name", "default"))
+        if rd:
+            lines.append(f"Account usage: {round(rd['utilization'] * 100)}% ({rd['source']}, {rd['age_min']} min ago)")
+        cs = core.chat_settings("coworker")
+        cap = float(cs.get("daily_budget_usd") or 0)
+        lines.append(f"Coworker spending today: ${self.daily_spent():.2f}" + (f" of ${cap:.2f}" if cap else ""))
+        lines.append("Recent log:")
+        lines += [f"  {ln[:160]}" for ln in tail(p.path("agentdesk.log"), 5)]
+        return "\n".join(lines)
+
+    def watch_run_bg(self) -> None:
+        """Wake the Coworker when the current run ends (polls cheaply; no model calls while waiting)."""
+        if self.watching_run:
+            return
+        self.watching_run = True
+
+        def loop():
+            try:
+                deadline = time.time() + 6 * 3600
+                while time.time() < deadline:
+                    time.sleep(5)
+                    if not runner(self.p).running():
+                        self.inject("[Run finished] " + self.checkup_report(), "⏱ The run ended; waking the Coworker")
+                        return
+            finally:
+                self.watching_run = False
+
+        threading.Thread(target=loop, daemon=True, name=f"watch-run-{self.p.slug}").start()
+
+    def schedule_checkup(self, minutes: float) -> None:
+        def later():
+            time.sleep(minutes * 60)
+            self.inject(CHECKUP_PROMPT, f"⏱ Checkup after {minutes:g} min")
+
+        threading.Thread(target=later, daemon=True, name=f"checkup-{self.p.slug}").start()
+
     def usage(self) -> dict:
         f = self.p.path("chat_usage.json")
         return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {"spent_usd": 0.0, "tokens": {}}
@@ -737,6 +1052,21 @@ class Chat:
     def start(self, text: str) -> dict:
         """Answer in the background and return at once: a request held open for minutes gets dropped by the
         window/proxy ("chat falls off"). The page polls /chat until `busy` is false."""
+        if self.is_live():  # no waiting: you can write while it works, and its answers stream in as entries
+            with self.note_lock:
+                self.history.append({"role": "user", "text": text})
+                try:
+                    self.save_history()
+                except OSError:
+                    pass
+            try:
+                return asyncio.run_coroutine_threadsafe(self._live_send(text), self.loop).result(timeout=90)
+            except Exception as e:
+                self.client = None
+                self.busy = False
+                msg = f"Error: {e or type(e).__name__}"
+                self.note(msg)
+                return {"error": msg}
         if self.busy:
             return {"error": "the assistant is still answering the previous message"}
         self.busy = True
@@ -789,6 +1119,9 @@ class Chat:
         out = {"history": self.history, "mode": mode, "busy": self.busy, "model": cs["model"], "seq": self.seq}
         if mode in AUTONOMOUS:
             out.update(budget_usd=float(cs["budget_usd"]))
+        out["live"] = self.is_live()
+        if out["live"]:
+            out.update(daily_budget_usd=float(cs.get("daily_budget_usd") or 0), daily_spent=round(self.daily_spent(), 4))
         if mode == "coworker":
             full = bool(cs.get("full_access"))
             out.update(budget_usd=float(cs["budget_usd"]), full_access=full,
@@ -1140,7 +1473,7 @@ def project_state(p: core.Project) -> dict:
                         "chat_model": cs["model"] + (f" ({cs['effort']})" if cs.get("effort") else ""),
                         "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
             "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
-            "plan": plan, "chat_seq": chat(p).seq,
+            "plan": plan, "chat_seq": chat(p).seq, "chat_busy": chat(p).busy, "chat_live": chat(p).is_live(),
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
@@ -1264,6 +1597,23 @@ def autorun_pass(starter=None, alive=None) -> dict[str, list[str]]:
         except Exception as e:  # one broken project must not stop the loop
             log_error(f"auto-runner: {p.slug}: {type(e).__name__}: {e}")
     return out
+
+
+def checkup_loop() -> None:
+    """Wakes the live Coworker of each project every `[chat.coworker] checkup_interval_min` minutes, but only while a
+    session is open (the user chatted since the dashboard started), it is idle, and today's budget isn't spent."""
+    while not QUIT.wait(60):
+        try:
+            every = float(core.chat_settings("coworker").get("checkup_interval_min") or 0)
+            if every <= 0:
+                continue
+            for p in core.projects():
+                c = chat(p)
+                if c.is_live() and c.client is not None and not c.busy and time.time() - c.last_checkup >= every * 60:
+                    c.last_checkup = time.time()
+                    c.inject(CHECKUP_PROMPT, "⏱ Scheduled checkup")
+        except Exception as e:
+            log_error(f"checkups: {type(e).__name__}: {e}")
 
 
 def autorun_loop() -> None:
@@ -1500,6 +1850,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not text:
                         return self.json({"error": "empty"})
                     return self.json(chat(p).start(text))
+                if act == "chat" and parts[4:] == ["interrupt"]:
+                    return self.json({"ok": chat(p).interrupt()})
                 if act == "chat" and parts[4:] == ["reset"]:
                     chat(p).reset()
                     return self.json({"ok": True})
@@ -1685,6 +2037,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     # Only this process (the one that owns the port, checked above) runs the loop.
     threading.Thread(target=autorun_loop, daemon=True, name="autorunner").start()
     threading.Thread(target=usage_loop, daemon=True, name="usage-reader").start()
+    threading.Thread(target=checkup_loop, daemon=True, name="checkups").start()
     try:
         if browser:
             webbrowser.open(url)

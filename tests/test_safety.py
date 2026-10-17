@@ -42,7 +42,7 @@ def test_window_settings_refuses_to_write_invalid_toml():
 
 
 def test_kill_refuses_foreign_and_own_processes():
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
     try:
         assert not cli.kill(other.pid)            # not an agentdesk process
         assert other.poll() is None
@@ -53,7 +53,7 @@ def test_kill_refuses_foreign_and_own_processes():
 
 
 def test_stop_with_stale_pid_kills_nothing(capsys):
-    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])
     try:
         (core.DATA / "dashboard.pid").write_text(str(other.pid))
         cli.cmd_stop(False)

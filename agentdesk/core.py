@@ -163,6 +163,14 @@ model = "haiku"
 # full_access = false: guarded like the workers, in its own worktree (branch auto/cowork).
 [chat.coworker]
 full_access = true
+# live = true (needs full_access): one persistent session that streams into the chat, runs background jobs and
+# subagents, and can be woken by finished jobs. false: a fresh process per message, as before.
+live = true
+# budget_usd caps one burst of work (a message or a wake-up); daily_budget_usd caps everything the Coworker
+# spends per day (0 = no cap). checkup_interval_min > 0: the Coworker checks the project by itself this often
+# while a session is open (0 = never).
+daily_budget_usd = 25.0
+checkup_interval_min = 0
 model = "sonnet"
 effort = "medium"
 budget_usd = 5.0
@@ -505,7 +513,8 @@ CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet", "planner": "s
 # Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
 # full_access: the Coworker curates the whole project: it works in the project checkout itself (main included),
 # with every tool and command and no guard. false = the older guarded mode in its own worktree (auto/cowork).
-CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True},
+CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
+                             "live": True, "daily_budget_usd": 25.0, "checkup_interval_min": 0},
                  "planner": {"effort": "medium", "budget_usd": 2.0, "max_turns": 30}}
 COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
 # On top of `[guard] deny`: the Coworker may not touch AgentDesk's own config from the shell (the

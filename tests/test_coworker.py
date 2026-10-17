@@ -65,7 +65,8 @@ def allowed(chat, name, args):
 
 def test_coworker_settings(monkeypatch):
     s = tomllib.loads(core.DEFAULT_SETTINGS)["chat"]["coworker"]
-    assert s == {"full_access": True, "model": "sonnet", "effort": "medium", "budget_usd": 5.0}
+    assert s == {"full_access": True, "live": True, "daily_budget_usd": 25.0, "checkup_interval_min": 0,
+                 "model": "sonnet", "effort": "medium", "budget_usd": 5.0}
     monkeypatch.setattr(core, "settings", lambda: {"chat": {"model": "haiku"}})  # older settings.toml: no [chat.coworker]
     cs = core.chat_settings("coworker")
     assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("sonnet", "medium", 5.0)

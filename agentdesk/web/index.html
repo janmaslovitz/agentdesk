@@ -101,6 +101,8 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16
 .attn .w { flex: 1; min-width: 0; } .attn button { padding: 2px 8px; font-size: 12px; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 code { font: 12px var(--mono); }
+.livebar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--muted); }
+.livebar button { padding: 1px 8px; font-size: 12px; margin-left: auto; }
 </style>
 </head>
 <body>
@@ -328,6 +330,8 @@ function shell() {
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
       <div class="modenote" id="modeNote" hidden></div>
       <div class="msgs" id="msgs"></div>
+      <div class="livebar" id="liveBar" hidden><span class="working"><i></i><i></i><i></i></span> <span id="liveTxt">working…</span>
+        <button onclick="interruptChat()" title="Interrupt the Coworker's current work">Stop</button></div>
       <div id="plan"></div>
       <div id="pending"></div>
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
@@ -426,6 +430,7 @@ async function refreshOnce() {
     lastSeq = h.seq || 0;
   } else if ((st.chat_seq || 0) > lastSeq) await fetchNotes();
   showMode(st.project);
+  showLive(st);
   if (gitFor !== cur) gitLoad();
   if (buildFor !== cur) buildLoad();
   showPlan(st.plan, st.runner.running);
@@ -539,6 +544,7 @@ async function send() {
     const base = (await api(`/api/p/${cur}/chat`)).history.length;
     const r = await api(`/api/p/${cur}/chat`, {text});
     if (r.error) { wait.remove(); addMsg("assistant", r.error); }
+    else if (r.live) { wait.remove(); await fetchNotes(); }  // live session: its answers stream in; you can keep writing
     else {
       // The answer is produced in the background; follow it by polling, so a dropped connection can't lose it.
       let h = null, fails = 0;
@@ -559,6 +565,11 @@ async function send() {
   catch (e) { wait.textContent = "Error: " + e; }
   finally { clearInterval(timer); }
   $("sendb").disabled = false; refreshAll();
+}
+async function interruptChat() { await api(`/api/p/${cur}/chat/interrupt`, {}); fetchNotes(); }
+function showLive(s) {
+  const bar = $("liveBar"); if (!bar) return;
+  bar.hidden = !(s.chat_live && s.chat_busy);
 }
 async function resetChat() { await api(`/api/p/${cur}/chat/reset`, {}); $("msgs").innerHTML = ""; }
 
@@ -587,7 +598,7 @@ async function setMode(mode) {
 let lastSeq = 0;
 async function fetchNotes() {
   const h = await api(`/api/p/${cur}/chat`);
-  for (const m of h.history) if (m.kind === "progress" && m.seq > lastSeq) addMsg(m.role, m.text, m);
+  for (const m of h.history) if ((m.kind === "progress" || m.kind === "live") && m.seq > lastSeq) addMsg(m.role, m.text, m);
   lastSeq = Math.max(lastSeq, h.seq || 0);
 }
 
