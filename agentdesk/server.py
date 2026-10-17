@@ -144,6 +144,13 @@ MEMORY_SECTIONS = ("Decisions", "Facts about the project", "Open questions", "Us
 MEMORY_MAX_WORDS = 1500
 MEMORY_HEADING = "What you remember from earlier conversations"
 
+ACK_RULE = """
+
+Start every reply to the user's message with one short sentence, in the user's language, that confirms you understood
+the request and says what you will do next (for example: "Понял фронт работ: формирую список задач и отправляю в работу."
+or "Got it: I'll check the branch state, then merge what passes."). Only then do the work or answer. For a plain
+question, one short acknowledging clause is enough. Don't repeat it later in the same reply."""
+
 MEMORY_PROMPT = """You maintain the running memory of a project chat assistant. Below are the current memory and the latest
 exchange. Return the full updated memory and nothing else, as Markdown with exactly these sections, in this order:
 {sections}
@@ -601,7 +608,7 @@ class Chat:
         self.model = core.chat_settings("assistant")["model"]
         prompt = self.with_memory(CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p)))
         # Only read-only tools go in allowed_tools: anything listed there skips can_use_tool.
-        return core.options(self.p, model=self.model, cwd=str(self.p.dir), system_prompt=prompt, max_turns=15,
+        return core.options(self.p, model=self.model, cwd=str(self.p.dir), system_prompt=prompt + ACK_RULE, max_turns=15,
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools())},
                             disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
@@ -615,7 +622,7 @@ class Chat:
                                                  folder=self.p.dir, budget=float(cs["budget_usd"]))
             gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
             # Everything is allowed through can_use_tool (no guard, no hook); the project checkout is the working directory.
-            return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt,
+            return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt + ACK_RULE,
                                 max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
                                 allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
                                 mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
@@ -626,7 +633,7 @@ class Chat:
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
         # Shell, edit and run tools must not go in allowed_tools (that skips can_use_tool, i.e. the guard).
         # No setting_sources: a project's .claude/settings.json could allow commands past the guard.
-        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(wt), system_prompt=prompt,
+        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(wt), system_prompt=prompt + ACK_RULE,
                             max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
@@ -639,7 +646,7 @@ class Chat:
         self.model = cs["model"]
         prompt = PLANNER_PROMPT.format(name=self.p.name, repo=self.p.repo, budget=float(cs["budget_usd"]))
         # Read-only plus the planning tools; the permission check and the hook refuse everything else.
-        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.dir), system_prompt=prompt,
+        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.dir), system_prompt=prompt + ACK_RULE,
                             max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.planner_tools())},

@@ -529,11 +529,11 @@ async function send() {
   const wait = addMsg("assistant", ""), forProject = cur, t0 = Date.now();
   const dots = document.createElement("span"), label = document.createElement("span");
   dots.className = "working"; dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
-  label.textContent = "working… 0s"; wait.append(dots, label);
+  label.textContent = "request accepted, working… 0s"; wait.append(dots, label);
   // Stops when the project changes or the bubble leaves #msgs (project reload clears it).
   const timer = setInterval(() => {
     if (forProject !== cur || !wait.isConnected) { clearInterval(timer); return; }
-    label.textContent = `working… ${Math.floor((Date.now() - t0) / 1000)}s`;
+    label.textContent = `request accepted, working… ${Math.floor((Date.now() - t0) / 1000)}s`;
   }, 1000);
   try {
     const base = (await api(`/api/p/${cur}/chat`)).history.length;
