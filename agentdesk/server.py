@@ -727,6 +727,15 @@ class Chat:
         f = self.p.path("chat_usage.json")
         return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {"spent_usd": 0.0, "tokens": {}}
 
+    def start(self, text: str) -> dict:
+        """Answer in the background and return at once: a request held open for minutes gets dropped by the
+        window/proxy ("chat falls off"). The page polls /chat until `busy` is false."""
+        if self.busy:
+            return {"error": "the assistant is still answering the previous message"}
+        self.busy = True
+        threading.Thread(target=self.ask, args=(text,), daemon=True, name=f"chat-{self.p.slug}").start()
+        return {"started": True}
+
     def ask(self, text: str) -> dict:
         with self.lock:
             self.history.append({"role": "user", "text": text})
@@ -950,8 +959,28 @@ def auth_status(a: dict, fresh: bool = False) -> dict:
     when the CLI couldn't be asked. Cached for a few seconds because the dashboard polls."""
     name = a.get("name", "default")
     hit = _AUTH_CACHE.get(name)
-    if hit and not fresh and time.time() - hit[0] < 15:
-        return hit[1]
+    if fresh:
+        return _auth_query(a)
+    if hit is None or time.time() - hit[0] >= 60:
+        # Never make a dashboard request wait for the CLI: refresh in the background, answer with the last value.
+        if name not in _AUTH_BUSY:
+            _AUTH_BUSY.add(name)
+            threading.Thread(target=_auth_refresh, args=(a,), daemon=True, name="auth-status").start()
+    return hit[1] if hit else {"connected": None, "email": "", "method": ""}
+
+
+_AUTH_BUSY: set[str] = set()
+
+
+def _auth_refresh(a: dict) -> None:
+    try:
+        _auth_query(a)
+    finally:
+        _AUTH_BUSY.discard(a.get("name", "default"))
+
+
+def _auth_query(a: dict) -> dict:
+    name = a.get("name", "default")
     out: dict = {"connected": None, "email": "", "method": ""}
     try:
         kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}
@@ -964,6 +993,8 @@ def auth_status(a: dict, fresh: bool = False) -> dict:
         pass
     _AUTH_CACHE[name] = (time.time(), out)
     return out
+
+
 def auto_error(name: str) -> str | None:
     """Why the automatic usage reading last failed (None if it works or is off)."""
     return (core.account_usage(name).get("auto") or {}).get("error") if core.usage_auto_enabled() else None
@@ -1112,7 +1143,20 @@ def project_state(p: core.Project) -> dict:
             "tiers": {k: {"model": v["model"], "effort": v.get("effort")} for k, v in s["tiers"].items()}}
 
 
+_OV: tuple[float, dict] | None = None
+
+
 def overview() -> dict:
+    """Cached for 3 s: every open page polls it, and it walks all projects."""
+    global _OV
+    if _OV and time.time() - _OV[0] < 3:
+        return _OV[1]
+    out = _overview()
+    _OV = (time.time(), out)
+    return out
+
+
+def _overview() -> dict:
     rows = []
     for p in core.projects():
         state = core.Store(p).load()
@@ -1446,7 +1490,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"ok": True, "id": tid})
                 if act == "chat" and len(parts) == 4:
                     text = str(d.get("text", "")).strip()[:4000]
-                    return self.json(chat(p).ask(text) if text else {"error": "empty"})
+                    if not text:
+                        return self.json({"error": "empty"})
+                    return self.json(chat(p).start(text))
                 if act == "chat" and parts[4:] == ["reset"]:
                     chat(p).reset()
                     return self.json({"ok": True})

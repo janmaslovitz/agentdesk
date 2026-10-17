@@ -14,6 +14,7 @@ folder can be copied to another computer):
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime as dt
 import json
 import os
@@ -207,8 +208,23 @@ def settings() -> dict:
     if not p.exists():
         DATA.mkdir(parents=True, exist_ok=True)
         p.write_text(DEFAULT_SETTINGS, encoding="utf-8")
-    with p.open("rb") as f:
-        return tomllib.load(f)
+    return copy.deepcopy(_toml_cached(p))
+
+
+_TOML_CACHE: dict[str, tuple[int, int, dict]] = {}
+
+
+def _toml_cached(path: Path) -> dict:
+    """Parsed TOML, re-read only when the file's mtime/size changes (the dashboard polls these constantly)."""
+    st = path.stat()
+    key = (st.st_mtime_ns, st.st_size)
+    hit = _TOML_CACHE.get(str(path))
+    if hit and hit[:2] == key:
+        return hit[2]
+    with path.open("rb") as f:
+        data = tomllib.load(f)
+    _TOML_CACHE[str(path)] = (key[0], key[1], data)
+    return data
 
 
 def account(name: str | None) -> dict:
@@ -410,8 +426,7 @@ def projects() -> list[Project]:
     for d in sorted((DATA / "projects").glob("*")):
         p = d / "project.toml"
         if p.exists():
-            with p.open("rb") as f:
-                out.append(Project(d.name, d, tomllib.load(f)))
+            out.append(Project(d.name, d, copy.deepcopy(_toml_cached(p))))
     return out
 
 
@@ -945,7 +960,8 @@ def scratch_home() -> str:
 def run(cmd, cwd: Path, env: dict | None = None, timeout: int = 3600, shell: bool = False) -> tuple[int, str]:
     try:
         r = subprocess.run(cmd, cwd=cwd, env={**os.environ, "AGENTDESK_HOME": scratch_home(), **(env or {})}, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout, shell=shell)
+                           encoding="utf-8", errors="replace", timeout=timeout, shell=shell,
+                           stdin=subprocess.DEVNULL, **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
         return r.returncode, (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired as e:
         return 124, f"timed out after {timeout}s\n{str(e.stdout or '')[-2000:]}"
@@ -1289,12 +1305,22 @@ def attention_items(slug: str, tasks: list[Task], state: dict, merged: dict[str,
 def branch_merged(p: Project, branch: str) -> bool | None:
     """Read-only: is `branch` an ancestor of the base branch? None if it can't be told."""
     base = p.cfg.get("repo", {}).get("base", "main")
+    key = (str(p.repo), branch, base)
+    hit = _MERGED_CACHE.get(key)
+    if hit and time.time() - hit[0] < 20:  # the dashboard asks for every done task on every poll
+        return hit[1]
     try:
         if git(["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], p.repo)[0] != 0:
-            return None
-        return git(["merge-base", "--is-ancestor", branch, base], p.repo)[0] == 0
+            res = None
+        else:
+            res = git(["merge-base", "--is-ancestor", branch, base], p.repo)[0] == 0
     except OSError:
-        return None
+        res = None
+    _MERGED_CACHE[key] = (time.time(), res)
+    return res
+
+
+_MERGED_CACHE: dict[tuple[str, str, str], tuple[float, bool | None]] = {}
 
 
 # ----------------------------------------------------------------------------- agents

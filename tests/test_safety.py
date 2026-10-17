@@ -88,13 +88,24 @@ def test_account_rows_report_real_connection(monkeypatch):
         stdout = _json.dumps({"loggedIn": True, "email": "me@example.com", "authMethod": "claude.ai"})
 
     monkeypatch.setattr(server.subprocess, "run", lambda *a, **k: calls.append(k["env"].get("CLAUDE_CONFIG_DIR")) or R())
+    def settle():  # the CLI is asked in the background; wait for it
+        import time as _t
+        for _ in range(100):
+            if not server._AUTH_BUSY:
+                return
+            _t.sleep(0.02)
+
     server._AUTH_CACHE.clear()
+    server.account_rows()
+    settle()
     row = server.account_rows()[0]
     assert row["ready"] is True and row["email"] == "me@example.com"
     server.account_rows()
     assert len(calls) == 1  # cached between polls
     R.stdout = _json.dumps({"loggedIn": False})
     server._AUTH_CACHE.clear()
+    server.account_rows()
+    settle()
     row = server.account_rows()[0]
     assert row["ready"] is False and row["email"] == ""
 

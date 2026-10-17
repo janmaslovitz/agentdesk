@@ -257,7 +257,13 @@ async function addTask() {
   closeDlg("dTask"); $("tTitle").value = $("tBody").value = $("tDeps").value = ""; refresh();
 }
 
+let refreshingAll = false;
 async function refreshAll() {
+  if (refreshingAll) return;
+  refreshingAll = true;
+  try { await refreshAllOnce(); } catch {} finally { refreshingAll = false; }
+}
+async function refreshAllOnce() {
   ov = await api("/api/overview");
   $("datadir").textContent = "Data: " + ov.data;
   $("autoGlobal").checked = ov.auto_global;
@@ -294,7 +300,11 @@ async function saveUsage(name) {
   if (r.error) note(r.error); else refreshAll();
 }
 const usedText = v => v == null ? "unknown" : "about " + v + "% of your window";
-function pickProject(slug) { cur = slug; selTask = null; localStorage.setItem("agentdesk.project", slug); refreshAll(); }
+function pickProject(slug) {
+  cur = slug; selTask = null; localStorage.setItem("agentdesk.project", slug);
+  for (const el of document.querySelectorAll("#projects .proj")) el.classList.toggle("sel", el.getAttribute("onclick") === `pickProject('${slug}')`);
+  refresh();  // the project's own state first; the overview follows on its timer
+}
 
 function shell() {
   $("main").innerHTML = `
@@ -395,11 +405,21 @@ Remote: ${g.remote_url}`;
   if (confirm(text)) await gitAct(act, body);
 }
 
+let refreshing = false, refreshAgain = false;
 async function refresh() {
+  // One poll at a time (slow responses used to pile up), and the latest request wins after a project switch.
+  if (refreshing) { refreshAgain = true; return; }
+  refreshing = true;
+  try { await refreshOnce(); } finally { refreshing = false; if (refreshAgain) { refreshAgain = false; setTimeout(refresh, 50); } }
+}
+async function refreshOnce() {
+  const want = cur;
   if (!cur) { $("main").innerHTML = `<div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dProject')">Add project</button></div>`; return; }
   if (!$("tasks")) shell();
-  try { st = await api(`/api/p/${cur}/state`); } catch { return; }
-  if (st.error) return;
+  let s0; try { s0 = await api(`/api/p/${want}/state`); } catch { return; }
+  if (want !== cur) { refreshAgain = true; return; }  // switched project while waiting: fetch again for the new one
+  if (s0.error) return;
+  st = s0;
   if (chatFor !== cur) {
     chatFor = cur; pendingKey = null; planKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
     const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
@@ -515,7 +535,27 @@ async function send() {
     if (forProject !== cur || !wait.isConnected) { clearInterval(timer); return; }
     label.textContent = `working… ${Math.floor((Date.now() - t0) / 1000)}s`;
   }, 1000);
-  try { const r = await api(`/api/p/${cur}/chat`, {text}); wait.remove(); if (forProject === cur) { await fetchNotes(); addMsg("assistant", r.text || r.error, r); } }
+  try {
+    const base = (await api(`/api/p/${cur}/chat`)).history.length;
+    const r = await api(`/api/p/${cur}/chat`, {text});
+    if (r.error) { wait.remove(); addMsg("assistant", r.error); }
+    else {
+      // The answer is produced in the background; follow it by polling, so a dropped connection can't lose it.
+      let h = null, fails = 0;
+      for (;;) {
+        await new Promise(res => setTimeout(res, 1500));
+        if (forProject !== cur) break;
+        try { h = await api(`/api/p/${cur}/chat`); fails = 0; } catch { if (++fails > 40) throw new Error("lost the connection to AgentDesk"); continue; }
+        if (!h.busy) break;
+      }
+      wait.remove();
+      if (forProject === cur && h) {
+        await fetchNotes();
+        const last = h.history.slice(base + 1).filter(m => m.role === "assistant" && m.kind !== "progress").pop();
+        if (last) addMsg("assistant", last.text, last);
+      }
+    }
+  }
   catch (e) { wait.textContent = "Error: " + e; }
   finally { clearInterval(timer); }
   $("sendb").disabled = false; refreshAll();
@@ -604,9 +644,11 @@ async function answer(id, action) {
 }
 
 refreshAll();
-setInterval(refresh, 2500);
-setInterval(pollPending, 1500);
-setInterval(refreshAll, 10000);
+// Poll only while the window is visible.
+setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+setInterval(() => { if (!document.hidden) pollPending(); }, 2000);
+setInterval(() => { if (!document.hidden) refreshAll(); }, 15000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { refresh(); refreshAll(); } });
 </script>
 </body>
 </html>
