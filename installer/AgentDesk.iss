@@ -1,7 +1,7 @@
 ; Inno Setup script for the AgentDesk installer. Build with ..\build_installer.ps1 (ISCC /DAppVersion=x.y).
 ; It packs only dist\AgentDesk (the PyInstaller program): never data\, logins, keys, projects, .venv or worktrees.
 #ifndef AppVersion
-  #define AppVersion "1.0"
+  #define AppVersion "1.0.0"
 #endif
 
 [Setup]
@@ -22,7 +22,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=..\agentdesk\web\agentdesk.ico
 UninstallDisplayIcon={app}\AgentDesk.exe
 OutputDir=..\dist\installer
-OutputBaseFilename=AgentDesk-Setup
+OutputBaseFilename=AgentDesk-Setup-{#AppVersion}
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

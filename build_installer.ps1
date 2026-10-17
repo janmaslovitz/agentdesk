@@ -3,9 +3,11 @@ Builds dist\installer\AgentDesk-Setup.exe: runs build_exe.ps1 (the PyInstaller p
 on installer\AgentDesk.iss. Run it from a clean checkout. Needs Inno Setup 6 (winget install JRSoftware.InnoSetup).
   .\build_installer.ps1 [-Version 1.0] [-SkipExe]   # -SkipExe reuses an existing dist\AgentDesk
 #>
-param([string]$Version = "1.0", [switch]$SkipExe)
+param([string]$Version = "", [switch]$SkipExe)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+if (-not $Version) { $Version = (& python tools\release.py current).Trim() }   # the version in agentdesk\__init__.py
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "version must be x.y.z, not '$Version'" }
 if (-not $SkipExe) {
     & "$PSScriptRoot\build_exe.ps1" -NoDesktopShortcut
     if (-not $?) { throw "build_exe.ps1 failed" }
@@ -23,6 +25,7 @@ $iscc = @(
 if (-not $iscc) { throw "Inno Setup not found. Install it: winget install JRSoftware.InnoSetup" }
 & $iscc "/DAppVersion=$Version" "installer\AgentDesk.iss"
 if ($LASTEXITCODE) { throw "ISCC failed" }
-$out = Join-Path $PSScriptRoot "dist\installer\AgentDesk-Setup.exe"
+$out = Join-Path $PSScriptRoot "dist\installer\AgentDesk-Setup-$Version.exe"
 if (-not (Test-Path $out)) { throw "no installer produced at $out" }
+Copy-Item $out (Join-Path $PSScriptRoot "dist\installer\AgentDesk-Setup.exe") -Force   # the latest, under the old name
 Write-Host ("Built {0} ({1:N1} MB)" -f $out, ((Get-Item $out).Length / 1MB))

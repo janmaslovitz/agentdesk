@@ -211,6 +211,56 @@ PRESETS = {
 
 # ----------------------------------------------------------------------------- settings, accounts, projects
 
+_VERSION: dict | None = None
+
+
+def version_info() -> dict:
+    """{version, commit, built, installed}: the version from agentdesk/__init__.py, plus the commit and build time
+    stamped into the packaged program (tools/release.py buildinfo); from source the commit comes from git."""
+    global _VERSION
+    if _VERSION is None:
+        from . import __version__
+        commit, built = "", ""
+        try:
+            from . import _buildinfo
+            commit, built = _buildinfo.COMMIT, _buildinfo.BUILT
+        except ImportError:
+            if not FROZEN:
+                try:
+                    r = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=APP, capture_output=True, text=True, timeout=5,
+                                       **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+                    commit = r.stdout.strip() if r.returncode == 0 else ""
+                except (OSError, subprocess.SubprocessError):
+                    pass
+        _VERSION = {"version": __version__, "commit": commit, "built": built, "installed": FROZEN}
+    return dict(_VERSION)
+
+
+def version_text() -> str:
+    v = version_info()
+    extra = ", ".join(x for x in (v["commit"], f"built {v['built']}" if v["built"] else "") if x)
+    return f"AgentDesk {v['version']}" + (f" ({extra})" if extra else "")
+
+
+def record_version() -> tuple[str | None, str]:
+    """Remember which version last ran on this data folder (data/app_version.json). Returns (previous version or None
+    when unchanged/first run, current version); the caller logs an upgrade."""
+    v = version_info()
+    f = DATA / "app_version.json"
+    try:
+        prev = json.loads(f.read_text(encoding="utf-8")).get("version")
+    except (OSError, ValueError, AttributeError):
+        prev = None
+    if prev == v["version"]:
+        return None, v["version"]
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({**v, "previous": prev, "since": dt.datetime.now().isoformat(timespec="seconds")}, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+    return prev, v["version"]
+
+
 def settings() -> dict:
     p = DATA / "settings.toml"
     if not p.exists():

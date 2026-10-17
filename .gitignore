@@ -8,3 +8,5 @@ dist/
 .venv-build/
 dist/
 build/
+agentdesk/_buildinfo.py
+version_info.txt

@@ -1541,7 +1541,7 @@ def _overview() -> dict:
         rows.append({"slug": p.slug, "name": p.name, "repo": str(p.repo), "account": p.account.get("name"), "counts": counts,
                      "spent_usd": state.get("spent_usd", 0.0), "running": runner(p).running(),
                      "auto": autorun_status(p), "auto_enabled": core.autorunner_cfg(p)["enabled"]})
-    return {"auto_global": core.autorunner_cfg()["enabled"], "attention": attention_all(), "projects": rows, "accounts": account_rows(), "presets": list(core.PRESETS), "data": str(core.DATA)}
+    return {"auto_global": core.autorunner_cfg()["enabled"], "attention": attention_all(), "projects": rows, "accounts": account_rows(), "presets": list(core.PRESETS), "data": str(core.DATA), "version": core.version_info()}
 
 
 # ----------------------------------------------------------------------------- auto-runner
@@ -1749,6 +1749,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
         if parts == ["api", "attention"]:
             return self.json(attention_all())
+        if parts == ["api", "version"]:
+            return self.json(core.version_info())
         if parts == ["api", "overview"]:
             return self.json(overview())
         if len(parts) >= 3 and parts[:2] == ["api", "p"]:
@@ -2057,6 +2059,9 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     """browser=True: open a browser tab. Otherwise window=True shows a native window (browser if that fails);
     window=False just serves."""
     core.settings()  # creates the data folder and default settings on first start
+    prev, now = core.record_version()
+    if prev is not None or not (core.DATA / "agentdesk.log").exists():
+        log_error(f"AgentDesk {'upgraded ' + prev + ' -> ' if prev else 'first start of '}{core.version_text()}")
     url = f"http://127.0.0.1:{port}"
     if answers(port):
         print(f"AgentDesk is already running at {url}")

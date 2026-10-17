@@ -207,6 +207,26 @@ If the Claude Code CLI or the WebView2 runtime is missing, setup says so with a 
 - **Uninstall** from Apps & features (or the Start menu). It removes the program files and asks "Also remove my data?"; `%LOCALAPPDATA%\AgentDesk` stays unless you answer Yes. A silent uninstall keeps it unless `/REMOVEDATA` is given.
 - Upgrade by running a newer setup over the old one; the data is kept.
 
+## Versions and releases
+
+AgentDesk has one version number, `__version__` in `agentdesk/__init__.py` (semantic: `major.minor.patch`). It is
+shown in the dashboard sidebar (with the commit and build time), by `AgentDesk.exe version`, in the exe's file
+properties, and in the installer (`AgentDesk-Setup-x.y.z.exe`, listed in Apps & features). The app notes in its log
+(`agentdesk.log`) when it starts after an upgrade, and `data/app_version.json` remembers the last version that ran.
+
+`CHANGELOG.md` lists what changed in each version. Write new entries under `## Unreleased`; then make the release:
+
+```
+.\release.ps1                  # runs the tests, then 1.1.0 -> 1.1.1: commit "Release 1.1.1", tag v1.1.1, build the installer
+.\release.ps1 -Bump minor      # new features: 1.1.0 -> 1.2.0   (-Bump major for a breaking change)
+.\release.ps1 -Version 1.4.0   # an exact version (must be newer)
+```
+
+It refuses to run if the tests fail, if tracked files have uncommitted changes, if the Unreleased section is empty, or if
+the tag exists. It never pushes (`git push --follow-tags` when you want to). Every release installer stays in
+`dist\installer\` (`AgentDesk-Setup.exe` is always a copy of the newest), so going back is installing an older one.
+Installing a newer version over an older one keeps your data (`%LOCALAPPDATA%\AgentDesk`).
+
 ## Command line
 
 ```

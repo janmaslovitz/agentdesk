@@ -178,7 +178,9 @@ def main() -> None:
     if sys.stdout is not None:  # None under pythonw
         sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="agentdesk", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=core.version_text())
     sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("version", help="print the version")
     d = sub.add_parser("dashboard"); d.add_argument("--port", type=int, default=8765); d.add_argument("--browser", action="store_true", help="open a browser tab instead of the native window")
     d.add_argument("--no-browser", action="store_true", help="just serve: no window, no browser")
     st = sub.add_parser("stop"); st.add_argument("--runs", action="store_true", help="also stop runs started from the dashboard")
@@ -200,6 +202,8 @@ def main() -> None:
         from . import server
         server.main(port=getattr(args, "port", 8765), browser=getattr(args, "browser", False),
                     window=not getattr(args, "no_browser", False))
+    elif args.cmd == "version":
+        print(core.version_text())
     elif args.cmd == "stop":
         cmd_stop(args.runs)
     elif args.cmd == "projects":

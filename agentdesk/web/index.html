@@ -116,6 +116,7 @@ code { font: 12px var(--mono); }
   <h2>Accounts <button onclick="openDlg('dAccount')">+ Add</button></h2>
   <div id="accounts"></div>
   <div class="spacer"></div>
+  <div class="m" id="ver" title="Version of this AgentDesk (commit and build time)"></div>
   <div class="muted" style="font-size:11px" id="datadir"></div>
 </aside>
 
@@ -276,6 +277,7 @@ async function refreshAllOnce() {
       <div class="n"><span class="dot${p.running?" live":""}"></span>${esc(p.name)}</div>
       <div class="m">${done}/${total} done${c.blocked?` · ${c.blocked} blocked`:""} · ${money(p.spent_usd)} · ${esc(p.account)}</div></div>`;
   }).join("") || `<div class="muted">No projects yet.</div>`;
+  if (ov.version && $("ver")) $("ver").textContent = `AgentDesk v${ov.version.version}` + (ov.version.commit ? ` · ${ov.version.commit}` : "") + (ov.version.built ? ` · built ${ov.version.built}` : "");
   $("accounts").innerHTML = ov.accounts.map(a => {
     const lims = Object.values(a.usage||{}), u = lims.length ? Math.max(...lims.map(l => l.utilization||0)) : null;
     return `<div class="acct"><span class="dot${a.ready?" on":""}"></span><b>${esc(a.name)}</b> <span class="muted">${a.kind==="api_key"?"API key":"subscription"}</span>

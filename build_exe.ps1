@@ -14,6 +14,9 @@ if (-not (Test-Path "$venv\Scripts\python.exe")) {
 $vpy = "$venv\Scripts\python.exe"
 & $vpy -m pip install --quiet -r requirements.txt -r requirements-tray.txt -r requirements-build.txt
 if ($LASTEXITCODE) { throw "pip install failed" }
+# stamp the build (commit, time, file properties) from the version in agentdesk\__init__.py
+& python tools\release.py buildinfo | Out-Null
+if ($LASTEXITCODE) { throw "tools\release.py buildinfo failed" }
 & $vpy -m PyInstaller --noconfirm --clean agentdesk.spec
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
 $exe = Join-Path $PSScriptRoot "dist\AgentDesk\AgentDesk.exe"
