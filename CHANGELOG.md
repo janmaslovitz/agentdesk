@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.1.1 - 2026-10-17
+
 ### Fixed
 - The usage reader no longer hammers a rate-limited service: it asks every 3 minutes (was 1), and after a "busy"
   (HTTP 429) answer it waits 2, 4, 8, 15, then 30 minutes (or the service's own Retry-After) and says when it will
