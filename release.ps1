@@ -19,5 +19,5 @@ $relArgs = if ($Version) { @("--version", $Version) } else { @("--bump", $Bump) 
 $out = & python tools\release.py release @relArgs
 if ($LASTEXITCODE) { throw "release failed (see the message above)" }
 $new = ($out | Select-Object -Last 1).Trim()
-Write-Host "Released $new: committed as 'Release $new' and tagged v$new. Nothing was pushed (git push --follow-tags when you want to)."
+Write-Host "Released ${new}: committed as 'Release ${new}' and tagged v${new}. Nothing was pushed (git push --follow-tags when you want to)."
 if (-not $NoBuild) { & "$PSScriptRoot\build_installer.ps1" -Version $new }
