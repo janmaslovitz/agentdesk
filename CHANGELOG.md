@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.1.0 - 2026-10-17
+
 ### Added
 - Version numbers: one version in `agentdesk/__init__.py`, shown in the dashboard sidebar, `AgentDesk.exe version`,
   the exe's file properties, the installer (`AgentDesk-Setup-x.y.z.exe`) and Apps & features; the commit and build
