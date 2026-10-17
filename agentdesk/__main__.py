@@ -66,13 +66,51 @@ def is_agentdesk(pid: int) -> bool:
     return re.search(r"-m\s+agentdesk(\s|$)", info[1]) is not None
 
 
+def parent_map() -> dict[int, int]:
+    """pid -> parent pid of every process, from one snapshot (no process is started to ask: a PowerShell per
+    ancestor took seconds each on a busy machine)."""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", wintypes.LONG), ("dwFlags", wintypes.DWORD),
+                        ("szExeFile", ctypes.c_wchar * 260)]
+
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k.Process32FirstW.argtypes = k.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        snap, out = k.CreateToolhelp32Snapshot(0x2, 0), {}  # TH32CS_SNAPPROCESS
+        if snap in (None, wintypes.HANDLE(-1).value):
+            return out
+        try:
+            e = Entry()
+            e.dwSize = ctypes.sizeof(Entry)
+            ok = k.Process32FirstW(snap, ctypes.byref(e))
+            while ok:
+                out[int(e.th32ProcessID)] = int(e.th32ParentProcessID)
+                ok = k.Process32NextW(snap, ctypes.byref(e))
+        finally:
+            k.CloseHandle(snap)
+        return out
+    out = {}
+    for line in _ps(["ps", "-A", "-o", "pid=,ppid="]).splitlines():
+        a = line.split()
+        if len(a) == 2 and a[0].isdigit() and a[1].isdigit():
+            out[int(a[0])] = int(a[1])
+    return out
+
+
 def own_lineage() -> set[int]:
     """This process and its ancestors: killing any of them (or their tree) would kill the caller."""
-    seen, pid = set(), os.getpid()
-    while pid and pid not in seen and len(seen) < 32:
+    parents, seen, pid = parent_map(), set(), os.getpid()
+    while pid and pid not in seen and len(seen) < 64:
         seen.add(pid)
-        info = process_info(pid)
-        pid = info[0] if info else 0
+        pid = parents.get(pid, 0)
     return seen
 
 

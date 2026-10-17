@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -216,7 +216,28 @@ def settings() -> dict:
     if not p.exists():
         DATA.mkdir(parents=True, exist_ok=True)
         p.write_text(DEFAULT_SETTINGS, encoding="utf-8")
-    return copy.deepcopy(_toml_cached(p))
+    return _merged(copy.deepcopy(_defaults()), _toml_cached(p))
+
+
+_DEFAULTS: dict | None = None
+
+
+def _defaults() -> dict:
+    global _DEFAULTS
+    if _DEFAULTS is None:
+        _DEFAULTS = tomllib.loads(DEFAULT_SETTINGS)
+    return _DEFAULTS
+
+
+def _merged(base: dict, over: dict) -> dict:
+    """`over` on top of `base`, section by section: a settings.toml from an older version (or with a key deleted)
+    still has every key the program reads. Lists and values in `over` replace the defaults whole."""
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            base[k] = _merged(base[k], v)
+        else:
+            base[k] = v
+    return base
 
 
 _TOML_CACHE: dict[str, tuple[int, int, dict]] = {}
@@ -1021,6 +1042,14 @@ def git_status(p: "Project") -> dict:
     if code == 0 and up:
         st["upstream"] = up
         st["ahead"], st["behind"] = _count(p, f"{up}..HEAD"), _count(p, f"HEAD..{up}")
+    code, rows = _g(p, "for-each-ref", f"--format=%(refname:short) %(ahead-behind:{base})", "refs/heads/auto/")
+    if code == 0:  # one process for all branches (git 2.41+)
+        for line in rows.splitlines():
+            name, _, rest = line.partition(" ")
+            ahead = rest.split()[0] if rest.split() else ""
+            if ahead.isdigit() and int(ahead):
+                st["autos"].append({"branch": name, "ahead": int(ahead)})
+        return st
     _, branches = _g(p, "for-each-ref", "--format=%(refname:short)", "refs/heads/auto/")
     for b in branches.splitlines():
         n = _count(p, f"{base}..{b}")
@@ -1311,25 +1340,36 @@ def attention_items(slug: str, tasks: list[Task], state: dict, merged: dict[str,
     return out
 
 
-def branch_merged(p: Project, branch: str) -> bool | None:
-    """Read-only: is `branch` an ancestor of the base branch? None if it can't be told."""
+def merged_branches(p: Project) -> tuple[set[str], set[str]] | None:
+    """(all local branches, those already merged into the base branch) from two git calls, cached for 20 s and shared
+    by every branch asked about (the dashboard asks for each done task on every poll: one process per branch made the
+    whole app stall every 20 s). None if git can't tell."""
     base = p.cfg.get("repo", {}).get("base", "main")
-    key = (str(p.repo), branch, base)
-    hit = _MERGED_CACHE.get(key)
-    if hit and time.time() - hit[0] < 20:  # the dashboard asks for every done task on every poll
-        return hit[1]
-    try:
-        if git(["rev-parse", "--verify", "-q", f"refs/heads/{branch}"], p.repo)[0] != 0:
+    key = (str(p.repo), base)
+    with _MERGED_LOCK:
+        hit = _MERGED_CACHE.get(key)
+        if hit and time.time() - hit[0] < 20:
+            return hit[1]
+        try:
+            c1, heads = git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"], p.repo)
+            c2, merged = git(["branch", "--merged", base, "--format=%(refname:short)"], p.repo)
+            res = (set(heads.split()), set(merged.split())) if c1 == 0 and c2 == 0 else None
+        except OSError:
             res = None
-        else:
-            res = git(["merge-base", "--is-ancestor", branch, base], p.repo)[0] == 0
-    except OSError:
-        res = None
-    _MERGED_CACHE[key] = (time.time(), res)
-    return res
+        _MERGED_CACHE[key] = (time.time(), res)
+        return res
 
 
-_MERGED_CACHE: dict[tuple[str, str, str], tuple[float, bool | None]] = {}
+def branch_merged(p: Project, branch: str) -> bool | None:
+    """Read-only: is `branch` an ancestor of the base branch? None if it can't be told (or there is no such branch)."""
+    sets = merged_branches(p)
+    if sets is None or branch not in sets[0]:
+        return None
+    return branch in sets[1]
+
+
+_MERGED_CACHE: dict[tuple[str, str], tuple[float, tuple[set[str], set[str]] | None]] = {}
+_MERGED_LOCK = threading.Lock()
 
 
 # ----------------------------------------------------------------------------- agents
@@ -1476,6 +1516,24 @@ def options(p: Project, **kw) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(env=env, **kw)
 
 
+TRANSIENT = re.compile(r"ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPIPE|connection (dropped|refused|reset|closed|error)"
+                       r"|socket hang up|fetch failed|network (error|is unreachable)|timed out|overloaded|API Error: (5\d\d|429)|"
+                       r"Unable to connect|temporarily unavailable", re.I)
+
+
+def is_transient(e: BaseException) -> bool:
+    """A network or service hiccup (reset, refused, dropped, timeout, 5xx/overloaded): worth waiting and trying again,
+    not a failure of the task. The SDK reports a dead CLI as ProcessError (often with no detail), so that counts too
+    when the text says nothing else."""
+    text = f"{type(e).__name__}: {e} {getattr(e, 'stderr', '') or ''}"
+    return bool(TRANSIENT.search(text))
+
+
+def network_delays() -> list[float]:
+    d = settings().get("limits", {}).get("network_retry_s", [15, 45, 120, 300])
+    return [float(x) for x in d] if isinstance(d, list) and d else []
+
+
 async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
     r = settings()["router"]
     opts = options(p, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
@@ -1483,21 +1541,31 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
                    permission_mode="default", setting_sources=["project"], output_format={"type": "json_schema", "schema": ROUTER_SCHEMA})
     result = None
     before = meter.mark()
-    async for msg in query(prompt=ROUTER_PROMPT.format(notes=store.notes(), id=task.id, title=task.title, body=task.body), options=opts):
-        meter.see(msg)
-        if isinstance(msg, ResultMessage):
-            entry = meter.state["tasks"].setdefault(task.id, {"title": task.title})
-            entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
-                                                 "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds"),
-                                                 **meter.used(before)})
-            store.save(meter.state)
-            if isinstance(msg.structured_output, dict):
-                result = msg.structured_output
-            elif msg.result and (m := re.search(r"\{.*\}", msg.result, re.S)):
-                try:
-                    result = json.loads(m.group(0))
-                except ValueError:
-                    pass
+    delays, tries = network_delays(), 0
+    while True:
+        try:
+            async for msg in query(prompt=ROUTER_PROMPT.format(notes=store.notes(), id=task.id, title=task.title, body=task.body), options=opts):
+                meter.see(msg)
+                if isinstance(msg, ResultMessage):
+                    entry = meter.state["tasks"].setdefault(task.id, {"title": task.title})
+                    entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
+                                                         "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds"),
+                                                         **meter.used(before)})
+                    store.save(meter.state)
+                    if isinstance(msg.structured_output, dict):
+                        result = msg.structured_output
+                    elif msg.result and (m := re.search(r"\{.*\}", msg.result, re.S)):
+                        try:
+                            result = json.loads(m.group(0))
+                        except ValueError:
+                            pass
+            break
+        except Exception as e:
+            if not is_transient(e) or tries >= len(delays):
+                raise
+            store.log(f"{task.id}: network error while routing ({str(e)[:120] or type(e).__name__}); retrying in {delays[tries]:g}s")
+            await asyncio.sleep(delays[tries])
+            tries += 1
     if not result or result.get("tier") not in TIER_ORDER:
         result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
     if task.tier in TIER_ORDER:
@@ -1513,35 +1581,52 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
     opts = options(p, model=t["model"], effort=t.get("effort"), max_turns=int(t["max_turns"]), max_budget_usd=float(t["budget_usd"]),
                    cwd=str(wt), permission_mode="acceptEdits", setting_sources=["project"], can_use_tool=guard(wt), env=gate_env)
     summary = ""
-    async with ClaudeSDKClient(options=opts) as client:
-        message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
-        for attempt in range(1, int(s["limits"]["retries_per_tier"]) + 1):
-            if meter.stop_reason():
-                return False, summary
-            before = meter.mark()
-            store.log(f"{task.id}: {tier} ({t['model']}{', ' + t['effort'] if t.get('effort') else ''}) attempt {attempt}")
-            await client.query(message)
-            async for msg in client.receive_response():
-                meter.see(msg)
-                if isinstance(msg, AssistantMessage):
-                    for b in msg.content:
-                        if isinstance(b, TextBlock):
-                            summary = b.text
-                if isinstance(msg, ResultMessage):
-                    entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
-                                                         "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
-                                                         "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.used(before)})
+    message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
+    attempts = int(s["limits"]["retries_per_tier"])
+    attempt, net_try, session_id, delays = 1, 0, None, network_delays()
+    while True:
+        # A network error (reset, refused, dropped ...) ends the connection, not the task: wait, reconnect to the same
+        # session and go on, instead of crashing the run (which counted against the task's retries).
+        try:
+            async with ClaudeSDKClient(options=replace(opts, resume=session_id) if session_id else opts) as client:
+                while attempt <= attempts:
+                    if meter.stop_reason():
+                        return False, summary
+                    before = meter.mark()
+                    store.log(f"{task.id}: {tier} ({t['model']}{', ' + t['effort'] if t.get('effort') else ''}) attempt {attempt}")
+                    await client.query(message)
+                    async for msg in client.receive_response():
+                        meter.see(msg)
+                        session_id = getattr(msg, "session_id", None) or session_id
+                        if isinstance(msg, AssistantMessage):
+                            for b in msg.content:
+                                if isinstance(b, TextBlock):
+                                    summary = b.text
+                        if isinstance(msg, ResultMessage):
+                            entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
+                                                                 "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
+                                                                 "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.used(before)})
+                            store.save(meter.state)
+                    ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
+                    if ok:
+                        return True, summary
+                    store.log(f"{task.id}: checks failed")
+                    entry["last_failure"] = failure[-1500:]
                     store.save(meter.state)
-            ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
-            if ok:
-                return True, summary
-            store.log(f"{task.id}: checks failed")
-            entry["last_failure"] = failure[-1500:]
-            store.save(meter.state)
-            if meter.stop_reason():
-                return False, summary
-            message = f"The checks failed. Fix the cause (not the check), then finish as before.\n\n{failure}"
-    return False, summary
+                    if meter.stop_reason():
+                        return False, summary
+                    message = f"The checks failed. Fix the cause (not the check), then finish as before.\n\n{failure}"
+                    attempt += 1
+            return False, summary
+        except Exception as e:
+            if not is_transient(e) or net_try >= len(delays):
+                raise
+            store.log(f"{task.id}: network error ({str(e)[:120] or type(e).__name__}); retrying in {delays[net_try]:g}s "
+                      f"(try {net_try + 1}/{len(delays)})")
+            if session_id:
+                message = "A network error interrupted you. Continue the task exactly where you left off."
+            await asyncio.sleep(delays[net_try])
+            net_try += 1
 
 
 def commit(p: Project, task: Task, wt: Path, tiers: str) -> str:
@@ -2002,10 +2087,6 @@ def import_project(src: Path | str, repo: str, new_name: str | None = None, acco
 # ----------------------------------------------------------------------------- build panel (user actions only)
 # The command is never taken from a request: it is the built-in build_exe.ps1 of the checked-out source, or
 # `[build] command` from the project's config. The build runs in its own worktree under <project>/build/src.
-
-import sys  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
 
 BUILD_KINDS = ("build", "clean", "custom")
 BUILD_SCRIPT = "build_exe.ps1"

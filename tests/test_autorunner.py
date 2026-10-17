@@ -185,7 +185,7 @@ def test_gate_failure_and_unmerged_branch_flagged_no_merge(project):
         server.autorun_project(project, lambda p, a: started.append(a), lambda p: (False, None))
     assert {(i["task"], i["kind"]) for i in server.project_attention(project)} >= {("001", "gate"), ("002", "unmerged")}
     assert started == []
-    assert calls and all(c[0] in ("rev-parse", "merge-base") for c in calls)  # read-only git only: no merge, no push
+    assert calls and all(c[0] in ("rev-parse", "merge-base", "for-each-ref") or c[:2] == ["branch", "--merged"] for c in calls)  # read-only git only: no merge, no push
     log = project.path("agentdesk.log").read_text(encoding="utf-8")
     assert "needs attention: 001 (gate)" in log and "needs attention: 002 (unmerged)" in log
     assert server.attention_all()["count"] >= 2

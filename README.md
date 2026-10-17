@@ -120,23 +120,7 @@ new chat session and keeps the messages on screen.
     Claude process that resumes the conversation, so the budget counts that message only; when it's
     reached the answer ends with *Stopped: … reached the Coworker budget*. The check runs after each
     model turn, so a message can go over by one turn.
-  - the account usage pause (`[limits] pause_at_utilization`): if the account's last reading is at or
-    over the threshold, the Coworker answers *Paused: …* instead of starting; if a reading crosses it
-    during a message, it stops there and says so.
-- **Planner** (plan first, work after your approval; model from `[chat.planner]`, default `sonnet`
-  at `effort = "medium"`, `budget_usd = 2.0` per message, the same usage pause as the Coworker).
-  Describe the work; the Planner reads the repository and the queue (Read, Glob, Grep only: it
-  can't edit files, run commands or start runs) and writes a plan with `propose_plan`: ordered
-  tasks, each with a goal, the files it touches, a tier and `depends`. The plan is a draft:
-  `plan.json` in the project folder plus draft task files in `tasks/drafts/` marked
-  `status = "draft"`, which Run next, Run all and Run never pick up. The chat shows it as a plan
-  card with the dependency order and a rough cost range, and three buttons:
-  - **Approve and start**: the drafts become real tasks (next free ids, in dependency order, their
-    `depends` mapped) and the queue starts as with **Run all** (the whole ready queue, not only the
-    plan). If a run is already going, the plan's tasks start when it ends; if the account is
-    paused, they're queued and the chat says so (press **Start** on the card later).
-  - **Edit**: type what should change; the Planner rewrites the draft with `update_plan`.
-  - **Cancel**: deletes the draft plan and its draft files.
+
 
   After approval the chat reports each plan task starting, finishing (branch and commit) or being
   blocked, and the run ending. A blocked task is only reported: the plan waits for you, and the

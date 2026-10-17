@@ -412,6 +412,7 @@ class Chat:
         self.pump: asyncio.Future | None = None  # reads the live session's messages (coworker live mode)
         self.drop = False  # the live process hit its spend limit: reconnect (resume) on the next message
         self.last_checkup = 0.0
+        self._saved_at = 0.0
         self.watching_run = False
 
     # -- the visible transcript, kept in chat.json so it survives a restart (the SDK session does not)
@@ -766,7 +767,6 @@ class Chat:
     async def _ask(self, text: str) -> dict:
         mode = core.chat_mode(self.p)
         coworker = mode in AUTONOMOUS  # coworker or planner: per-message budget and the usage pause
-        label = mode.title()
         acct = self.p.account.get("name", "default")
         gen = self.generation
         if coworker:
@@ -859,10 +859,14 @@ class Chat:
         with self.note_lock:
             self.seq += 1
             self.history.append({**entry, "seq": self.seq})
-            try:
-                self.save_history()
-            except OSError:
-                pass
+            # chat.json is the whole transcript: rewriting it for every streamed entry is O(n) each time. At most once
+            # a second here; a finished burst (the result entry, with a cost) always saves.
+            if entry.get("cost") is not None or time.time() - self._saved_at >= 1.0:
+                try:
+                    self.save_history()
+                    self._saved_at = time.time()
+                except OSError:
+                    pass
 
     def _live_event(self, msg, calls: dict, acct: str) -> None:
         if isinstance(msg, RateLimitEvent):
@@ -1113,10 +1117,13 @@ class Chat:
                 self.p.path("chat.json").unlink(missing_ok=True)
                 self.p.path("chat_memory.md").unlink(missing_ok=True)
 
-    def info(self) -> dict:
+    def info(self, since: int | None = None) -> dict:
+        """The chat state. `since`: only the entries added after that seq (the page polls often; the whole
+        transcript is 100 KB and more), else the whole transcript."""
         mode = core.chat_mode(self.p)
         cs = core.chat_settings(mode)
-        out = {"history": self.history, "mode": mode, "busy": self.busy, "model": cs["model"], "seq": self.seq}
+        history = self.history if since is None else [m for m in list(self.history) if m.get("seq", 0) > since]
+        out = {"history": history, "mode": mode, "busy": self.busy, "model": cs["model"], "seq": self.seq}
         if mode in AUTONOMOUS:
             out.update(budget_usd=float(cs["budget_usd"]))
         out["live"] = self.is_live()
@@ -1483,17 +1490,44 @@ def project_state(p: core.Project) -> dict:
             "tiers": {k: {"model": v["model"], "effort": v.get("effort")} for k, v in s["tiers"].items()}}
 
 
+def quiet_errors(srv):
+    """A page that closed or gave up on a request is normal: don't log a traceback for it every time."""
+    orig = getattr(srv, "handle_error", None)
+    if orig is None:
+        return srv
+
+    def handle_error(request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionAbortedError, ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        orig(request, client_address)
+
+    srv.handle_error = handle_error
+    return srv
+
+
 _OV: tuple[float, dict] | None = None
+_OV_BUSY = threading.Lock()
+
+
+def _overview_refresh() -> None:
+    global _OV
+    try:
+        _OV = (time.time(), _overview())
+    finally:
+        _OV_BUSY.release()
 
 
 def overview() -> dict:
-    """Cached for 3 s: every open page polls it, and it walks all projects."""
-    global _OV
-    if _OV and time.time() - _OV[0] < 3:
+    """Fresh for 3 s. After that the last answer is returned at once while one background thread recomputes it
+    (it walks every project and runs git): a dashboard request never waits for the walk, except the very first."""
+    if _OV is None:
+        with _OV_BUSY:  # first call (or several at once): compute once, the others wait for it
+            if _OV is None:
+                globals()["_OV"] = (time.time(), _overview())
         return _OV[1]
-    out = _overview()
-    _OV = (time.time(), out)
-    return out
+    if time.time() - _OV[0] >= 3 and _OV_BUSY.acquire(blocking=False):
+        threading.Thread(target=_overview_refresh, daemon=True, name="overview").start()
+    return _OV[1]
 
 
 def _overview() -> dict:
@@ -1728,7 +1762,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[3] == "build":
                 return self.json(core.build_job(p).info())
             if len(parts) == 4 and parts[3] == "chat":
-                return self.json(chat(p).info())
+                since = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("since", [""])[0]
+                return self.json(chat(p).info(int(since) if since.isdigit() else None))
             if len(parts) == 4 and parts[3] == "pending":
                 return self.json({"pending": chat(p).approvals.pending()})
             if len(parts) == 5 and parts[3] == "task":
@@ -1980,8 +2015,12 @@ def open_window(url: str, tray: bool = False) -> bool:
         def closed():
             try:
                 for k in ("width", "height", "x", "y"):
-                    if k not in geo and isinstance(getattr(win, k, None), (int, float)):
-                        geo[k] = int(getattr(win, k))
+                    try:  # on a window that is closing these can raise (not only AttributeError)
+                        v = getattr(win, k, None)
+                    except Exception:
+                        v = None
+                    if k not in geo and isinstance(v, (int, float)):
+                        geo[k] = int(v)
                 window_settings({k: v for k, v in geo.items() if v is not None})
             except Exception as e:  # best effort
                 log_error(f"AgentDesk: could not save window position: {e}")
@@ -2028,7 +2067,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
         log = (core.DATA / "agentdesk.log").open("a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stdout or log
         sys.stderr = sys.stderr or log
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    server = quiet_errors(ThreadingHTTPServer(("127.0.0.1", port), Handler))
     pid_file().write_text(str(os.getpid()), encoding="utf-8")
     print(f"AgentDesk at {url}  (data: {core.DATA}; stop with `python -m agentdesk stop` — runs keep going)")
     thread = threading.Thread(target=server.serve_forever, daemon=True)

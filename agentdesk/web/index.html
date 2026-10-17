@@ -551,11 +551,12 @@ async function send() {
       for (;;) {
         await new Promise(res => setTimeout(res, 1500));
         if (forProject !== cur) break;
-        try { h = await api(`/api/p/${cur}/chat`); fails = 0; } catch { if (++fails > 40) throw new Error("lost the connection to AgentDesk"); continue; }
+        try { h = await api(`/api/p/${cur}/chat?since=999999999`); fails = 0; } catch { if (++fails > 40) throw new Error("lost the connection to AgentDesk"); continue; }
         if (!h.busy) break;
       }
       wait.remove();
       if (forProject === cur && h) {
+        h = await api(`/api/p/${cur}/chat`);  // the whole transcript once, now that the answer is complete
         await fetchNotes();
         const last = h.history.slice(base + 1).filter(m => m.role === "assistant" && m.kind !== "progress").pop();
         if (last) addMsg("assistant", last.text, last);
@@ -597,7 +598,7 @@ async function setMode(mode) {
 // Progress notes (plan approved, task started/done/blocked, run ended) the server adds to the chat.
 let lastSeq = 0;
 async function fetchNotes() {
-  const h = await api(`/api/p/${cur}/chat`);
+  const h = await api(`/api/p/${cur}/chat?since=${lastSeq}`);
   for (const m of h.history) if ((m.kind === "progress" || m.kind === "live") && m.seq > lastSeq) addMsg(m.role, m.text, m);
   lastSeq = Math.max(lastSeq, h.seq || 0);
 }
