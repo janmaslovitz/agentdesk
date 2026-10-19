@@ -319,7 +319,8 @@ function shell() {
   <div class="stats">
     <div class="card"><div class="k">Spent by agents</div><div class="v num" id="spent"></div><div class="s" id="budget"></div></div>
     <div class="card"><div class="k">Tokens</div><div class="v num" id="tok"></div><div class="s num" id="tokd"></div></div>
-    <div class="card"><div class="k">Account usage</div><div class="v num" id="rl">–</div><div class="bar"><i id="rlbar" style="width:0"></i></div><div class="s" id="rld">no reading yet</div></div>
+    <div class="card"><div class="k">Account usage</div><div class="s" style="display:flex;justify-content:space-between;margin-top:6px"><span>5 h window</span><b class="num" id="rl">–</b></div><div class="bar" style="margin-top:3px"><i id="rlbar" style="width:0"></i></div>
+      <div class="s" style="display:flex;justify-content:space-between;margin-top:8px"><span>Week</span><b class="num" id="rlw">–</b></div><div class="bar" style="margin-top:3px"><i id="rlwbar" style="width:0"></i></div><div class="s" id="rld">no reading yet</div></div>
     <div class="card"><div class="k">Chat</div><div class="v num" id="chatc"></div><div class="s num" id="chatt"></div></div>
   </div>
   <div class="grid">
@@ -453,12 +454,18 @@ async function refreshOnce() {
   $("chatc").textContent = money(st.chat.spent_usd); $("chatt").textContent = fmt(sumTok(st.chat.tokens)) + " tokens";
   const rd = st.reading, lims = Object.values(st.usage||{}).filter(l => l.resets_at);
   if (rd) {
-    const u = rd.utilization;
-    $("rl").textContent = Math.round(u*100) + "%"; $("rlbar").style.width = Math.min(100, u*100) + "%";
-    $("rlbar").style.background = rd.stale ? "var(--muted)" : u >= .9 ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
+    const hasWin = rd.five_hour != null || rd.seven_day != null;
+    const setBar = (id, u) => {
+      const t = $(id), b = $(id + "bar");
+      if (u == null) { t.textContent = "–"; b.style.width = "0"; return; }
+      t.textContent = Math.round(u*100) + "%"; b.style.width = Math.min(100, u*100) + "%";
+      b.style.background = rd.stale ? "var(--muted)" : u >= .9 ? "var(--bad)" : u >= .6 ? "var(--warn)" : "var(--ok)";
+    };
+    setBar("rl", hasWin ? rd.five_hour : rd.utilization);
+    setBar("rlw", hasWin ? rd.seven_day : null);
     $("rld").innerHTML = readingText(rd, st.max_age_min, st.auto_error);
   } else {
-    $("rl").textContent = "unknown"; $("rlbar").style.width = "0";
+    $("rl").textContent = "unknown"; $("rlbar").style.width = "0"; $("rlw").textContent = "–"; $("rlwbar").style.width = "0";
     $("rld").textContent = "usage unknown — enter it under Accounts";
   }
   $("tiers").textContent = Object.entries(st.tiers).map(([k,v]) => `${k}: ${v.model}${v.effort?" ("+v.effort+")":""}`).join(" · ");
