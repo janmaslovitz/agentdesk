@@ -841,7 +841,7 @@ class Chat:
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
                             disallowed_tools=[], permission_mode="default", can_use_tool=self.coworker_permission,
-                            setting_sources=[], env=gate_env, agents=live_agents(), stderr=self._on_stderr)
+                            setting_sources=[], env={**gate_env, "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}, agents=live_agents(), stderr=self._on_stderr)
 
     def daily_spent(self) -> float:
         d = self.usage().get("daily") or {}
@@ -901,6 +901,11 @@ class Chat:
             mark = "✓" if str(msg.status) in ("completed", "done", "success") else "✗"
             self.note(f"{mark} Background task {msg.status}: {(msg.summary or msg.task_id or '')[:300]}")
         elif isinstance(msg, SystemMessage):
+            if getattr(msg, "subtype", "") == "session_state_changed" and isinstance(msg.data, dict):
+                # the CLI says it is idle: no turn is owed, so the "working" indicator must stop (a stray late message
+                # after the result used to leave `busy` on for good)
+                if msg.data.get("state") == "idle" and not calls:
+                    self.busy = False
             sid = (msg.data or {}).get("session_id") if isinstance(msg.data, dict) else None
             if sid:
                 self.session_id = str(sid)

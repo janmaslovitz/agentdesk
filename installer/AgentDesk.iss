@@ -28,7 +28,9 @@ VersionInfoProductVersion={#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-CloseApplications=yes
+; Restart Manager can't close AgentDesk's own helper processes (the bundled claude.exe has no window), so "force close"
+; used to hang. NextButtonClick below ends everything running from the install folder first.
+CloseApplications=no
 RestartApplications=no
 
 [Tasks]
@@ -74,6 +76,25 @@ begin
     ShellExec('open', Url, '', '', SW_SHOWNORMAL, ewNoWait, rc);
 end;
 
+procedure StopAppProcesses(const Dir: String);
+var
+  rc: Integer;
+  ps: String;
+begin
+  ps := '$d = ''' + RemoveBackslash(Dir) + '\*''; ' +
+        'Get-Process | Where-Object { $_.Path -like $d } | Stop-Process -Force -ErrorAction SilentlyContinue';
+  Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "' + ps + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, rc);
+  Sleep(500);
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  if CurPageID = wpReady then
+    StopAppProcesses(WizardDirValue);
+  Result := True;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssPostInstall) and not WizardSilent then
@@ -85,6 +106,12 @@ begin
       OfferLink('Microsoft Edge WebView2 Runtime was not found. AgentDesk needs it for its window (Windows 11 has it); ' +
         'without it AgentDesk opens in your browser instead.', 'https://developer.microsoft.com/microsoft-edge/webview2/');
   end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  StopAppProcesses(ExpandConstant('{app}'));
+  Result := True;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
