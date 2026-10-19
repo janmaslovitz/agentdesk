@@ -2,7 +2,7 @@
 Builds dist\AgentDesk\AgentDesk.exe (PyInstaller, no Python needed to run it) and a Desktop shortcut "AgentDesk".
   .\build_exe.ps1 [-NoDesktopShortcut]
 #>
-param([switch]$NoDesktopShortcut)
+param([switch]$DesktopShortcut)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 $venv = Join-Path $PSScriptRoot ".venv-build"
@@ -23,7 +23,7 @@ $exe = Join-Path $PSScriptRoot "dist\AgentDesk\AgentDesk.exe"
 if (-not (Test-Path $exe)) { throw "build produced no $exe" }
 Write-Host "Built $exe"
 
-if (-not $NoDesktopShortcut) {
+if ($DesktopShortcut) {
     $lnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "AgentDesk.lnk"
     $sh = New-Object -ComObject WScript.Shell
     $s = $sh.CreateShortcut($lnk)   # opens the existing shortcut if there is one: re-running updates it

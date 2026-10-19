@@ -9,7 +9,7 @@ Set-Location $PSScriptRoot
 if (-not $Version) { $Version = (& python tools\release.py current).Trim() }   # the version in agentdesk\__init__.py
 if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "version must be x.y.z, not '$Version'" }
 if (-not $SkipExe) {
-    & "$PSScriptRoot\build_exe.ps1" -NoDesktopShortcut
+    & "$PSScriptRoot\build_exe.ps1"
     if (-not $?) { throw "build_exe.ps1 failed" }
 }
 if (-not (Test-Path "dist\AgentDesk\AgentDesk.exe")) { throw "dist\AgentDesk\AgentDesk.exe is missing; run without -SkipExe" }
