@@ -291,3 +291,27 @@ def test_state_and_chat_report_idle_seconds(chat):
     assert wait(lambda: chat.busy and entries(chat))
     chat.last_event = time.time() - 50
     assert 49 <= chat.info()["idle_s"] <= 60
+
+
+def test_interrupt_when_idle_leaves_a_note_and_no_bar(chat):
+    assert chat.interrupt() is False and not chat.busy
+    assert any("Nothing to stop" in m["text"] for m in entries(chat, "progress"))
+
+
+def test_interrupt_clears_busy(chat):
+    LiveFake.script = [[say("working")]]
+    chat.start("go")
+    assert wait(lambda: chat.busy)
+    assert chat.interrupt() is True and not chat.busy
+    assert any("Interrupted" in m["text"] for m in entries(chat, "progress"))
+
+
+def test_a_stray_message_after_the_result_does_not_stay_busy(chat):
+    LiveFake.script = [[result(0.01)]]
+    chat.start("hi")
+    assert wait(lambda: not chat.busy)
+    asyncio.run_coroutine_threadsafe(LiveFake.made[0].q.put(say("late")), server.LOOP).result(2)
+    assert wait(lambda: chat.busy)
+    assert chat.is_busy() is True
+    chat.last_event -= 60  # nothing heard for a while, no tool running
+    assert chat.is_busy() is False

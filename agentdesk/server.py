@@ -401,6 +401,7 @@ class Chat:
         self.lock = threading.Lock()
         self.approvals = Approvals(loop)
         self.busy = False
+        self.auto_turn = False  # busy only because the CLI spoke unprompted (may be a stray late message)
         self.model = ""
         self.mode = ""  # the mode the current session was started in
         self.session_id: str | None = None  # the CLI session; coworker messages resume it in a new process
@@ -910,6 +911,8 @@ class Chat:
             if sid:
                 self.session_id = str(sid)
         elif isinstance(msg, AssistantMessage):
+            if not self.busy:
+                self.auto_turn = True
             self.busy = True  # also when the CLI started a turn by itself (a finished background job)
             sub = bool(getattr(msg, "parent_tool_use_id", None))
             texts = []
@@ -940,7 +943,7 @@ class Chat:
         tokens = core.usage_tokens(msg.usage)
         self.session_cost, self.session_id = total, msg.session_id or self.session_id
         self._record_usage(cost, tokens)
-        self.busy = False
+        self.busy, self.auto_turn = False, False
         cs = core.chat_settings("coworker")
         burst, daily = float(cs["budget_usd"]), float(cs.get("daily_budget_usd") or 0)
         notes = []
@@ -979,7 +982,7 @@ class Chat:
                 self.note(f"⚠ The live session ended: {e or type(e).__name__}. The next message starts it again.")
         finally:
             if gen == self.generation:
-                self.busy = False
+                self.busy, self.auto_turn = False, False
                 self.live_calls.clear()
                 if self.client is client:
                     self.client = None
@@ -1003,7 +1006,7 @@ class Chat:
         client = await self._client("coworker")
         if self.pump is None or self.pump.done():
             self.pump = asyncio.ensure_future(self._pump(client, self.generation))
-        self.busy = True
+        self.busy, self.auto_turn = True, False
         self.last_event, self.idle_warned = time.time(), False
         await client.query(text)
         return {"started": True, "live": True}
@@ -1021,11 +1024,25 @@ class Chat:
         except Exception as e:
             self.note(f"{label}: couldn't reach the Coworker ({e or type(e).__name__})")
 
+    def settle(self, quiet_s: float = 45) -> None:
+        """A "turn" only inferred from an unprompted message, with nothing running and nothing heard for a while, is over
+        (a stray message after the result must not leave "working…" on for good)."""
+        if self.busy and self.auto_turn and not self.live_calls and time.time() - self.last_event >= quiet_s:
+            self.busy = self.auto_turn = False
+
+    def is_busy(self) -> bool:
+        self.settle()
+        return self.busy
+
     def interrupt(self) -> bool:
-        client = self.client
-        if client is None or not self.busy:
+        """Stop the running reply. Always answers in the chat; always leaves `busy` off."""
+        client, was_busy = self.client, self.busy
+        self.busy = self.auto_turn = False
+        if not was_busy:
+            self.note("Nothing to stop: no reply is running.")
             return False
-        asyncio.run_coroutine_threadsafe(client.interrupt(), self.loop)
+        if client is not None:
+            asyncio.run_coroutine_threadsafe(client.interrupt(), self.loop)
         self.note("■ Interrupted by you.")
         return True
 
@@ -1154,7 +1171,7 @@ class Chat:
         mode = core.chat_mode(self.p)
         cs = core.chat_settings(mode)
         history = self.history if since is None else [m for m in list(self.history) if m.get("seq", 0) > since]
-        out = {"history": history, "mode": mode, "busy": self.busy, "model": cs["model"], "seq": self.seq}
+        out = {"history": history, "mode": mode, "busy": self.is_busy(), "model": cs["model"], "seq": self.seq}
         if mode in AUTONOMOUS:
             out.update(budget_usd=float(cs["budget_usd"]))
         out["live"] = self.is_live()
@@ -1512,7 +1529,7 @@ def project_state(p: core.Project) -> dict:
                         "chat_model": cs["model"] + (f" ({cs['effort']})" if cs.get("effort") else ""),
                         "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
             "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
-            "plan": plan, "chat_seq": chat(p).seq, "chat_busy": chat(p).busy, "chat_live": chat(p).is_live(), "chat_idle_s": chat(p).idle_s(),
+            "plan": plan, "chat_seq": chat(p).seq, "chat_busy": chat(p).is_busy(), "chat_live": chat(p).is_live(), "chat_idle_s": chat(p).idle_s(),
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),
