@@ -407,7 +407,9 @@ class Chat:
         self.session_id: str | None = None  # the CLI session; coworker messages resume it in a new process
         self.session_cost = 0.0  # the session's running total_cost_usd (the CLI reports totals, not per message)
         self.generation = 0  # bumped by reset, so an answer still coming in doesn't revive the old session
-        self.seq = 0  # numbers the progress notes, so the page can fetch the new ones
+        # numbers the progress notes, so the page can fetch the new ones; continues after the saved transcript, or a
+        # restart reuses old numbers and the page re-adds old entries
+        self.seq = max([int(m.get('seq') or 0) for m in self.history] or [0])
         self.note_lock = threading.Lock()
         self.watcher: threading.Thread | None = None
         self.pump: asyncio.Future | None = None  # reads the live session's messages (coworker live mode)
