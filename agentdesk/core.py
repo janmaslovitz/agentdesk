@@ -37,6 +37,9 @@ from claude_agent_sdk import (
     RateLimitEvent,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
     query,
 )
 
@@ -1610,6 +1613,91 @@ def network_delays() -> list[float]:
     return [float(x) for x in d] if isinstance(d, list) and d else []
 
 
+def tool_summary(name: str, args: dict) -> str:
+    """A one-line description of a tool call's input (command, file, pattern or the JSON arguments)."""
+    if name in ("Bash", "PowerShell"):
+        return str(args.get("command", ""))
+    if args.get("file_path"):
+        return str(args["file_path"])
+    if args.get("pattern"):
+        return str(args["pattern"]) + (f"  in {args['path']}" if args.get("path") else "")
+    return json.dumps(args, ensure_ascii=False)[:300] if args else ""
+
+
+def result_text(content) -> str:
+    if isinstance(content, list):
+        return "\n".join(str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return str(content or "")
+
+
+ACTIVITY_TEXT = 400              # chars kept of a text snippet, tool input or error
+ACTIVITY_MAX_BYTES = 512 * 1024  # per task file; past it only the key events (start, result, check, retry ...) are kept
+ACTIVITY_KEY = {"start", "routed", "result", "check", "retry", "network_retry", "escalate"}
+FILE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
+
+def activity_path(p: Project, task_id: str) -> Path:
+    return p.path("runs") / f"{task_id}.jsonl"
+
+
+class Activity:
+    """The compact, append-only timeline of a task's runs: `runs/<id>.jsonl`, one JSON event per line (router and
+    worker tool calls, files touched, text snippets, tool errors, results, checks, retries). Sizes are capped. A line
+    is written with one call, so a reader sees whole lines (a torn last line is skipped by `read_activity`)."""
+
+    def __init__(self, p: Project, task_id: str, role: str):
+        self.path, self.role = activity_path(p, task_id), role
+        self.calls: dict[str, str] = {}
+
+    def add(self, kind: str, **fields) -> None:
+        try:
+            if kind not in ACTIVITY_KEY and self.path.exists() and self.path.stat().st_size > ACTIVITY_MAX_BYTES:
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            ev = {"at": dt.datetime.now().isoformat(timespec="seconds"), "role": self.role, "kind": kind}
+            ev.update({k: (v[:ACTIVITY_TEXT] + "…" if isinstance(v, str) and len(v) > ACTIVITY_TEXT else v)
+                       for k, v in fields.items() if v is not None})
+            with self.path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # the timeline is a convenience: never fail a run over it
+
+    def see(self, msg) -> None:
+        if isinstance(msg, AssistantMessage):
+            for b in msg.content:
+                if isinstance(b, TextBlock) and b.text.strip():
+                    self.add("text", text=b.text.strip())
+                elif isinstance(b, ToolUseBlock):
+                    args = b.input or {}
+                    self.calls[b.id] = b.name
+                    path = args.get("file_path") or args.get("notebook_path")
+                    self.add("tool", name=b.name, input=tool_summary(b.name, args),
+                             file=str(path) if path and b.name in FILE_TOOLS else None)
+        elif isinstance(msg, UserMessage) and isinstance(msg.content, list):
+            for b in msg.content:
+                if isinstance(b, ToolResultBlock) and b.is_error:
+                    self.add("tool_error", name=self.calls.get(b.tool_use_id, ""), text=result_text(b.content))
+        elif isinstance(msg, ResultMessage):
+            self.add("result", turns=msg.num_turns, cost_usd=msg.total_cost_usd, tokens=usage_tokens(msg.usage),
+                     error=bool(msg.is_error), subtype=msg.subtype, text=(msg.result or None) if msg.is_error else None)
+
+
+def read_activity(p: Project, task_id: str, limit: int = 500) -> list[dict]:
+    """The last `limit` events of a task's timeline (unreadable lines skipped)."""
+    f = activity_path(p, task_id)
+    if not f.is_file():
+        return []
+    out = []
+    for line in f.read_text(encoding="utf-8", errors="replace").splitlines()[-limit:]:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            out.append(ev)
+    return out
+
+
 async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
     r = settings()["router"]
     opts = options(p, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
@@ -1618,13 +1706,17 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
     result = None
     before = meter.mark()
     delays, tries = network_delays(), 0
+    act = Activity(p, task.id, "router")
+    act.add("start", tier="router", model=r["model"], effort=r.get("effort"))
     while True:
         try:
             async for msg in query(prompt=ROUTER_PROMPT.format(notes=store.notes(), id=task.id, title=task.title, body=task.body), options=opts):
                 meter.see(msg)
+                act.see(msg)
                 if isinstance(msg, ResultMessage):
                     entry = meter.state["tasks"].setdefault(task.id, {"title": task.title})
-                    entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
+                    entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "effort": r.get("effort"),
+                                                         "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
                                                          "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds"),
                                                          **meter.used(before)})
                     store.save(meter.state)
@@ -1640,12 +1732,14 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
             if not is_transient(e) or tries >= len(delays):
                 raise
             store.log(f"{task.id}: network error while routing ({str(e)[:120] or type(e).__name__}); retrying in {delays[tries]:g}s")
+            act.add("network_retry", text=str(e)[:200] or type(e).__name__, delay_s=delays[tries])
             await asyncio.sleep(delays[tries])
             tries += 1
     if not result or result.get("tier") not in TIER_ORDER:
         result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
     if task.tier in TIER_ORDER:
         result.update(tier=task.tier, why="set in the task file")
+    act.add("routed", tier=result.get("tier"), text=result.get("why", ""))
     return result
 
 
@@ -1660,6 +1754,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
     message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
     attempts = int(s["limits"]["retries_per_tier"])
     attempt, net_try, session_id, delays = 1, 0, None, network_delays()
+    act = Activity(p, task.id, "worker")
     while True:
         # A network error (reset, refused, dropped ...) ends the connection, not the task: wait, reconnect to the same
         # session and go on, instead of crashing the run (which counted against the task's retries).
@@ -1670,20 +1765,25 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                         return False, summary
                     before = meter.mark()
                     store.log(f"{task.id}: {tier} ({t['model']}{', ' + t['effort'] if t.get('effort') else ''}) attempt {attempt}")
+                    act.add("start", tier=tier, model=t["model"], effort=t.get("effort"), attempt=attempt)
                     await client.query(message)
                     async for msg in client.receive_response():
                         meter.see(msg)
+                        act.see(msg)
                         session_id = getattr(msg, "session_id", None) or session_id
                         if isinstance(msg, AssistantMessage):
                             for b in msg.content:
                                 if isinstance(b, TextBlock):
                                     summary = b.text
                         if isinstance(msg, ResultMessage):
-                            entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
+                            entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "effort": t.get("effort"),
+                                                                 "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
                                                                  "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
                                                                  "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.used(before)})
                             store.save(meter.state)
                     ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
+                    gates = p.cfg.get("gates", {}).get("quick", [])
+                    act.add("check", ok=ok, gates=len(gates), text="; ".join(gates) if ok else failure[-ACTIVITY_TEXT:])
                     if ok:
                         return True, summary
                     store.log(f"{task.id}: checks failed")
@@ -1693,12 +1793,15 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                         return False, summary
                     message = f"The checks failed. Fix the cause (not the check), then finish as before.\n\n{failure}"
                     attempt += 1
+                    if attempt <= attempts:
+                        act.add("retry", attempt=attempt, text="checks failed; the worker is asked to fix the cause")
             return False, summary
         except Exception as e:
             if not is_transient(e) or net_try >= len(delays):
                 raise
             store.log(f"{task.id}: network error ({str(e)[:120] or type(e).__name__}); retrying in {delays[net_try]:g}s "
                       f"(try {net_try + 1}/{len(delays)})")
+            act.add("network_retry", text=str(e)[:200] or type(e).__name__, delay_s=delays[net_try], resume=bool(session_id))
             if session_id:
                 message = "A network error interrupted you. Continue the task exactly where you left off."
             await asyncio.sleep(delays[net_try])
@@ -1762,6 +1865,7 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
         tier = settings()["tiers"][tier].get("next")
         if tier:
             store.log(f"{task.id}: escalating to {tier}")
+            Activity(p, task.id, "orchestrator").add("escalate", tier=tier)
     entry["status"] = "blocked"
     store.save(state)
     store.log(f"{task.id}: blocked after {' → '.join(tried)}")
@@ -1819,6 +1923,9 @@ MAX_TOTAL_BYTES = 100 * 1024 * 1024    # everything in an import
 MAX_ENTRIES = 5000
 _EXPORT_TOP = ("project.toml", "notes.md", "state.json", "agentdesk.log")
 _EXPORT_DIRS = ("tasks", "reports")
+# runs/<id>.jsonl (the per-task run timelines) hold tool inputs and model text like agentdesk.log does, so they are
+# logs: exported only with include_logs (redacted like everything else) and accepted back on import.
+_EXPORT_LOG_DIRS = ("runs",)
 _SECRET_KEY = re.compile(r"key|token|secret|passw|credential|auth", re.I)
 _SECRET_TEXT = re.compile(r"sk-ant-[A-Za-z0-9_\-]{8,}|\b(?:ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}")
 
@@ -1908,7 +2015,7 @@ def export_files(p: Project, include_logs: bool = False) -> dict[str, bytes]:
         if f.is_file() and (n != "agentdesk.log" or include_logs):
             text = f.read_text(encoding="utf-8", errors="replace")
             add(n, (_portable_toml(text) if n == "project.toml" else text).encode("utf-8"))
-    for d in _EXPORT_DIRS:
+    for d in _EXPORT_DIRS + (_EXPORT_LOG_DIRS if include_logs else ()):
         for f in sorted(p.path(d).rglob("*")) if p.path(d).is_dir() else []:
             if f.is_file() and not f.is_symlink():
                 add(f.relative_to(p.dir).as_posix(), f.read_bytes())
@@ -2012,7 +2119,7 @@ def _safe_rel(name: str) -> str | None:
 
 
 def _wanted(rel: str) -> bool:
-    return rel in _EXPORT_TOP or (rel.split("/")[0] in _EXPORT_DIRS and "/" in rel) or re.fullmatch(r"chat[^/]*\.json", rel) is not None
+    return rel in _EXPORT_TOP or (rel.split("/")[0] in _EXPORT_DIRS + _EXPORT_LOG_DIRS and "/" in rel) or re.fullmatch(r"chat[^/]*\.json", rel) is not None
 
 
 def _read_zip(path: Path) -> tuple[dict, dict[str, bytes]]:
