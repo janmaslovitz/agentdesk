@@ -5,6 +5,11 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- Chat: the "working..." bar no longer stays visible when idle (CSS `display:flex` overrode `hidden`).
+- Chat: no more jumping - the view follows new messages only when you are at the bottom; switching projects while the
+  chat loads no longer mixes projects; the task detail panel is no longer rebuilt on every poll.
+- Chat: after a restart, message numbering continues from the saved transcript (old entries were re-added).
 
 ## 1.1.1 - 2026-10-17
 
