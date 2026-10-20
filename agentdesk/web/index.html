@@ -54,9 +54,14 @@ tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel {
 .st { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
 .st.done { color: var(--ok); } .st.blocked { color: var(--bad); } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; } .muted { color: var(--muted); }
-.detail { padding: 12px 14px; border-top: 1px solid var(--line); max-height: 360px; overflow: auto; }
+.detail { padding: 12px 14px; border-top: 1px solid var(--line); max-height: 560px; overflow: auto; }
 pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .detail h4 { font-size: 13px; margin: 10px 0 4px; }
+.detail .sec { border-top: 1px solid var(--line); padding: 6px 0; } .detail .sec:first-of-type { margin-top: 8px; }
+.detail .sec > summary { cursor: pointer; padding: 2px 0; } .detail .sec td { vertical-align: top; overflow-wrap: anywhere; }
+.detail .box { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 6px; padding: 6px 8px; margin: 4px 0; }
+.detail .tl .ev { font: 12px/1.5 var(--mono); padding: 1px 0; } .detail .tl .ev pre { margin: 2px 0 2px 16px; }
+.detail .ok { color: var(--ok); } .detail .bad { color: var(--bad); } .detail .warn { color: var(--warn); }
 .log { padding: 0 14px; max-height: 240px; overflow: auto; }
 .msgs { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; min-height: 300px; max-height: 520px; }
 .msg { padding: 8px 11px; border-radius: 10px; max-width: 92%; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -503,20 +508,69 @@ async function openAttention(id, what) {
   await pickTask(id);
 }
 async function pickTask(id) { selTask = id; await showDetail(true); refresh(); }
-let detailCache = null;
+// The task detail: Prompt → Orchestrator handoff → Agent work → Agent report, as <details> sections. The text is
+// fetched again only when the task's status or run count changes, and the panel is rebuilt only when its HTML
+// changes, so polling keeps the scroll position and which sections are open.
+let detailCache = null, detailKey = "";
+const detailOpen = {};  // "<task>:<section>" -> open, as the user left it
+const mdBlock = s => md(s).replace(/^#{1,6} (.+)$/gm, "<b>$1</b>");
+function detailToggle(sum) { const el = sum.parentElement; detailOpen[selTask + ":" + el.dataset.k] = !el.open; }  // a click on <summary>: before it toggles
+function evLine(e) {
+  const who = e.role === "router" ? "Router" : e.role === "worker" ? "Worker" : "Orchestrator";
+  switch (e.kind) {
+    case "start": return `<b>${who} started</b> ${esc(e.tier||"")} · ${esc(e.model||"")}${e.effort?` (${esc(e.effort)})`:""}${e.attempt?` · attempt ${esc(e.attempt)}`:""}`;
+    case "routed": return `<b>Routed to ${esc(e.tier)}</b> <span class="muted">${esc(e.text||"")}</span>`;
+    case "tool": return `<b>${esc(e.name)}</b> ${esc(e.input||"")}`;
+    case "tool_error": return `<b class="bad">${esc(e.name||"tool")} failed</b> ${esc(e.text||"")}`;
+    case "text": return `<span class="muted">${esc(e.text||"")}</span>`;
+    case "result": return `<b${e.error?' class="bad"':""}>${who} finished${e.error?` with an error (${esc(e.subtype||"")})`:""}</b> · ${esc(e.turns||0)} turns · ${fmt(sumTok(e.tokens))} tokens · ${money(e.cost_usd)}${e.text?` — ${esc(e.text)}`:""}`;
+    case "check": return e.ok ? `<b class="ok">Checks passed</b> <span class="muted">${esc(e.text||"(no checks configured)")}</span>` : `<b class="bad">Checks failed</b><pre>${esc(e.text||"")}</pre>`;
+    case "retry": return `<b class="warn">Retry, attempt ${esc(e.attempt)}</b> ${esc(e.text||"")}`;
+    case "network_retry": return `<b class="warn">Network error, retrying in ${esc(e.delay_s)}s</b> ${esc(e.text||"")}`;
+    case "escalate": return `<b class="warn">Escalated to ${esc(e.tier)}</b>`;
+    default: return `<b>${esc(e.kind)}</b> ${esc(e.text||"")}`;
+  }
+}
 async function showDetail(fetchText) {
   const t = st?.tasks.find(x => x.id === selTask); if (!t) return;
-  if (fetchText || !detailCache || detailCache.id !== selTask) detailCache = {id: selTask, ...(await api(`/api/p/${cur}/task/${encodeURIComponent(selTask)}`))};
-  const d = detailCache;
-  const runs = t.runs.map(x => `<tr><td>${esc(x.at||"")}</td><td>${esc(x.tier)}</td><td>${esc(x.model)}</td><td class="num">${x.attempt||""}</td><td class="num">${x.turns||""}</td><td class="num">${fmt(sumTok(x.tokens))}</td><td class="num">${money(x.cost_usd)}</td><td class="num">${x.usage_used_pct==null?"unknown":x.usage_used_pct+"%"}</td><td>${x.error?"error":""}</td></tr>`).join("");
+  const key = `${selTask}|${t.status}|${t.runs.length}`;
+  if (fetchText || !detailCache || detailCache.id !== selTask || detailKey !== key) {
+    const d = await api(`/api/p/${cur}/task/${encodeURIComponent(selTask)}`);
+    if (selTask !== t.id) return;  // another task was picked meanwhile
+    detailCache = {id: t.id, ...d}; detailKey = key;
+  }
+  const d = detailCache, h = d.handoff || {}, act = d.activity || [], tot = d.totals || {}, pending = t.status === "pending";
+  const kv = (k, v) => v ? `<tr><td class="muted">${k}</td><td>${v}</td></tr>` : "";
+  const runs = (h.runs || t.runs).map(x => `<tr><td>${esc(x.at||"")}</td><td>${esc(x.tier)}</td><td>${esc(x.model)}${x.effort?` (${esc(x.effort)})`:""}</td><td class="num">${esc(x.attempt||"")}</td><td class="num">${esc(x.turns||"")}</td><td class="num">${fmt(sumTok(x.tokens))}</td><td class="num">${money(x.cost_usd)}</td><td class="num">${x.usage_used_pct==null?"unknown":esc(x.usage_used_pct)+"%"}</td><td>${x.error?"error":""}</td></tr>`).join("");
+  const routed = h.why || h.brief || runs;
+  const handoff = !routed ? `<div class="muted">${pending ? "Not started yet: the router hasn't looked at this task." : "Not routed yet."}</div>` :
+    `<table>${kv("Tier", esc(h.tier||"auto"))}${kv("Model", esc(h.model||""))}${kv("Effort", esc(h.effort||""))}${kv("Router's reasoning", esc(h.why||""))}
+      ${kv("Depends on", esc((h.depends||[]).join(", ")))}${kv("Branch", esc(h.branch||""))}${kv("Worktree", esc(h.worktree||""))}${kv("Commit", esc(h.commit||""))}
+      ${kv("Started", esc(h.started||""))}${kv("Finished", esc(h.finished||""))}</table>
+    <h4>Brief given to the worker</h4>${h.brief?`<pre class="box">${esc(h.brief)}</pre>`:`<div class="muted">No brief recorded.</div>`}
+    <h4>Runs</h4>${runs?`<table><tr><th>When</th><th>Tier</th><th>Model</th><th>Try</th><th>Turns</th><th>Tokens</th><th>Cost</th><th>Window</th><th></th></tr>${runs}</table>`:`<div class="muted">No runs yet.</div>`}`;
+  const files = [...new Set(act.filter(e => e.file).map(e => e.file))];
+  const work = (tot.runs ? `<div class="muted">${esc(tot.runs)} run(s) · ${esc(tot.turns||0)} turns · ${fmt(sumTok(tot.tokens))} tokens · ${money(tot.cost)}</div>` : "") +
+    (files.length ? `<h4>Files touched</h4><pre class="box">${esc(files.join("\n"))}</pre>` : "") +
+    (d.failure ? `<h4>Last failure</h4><pre class="box">${esc(d.failure)}</pre>` : "") +
+    (act.length ? `<h4>Timeline</h4><div class="tl box">${act.map(e => `<div class="ev ${esc(e.kind)}"><span class="muted num">${esc((e.at||"").slice(11, 19))}</span> ${evLine(e)}</div>`).join("")}</div>`
+      : d.log?.length ? `<h4>Log</h4><pre class="box">${esc(d.log.join("\n"))}</pre>`
+      : `<div class="muted">${pending ? "Not started yet." : "No activity recorded for this task."}</div>`);
+  const report = d.report ? `<div class="report box">${mdBlock(d.report)}</div>` : `<div class="muted">${t.status === "done" ? "No report file." : pending ? "Not started yet." : "No report yet: it is written when the task is done."}</div>`;
+  const sec = (k, title, sub, body) => `<details class="sec" data-k="${k}"><summary onclick="detailToggle(this)"><b>${title}</b> <span class="muted">${sub}</span></summary>${body}</details>`;
   const html = `<b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span>
-    ${t.commit?` <span class="muted">branch ${esc(t.branch)} @ ${esc(t.commit)}</span>`:""}${t.why?`<div class="muted">Router: ${esc(t.why)}</div>`:""}
-    ${runs?`<h4>Runs</h4><table><tr><th>When</th><th>Tier</th><th>Model</th><th>Try</th><th>Turns</th><th>Tokens</th><th>Cost</th><th>Window</th><th></th></tr>${runs}</table>`:""}
-    ${t.failure?`<h4>Last failure</h4><pre>${esc(t.failure)}</pre>`:""}
-    ${d.report?`<h4>Report</h4><pre>${esc(d.report)}</pre>`:d.brief?`<h4>Brief</h4><pre>${esc(d.brief)}</pre>`:""}
-    <h4>Task</h4><pre>${esc(d.body)}</pre>
+    ${sec("prompt", "Prompt", "", `<pre class="box">${esc(d.body || "(empty task)")}</pre>`)}
+    ${sec("handoff", "Orchestrator handoff", esc(routed ? [h.tier, h.model && h.model + (h.effort ? ` (${h.effort})` : "")].filter(Boolean).join(" · ") : "not started yet"), handoff)}
+    ${sec("work", "Agent work", esc(act.length ? `${act.filter(e => e.kind === "tool").length} tool calls` : pending ? "not started yet" : ""), work)}
+    ${sec("report", "Agent report", esc(d.report ? (t.commit ? `commit ${t.commit}` : "") : "none yet"), report)}
     <div style="margin-top:8px"><button onclick="runMode('plan','${esc(t.id)}')">Preview plan</button> ${t.status==="done"?`<button onclick="runMode('final','${esc(t.id)}')">Run final checks</button>`:""}</div>`;
-  if ($("detail").dataset.h !== html) { $("detail").innerHTML = html; $("detail").dataset.h = html; }
+  const box = $("detail");
+  if (box.dataset.h === html) return;
+  const top = box.dataset.t === t.id ? box.scrollTop : 0;
+  box.innerHTML = html; box.dataset.h = html; box.dataset.t = t.id;
+  const auto = t.status === "done" ? "report" : pending ? "prompt" : "work";
+  for (const el of box.querySelectorAll("details.sec")) el.open = detailOpen[t.id + ":" + el.dataset.k] ?? el.dataset.k === auto;
+  box.scrollTop = top;
 }
 
 function toggleDone() { localStorage.setItem("doneOpen", localStorage.getItem("doneOpen") === "1" ? "0" : "1"); if (typeof refresh === "function") refresh(); }

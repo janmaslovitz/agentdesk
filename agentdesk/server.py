@@ -377,20 +377,8 @@ class Approvals:
             self.resolve(req["id"], "deny")
 
 
-def tool_summary(name: str, args: dict) -> str:
-    if name in ("Bash", "PowerShell"):
-        return str(args.get("command", ""))
-    if args.get("file_path"):
-        return str(args["file_path"])
-    if args.get("pattern"):
-        return str(args["pattern"]) + (f"  in {args['path']}" if args.get("path") else "")
-    return json.dumps(args, ensure_ascii=False)[:300] if args else ""
-
-
-def result_text(content) -> str:
-    if isinstance(content, list):
-        return "\n".join(str(c.get("text", "")) for c in content if isinstance(c, dict) and c.get("type") == "text")
-    return str(content or "")
+tool_summary = core.tool_summary  # shared with the task run timeline (core.Activity)
+result_text = core.result_text
 
 
 class Chat:
@@ -1504,19 +1492,54 @@ def tier_averages(tasks: list[dict]) -> dict:
     return {k: {"avg_pct": round(sum(v) / len(v), 1), "tasks": len(v)} for k, v in by.items()}
 
 
+def task_row(t: core.Task, e: dict) -> dict:
+    """A task as the dashboard lists it: the task file plus its state.json entry (runs, totals, result)."""
+    runs = e.get("runs", [])
+    tok: dict[str, int] = {}
+    for r in runs:
+        for k, v in (r.get("tokens") or {}).items():
+            tok[k] = tok.get(k, 0) + v
+    return {"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "status": e.get("status", "pending"),
+            "used_pct": task_used(runs), "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
+            "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", "")}
+
+
+def task_log(p: core.Project, task_id: str, n: int = 80) -> list[str]:
+    """The task's own lines of agentdesk.log (the timeline of runs from before runs/<id>.jsonl was recorded)."""
+    f = p.path("agentdesk.log")
+    if not f.exists():
+        return []
+    with f.open("rb") as fh:
+        fh.seek(0, 2)
+        fh.seek(max(0, fh.tell() - 512_000))
+        lines = fh.read().decode("utf-8", "replace").splitlines()
+    return [ln for ln in lines if f"] {task_id}: " in ln or f"before {task_id}:" in ln][-n:]
+
+
+def task_detail(p: core.Project, t: core.Task) -> dict:
+    """The task detail panel: prompt (task body), orchestrator handoff, the agent's activity and its report."""
+    e = core.Store(p).load()["tasks"].get(t.id, {})
+    row = task_row(t, e)
+    worker = [r for r in row["runs"] if r.get("tier") != "router"]
+    tier = row["tier"]
+    planned = core.settings().get("tiers", {}).get(tier, {}) if tier else {}
+    last = worker[-1] if worker else {}
+    wt = Path(p.cfg["repo"]["worktrees"]) / t.id
+    rep = p.path("reports") / f"{t.id}.md"
+    activity = core.read_activity(p, t.id)
+    handoff = {"tier": tier, "model": last.get("model") or planned.get("model"), "effort": last.get("effort", planned.get("effort")),
+               "why": row["why"], "brief": e.get("brief", ""), "depends": t.depends, "branch": row["branch"] or (f"auto/{t.id}" if wt.exists() else None),
+               "worktree": str(wt) if wt.exists() else None, "commit": row["commit"], "started": e.get("started"), "finished": e.get("finished"),
+               "runs": row["runs"]}
+    return {"id": t.id, "title": t.title, "status": row["status"], "body": t.body, "brief": handoff["brief"], "handoff": handoff,
+            "activity": activity, "log": [] if activity else task_log(p, t.id), "failure": row["failure"],
+            "totals": {"runs": len(row["runs"]), "turns": sum(r.get("turns") or 0 for r in row["runs"]), "tokens": row["tokens"], "cost": row["cost"]},
+            "report": rep.read_text(encoding="utf-8") if rep.exists() else ""}
+
+
 def project_state(p: core.Project) -> dict:
     state = core.Store(p).load()
-    tasks = []
-    for t in core.load_tasks(p):
-        e = state["tasks"].get(t.id, {})
-        runs = e.get("runs", [])
-        tok: dict[str, int] = {}
-        for r in runs:
-            for k, v in (r.get("tokens") or {}).items():
-                tok[k] = tok.get(k, 0) + v
-        tasks.append({"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "status": e.get("status", "pending"),
-                      "used_pct": task_used(runs), "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
-                      "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", "")})
+    tasks = [task_row(t, state["tasks"].get(t.id, {})) for t in core.load_tasks(p)]
     s = core.settings()
     mode = core.chat_mode(p)
     cs = core.chat_settings(mode)
@@ -1823,9 +1846,7 @@ class Handler(BaseHTTPRequestHandler):
                 t = next((t for t in core.load_tasks(p) if t.id == parts[4]), None)
                 if t is None:
                     return self.json({"error": "no such task"}, 404)
-                rep = p.path("reports") / f"{t.id}.md"
-                e = core.Store(p).load()["tasks"].get(t.id, {})
-                return self.json({"body": t.body, "brief": e.get("brief", ""), "report": rep.read_text(encoding="utf-8") if rep.exists() else ""})
+                return self.json(task_detail(p, t))
         self.send(404, b"not found", "text/plain")
 
     def do_POST(self):
