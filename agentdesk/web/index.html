@@ -431,8 +431,10 @@ async function refreshOnce() {
   st = s0;
   if (chatFor !== cur) {
     chatFor = cur; pendingKey = null; planKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
-    const h = await api(`/api/p/${cur}/chat`); for (const m of h.history) addMsg(m.role, m.text, m);
-    lastSeq = h.seq || 0;
+    const h = await api(`/api/p/${want}/chat`);
+    if (want !== cur) { chatFor = null; refreshAgain = true; return; }  // switched while loading: don't mix projects
+    for (const m of h.history) addMsg(m.role, m.text, m);
+    lastSeq = h.seq || 0; $("msgs").scrollTop = $("msgs").scrollHeight;
   } else if ((st.chat_seq || 0) > lastSeq) await fetchNotes();
   showMode(st.project);
   showLive(st);
@@ -507,13 +509,14 @@ async function showDetail(fetchText) {
   if (fetchText || !detailCache || detailCache.id !== selTask) detailCache = {id: selTask, ...(await api(`/api/p/${cur}/task/${encodeURIComponent(selTask)}`))};
   const d = detailCache;
   const runs = t.runs.map(x => `<tr><td>${esc(x.at||"")}</td><td>${esc(x.tier)}</td><td>${esc(x.model)}</td><td class="num">${x.attempt||""}</td><td class="num">${x.turns||""}</td><td class="num">${fmt(sumTok(x.tokens))}</td><td class="num">${money(x.cost_usd)}</td><td class="num">${x.usage_used_pct==null?"unknown":x.usage_used_pct+"%"}</td><td>${x.error?"error":""}</td></tr>`).join("");
-  $("detail").innerHTML = `<b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span>
+  const html = `<b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span>
     ${t.commit?` <span class="muted">branch ${esc(t.branch)} @ ${esc(t.commit)}</span>`:""}${t.why?`<div class="muted">Router: ${esc(t.why)}</div>`:""}
     ${runs?`<h4>Runs</h4><table><tr><th>When</th><th>Tier</th><th>Model</th><th>Try</th><th>Turns</th><th>Tokens</th><th>Cost</th><th>Window</th><th></th></tr>${runs}</table>`:""}
     ${t.failure?`<h4>Last failure</h4><pre>${esc(t.failure)}</pre>`:""}
     ${d.report?`<h4>Report</h4><pre>${esc(d.report)}</pre>`:d.brief?`<h4>Brief</h4><pre>${esc(d.brief)}</pre>`:""}
     <h4>Task</h4><pre>${esc(d.body)}</pre>
     <div style="margin-top:8px"><button onclick="runMode('plan','${esc(t.id)}')">Preview plan</button> ${t.status==="done"?`<button onclick="runMode('final','${esc(t.id)}')">Run final checks</button>`:""}</div>`;
+  if ($("detail").dataset.h !== html) { $("detail").innerHTML = html; $("detail").dataset.h = html; }
 }
 
 function toggleDone() { localStorage.setItem("doneOpen", localStorage.getItem("doneOpen") === "1" ? "0" : "1"); if (typeof refresh === "function") refresh(); }
@@ -537,7 +540,9 @@ function addMsg(role, text, meta) {
     c.textContent = `${money(meta.cost)} · ${fmt(sumTok(t))} tokens (in ${fmt(t.input)}, out ${fmt(t.output)}, cache ${fmt((t.cache_read||0)+(t.cache_write||0))})` + (meta.model ? ` · ${meta.model}` : "");
     div.appendChild(c);
   }
-  $("msgs").appendChild(div); $("msgs").scrollTop = $("msgs").scrollHeight; return div;
+  // Follow the chat only if you are at the bottom (or just sent something); never yank away from what you're reading.
+  const box = $("msgs"), atEnd = role === "user" || box.scrollTop + box.clientHeight >= box.scrollHeight - 60;
+  box.appendChild(div); if (atEnd) box.scrollTop = box.scrollHeight; return div;
 }
 async function send() {
   const text = $("input").value.trim(); if (!text || !cur) return;
@@ -611,7 +616,8 @@ async function setMode(mode) {
 // Progress notes (plan approved, task started/done/blocked, run ended) the server adds to the chat.
 let lastSeq = 0;
 async function fetchNotes() {
-  const h = await api(`/api/p/${cur}/chat?since=${lastSeq}`);
+  const proj = cur, h = await api(`/api/p/${proj}/chat?since=${lastSeq}`);
+  if (proj !== cur) return;
   for (const m of h.history) if ((m.kind === "progress" || m.kind === "live") && m.seq > lastSeq) addMsg(m.role, m.text, m);
   lastSeq = Math.max(lastSeq, h.seq || 0);
 }
