@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Changed
+- Task detail: clicking a task shows, in order, the prompt, the orchestrator's handoff (tier, model, router's reasoning,
+  runs), what the agent did (recorded activity) and the agent's report.
 ### Fixed
 - Chat: the "working..." bar no longer stays visible when idle (CSS `display:flex` overrode `hidden`).
 - Chat: no more jumping - the view follows new messages only when you are at the bottom; switching projects while the
