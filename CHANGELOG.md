@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.1.2 - 2026-10-20
+
 ### Changed
 - Task detail: clicking a task shows, in order, the prompt, the orchestrator's handoff (tier, model, router's reasoning,
   runs), what the agent did (recorded activity) and the agent's report.
