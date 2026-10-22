@@ -704,7 +704,7 @@ class Chat:
                                                  folder=self.p.dir, budget=float(cs["budget_usd"]))
             gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
             # Everything is allowed through can_use_tool (no guard, no hook); the project checkout is the working directory.
-            return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt + ACK_RULE,
+            return core.options(self.p, scratch=False, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt + ACK_RULE,
                                 max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
                                 allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
                                 mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
@@ -831,7 +831,7 @@ class Chat:
         daily = float(cs.get("daily_budget_usd") or 0)
         # The process-wide limit is only a backstop (the CLI counts the spend of the whole process); the bursts are
         # checked when they end, the day's total before each new burst.
-        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo),
+        return core.options(self.p, scratch=False, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo),
                             system_prompt=self.with_memory(prompt) + ACK_RULE, max_turns=int(cs["max_turns"]),
                             max_budget_usd=daily or None, resume=self.session_id,
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],

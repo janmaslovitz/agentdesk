@@ -5,6 +5,11 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- After an update the dashboard could show no projects at all: the installed app had been started from an agent's
+  shell (an install or restart done by the Coworker) that carried the workers' throw-away `AGENTDESK_HOME`
+  (`%TEMP%gentdesk-worker-home`), so it read an empty data folder. The installed program now never uses that
+  folder as its data, and the full-access Coworker is no longer given it. Your data was never touched.
 
 ## 1.2.0 - 2026-10-22
 

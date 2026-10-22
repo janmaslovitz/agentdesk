@@ -115,11 +115,22 @@ def _hide_child_consoles() -> None:
 
 
 _hide_child_consoles()
+def _is_scratch_path(p: str) -> bool:
+    import tempfile
+    try:
+        return Path(p).resolve() == (Path(tempfile.gettempdir()) / "agentdesk-worker-home").resolve()
+    except OSError:
+        return False
+
+
 def _data_home() -> Path:
     """AGENTDESK_HOME, else `data` next to the app. The packaged program (often under Program Files, which
     users can't write to) uses `data` next to the .exe only if it already exists there, else the AgentDesk folder in LOCALAPPDATA."""
-    if os.environ.get("AGENTDESK_HOME"):
-        return Path(os.environ["AGENTDESK_HOME"])
+    env = os.environ.get("AGENTDESK_HOME")
+    # The installed program never uses the workers' scratch folder (see scratch_home) as its data: it is started from an
+    # agent's shell now and then (an install, a restart) that carries that setting, and the app would show no projects.
+    if env and not (FROZEN and _is_scratch_path(env)):
+        return Path(env)
     if FROZEN and not (APP / "data").is_dir():
         return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AgentDesk"
     return APP / "data"
@@ -2179,7 +2190,10 @@ def options(p: Project, role: str | None = None, log=None, **kw) -> ClaudeAgentO
     """ClaudeAgentOptions for a project. With `role`, the project's `[mcp.*]` servers for that role are added to
     mcp_servers (merged with any passed in). allowed_tools is left alone: list `mcp__<name>__*` there if wanted."""
     _load_sdk()
-    env = {**account_env(p.account), "AGENTDESK_HOME": scratch_home(), **kw.pop("env", {})}
+    # `scratch=False` (the full-access Coworker, which also installs and starts AgentDesk): don't hand the agent the
+    # workers' throw-away data home, or whatever it launches would use it instead of the real data.
+    scratch = kw.pop("scratch", True)
+    env = {**account_env(p.account), **({"AGENTDESK_HOME": scratch_home()} if scratch else {}), **kw.pop("env", {})}
     try:
         extra = mcp_servers(p, role, log)
     except Exception as e:  # never break a run over optional config
