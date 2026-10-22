@@ -1772,7 +1772,7 @@ def git_get(p: core.Project, what: str, q: dict) -> dict:
         return core.git_prs(p, refresh)
     if what == "checks":
         n = str(q.get("number") or "")
-        return core.git_pr_checks(p, int(n), refresh) if n.isdigit() else {"ok": False, "message": "which pull request?"}
+        return core.git_pr_checks(p, int(n), refresh) if n.isascii() and n.isdigit() else {"ok": False, "message": "which pull request?"}
     return {"ok": False, "error": "unknown git view"}
 
 
@@ -1895,7 +1895,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(core.build_job(p).info())
             if len(parts) == 4 and parts[3] == "chat":
                 since = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("since", [""])[0]
-                return self.json(chat(p).info(int(since) if since.isdigit() else None))
+                return self.json(chat(p).info(int(since) if since.isascii() and since.isdigit() else None))
             if len(parts) == 4 and parts[3] == "pending":
                 return self.json({"pending": chat(p).approvals.pending()})
             if len(parts) == 5 and parts[3] == "task":

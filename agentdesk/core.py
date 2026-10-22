@@ -1432,7 +1432,7 @@ def normalize_remote(text: str, host: str = "github.com", protocol: str = "https
         return None, "don't put a user name, password or token in the URL; choose the GitHub account instead"
     if re.fullmatch(rf"https://{_HOST.pattern}(?::\d{{1,5}})?(?:/{_PATH_SEG})+/?", s):
         return s, None
-    if re.fullmatch(rf"ssh://(?:[A-Za-z0-9_.-]+@)?{_HOST.pattern}(?::\d{{1,5}})?(?:/{_PATH_SEG})+/?", s):
+    if re.fullmatch(rf"ssh://(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?{_HOST.pattern}(?::\d{{1,5}})?(?:/{_PATH_SEG})+/?", s):
         return s, None
     if re.fullmatch(rf"[A-Za-z0-9_][A-Za-z0-9_.-]*@{_HOST.pattern}:{_PATH_SEG}(?:/{_PATH_SEG})*/?", s):
         return s, None
