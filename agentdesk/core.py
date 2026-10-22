@@ -201,6 +201,19 @@ model = "sonnet"
 effort = "medium"
 budget_usd = 2.0
 
+# Disk hygiene: the dashboard measures each project's cargo target dirs, worktrees and data folder in the background
+# and shows them (Disk section). auto = false: it only suggests; the user confirms each cleanup. A project can override
+# any key in its project.toml under [hygiene]. Sizes: max_target_gb per target dir, max_total_gb for the whole project.
+[hygiene]
+enabled = true
+auto = false
+max_target_gb = 60
+max_total_gb = 150
+stale_days = 3
+max_runs_mb = 200
+max_log_mb = 20
+interval_min = 30
+
 [guard]
 deny = [
   'git\\s+push', 'git\\s+remote', 'gh\\s+(pr|release|repo|api|issue|workflow)', 'git\\s+reset\\s+--hard',
@@ -1798,6 +1811,58 @@ def autorunner_cfg(p: Project | None = None, global_cfg: dict | None = None, pro
     out["enabled"] = bool(out["enabled"])
     out["interval_s"] = max(5, int(out["interval_s"]))
     out["retry_crashed"] = max(0, int(out["retry_crashed"]))
+    return out
+
+
+HYGIENE_DEFAULTS = {"enabled": True, "auto": False, "max_target_gb": 60.0, "max_total_gb": 150.0, "stale_days": 3.0,
+                    "max_runs_mb": 200.0, "max_log_mb": 20.0, "interval_min": 30.0, "target_dirs": []}
+_HYGIENE_RANGE = {"max_target_gb": (0.1, 100000.0), "max_total_gb": (0.1, 100000.0), "stale_days": (0.0, 3650.0),
+                  "max_runs_mb": (1.0, 1e6), "max_log_mb": (1.0, 1e5), "interval_min": (5.0, 10080.0)}
+
+
+def _hygiene_value(key: str, v) -> tuple[bool, object]:
+    """(True, value) for a valid [hygiene] value, else (False, what was expected)."""
+    d = HYGIENE_DEFAULTS[key]
+    if isinstance(d, bool):
+        return (True, v) if isinstance(v, bool) else (False, "expected true or false")
+    if isinstance(d, list):
+        if isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v):
+            return True, [x.strip() for x in v]
+        return False, "expected a list of folder paths"
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+        return False, "expected a number"
+    lo, hi = _HYGIENE_RANGE[key]
+    if not lo <= float(v) <= hi:
+        return False, f"expected {lo:g} to {hi:g}"
+    return True, float(v)
+
+
+def hygiene_cfg(p: Project | None = None, global_cfg: dict | None = None, project_cfg: dict | None = None) -> dict:
+    """Effective disk-hygiene settings: code defaults < settings.toml [hygiene] < project.toml [hygiene]. Never raises:
+    a bad or unknown value is ignored (the one below it stays) and described in `errors` (logged by the hygiene loop)."""
+    errors: list[str] = []
+    if global_cfg is None:
+        try:
+            global_cfg = settings().get("hygiene", {})
+        except Exception as e:  # unreadable settings.toml: defaults
+            global_cfg, errors = {}, [f"settings.toml can't be read ({type(e).__name__}: {e})"]
+    if project_cfg is None:
+        project_cfg = (p.cfg.get("hygiene", {}) if isinstance(p.cfg, dict) else {}) if p is not None else {}
+    out = copy.deepcopy(HYGIENE_DEFAULTS)
+    for where, src in (("settings.toml", global_cfg), ("project.toml", project_cfg)):
+        if not isinstance(src, dict):
+            errors.append(f"{where}: [hygiene] is not a table; ignored")
+            continue
+        for k, v in src.items():
+            if k not in HYGIENE_DEFAULTS:
+                errors.append(f"{where}: [hygiene] {k} is not a known setting; ignored")
+                continue
+            ok, val = _hygiene_value(k, v)
+            if ok:
+                out[k] = val
+            else:
+                errors.append(f"{where}: [hygiene] {k} = {v!r}: {val}; using {out[k]!r}")
+    out["errors"] = errors
     return out
 
 

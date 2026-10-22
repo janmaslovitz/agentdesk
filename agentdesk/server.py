@@ -23,7 +23,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core
+from . import core, hygiene
 
 _SDK_NAMES = ('AgentDefinition', 'AssistantMessage', 'ClaudeSDKClient', 'HookMatcher', 'PermissionResultAllow', 'PermissionResultDeny', 'RateLimitEvent', 'ResultMessage', 'SystemMessage', 'TaskNotificationMessage', 'TaskStartedMessage', 'TextBlock', 'ToolResultBlock', 'ToolUseBlock', 'UserMessage', 'create_sdk_mcp_server')
 
@@ -1619,7 +1619,7 @@ def _overview() -> dict:
             counts[st] = counts.get(st, 0) + 1
         rows.append({"slug": p.slug, "name": p.name, "repo": str(p.repo), "account": p.account.get("name"), "counts": counts,
                      "spent_usd": state.get("spent_usd", 0.0), "running": runner(p).running(),
-                     "auto": autorun_status(p), "auto_enabled": core.autorunner_cfg(p)["enabled"]})
+                     "auto": autorun_status(p), "auto_enabled": core.autorunner_cfg(p)["enabled"], "disk": hygiene.summary(p.slug)})
     return {"auto_global": core.autorunner_cfg()["enabled"], "attention": attention_all(), "projects": rows, "accounts": account_rows(), "presets": list(core.PRESETS), "data": str(core.DATA), "version": core.version_info()}
 
 
@@ -1689,6 +1689,8 @@ def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
         return did
     if chat(p).approvals.pending():
         return did
+    if hygiene.cleaning(p.slug):  # a disk cleanup is deleting build caches: start the next task after it
+        return did
     t = core.next_startable(tasks, state, running, cfg["retry_crashed"])
     if t is None:
         return did
@@ -1743,6 +1745,41 @@ def autorun_loop() -> None:
         except Exception as e:
             log_error(f"auto-runner: {type(e).__name__}: {e}")
             interval = 30
+
+
+def project_busy(p: core.Project) -> bool:
+    """A run or a dashboard build is going for the project: disk hygiene deletes nothing meanwhile."""
+    return run_alive(p)[0] or core.build_job(p).running()
+
+
+def hygiene_loop() -> None:
+    """Disk hygiene in the background: every minute (the first after a minute) it measures each project whose last
+    measurement is older than its [hygiene] interval_min and, only where auto = true, cleans up."""
+    while not QUIT.wait(60):
+        try:
+            hygiene.loop_pass(run_active=project_busy, log=log_error)
+        except Exception as e:
+            log_error(f"disk hygiene: {type(e).__name__}: {e}")
+
+
+def disk_view(p: core.Project, refresh: bool = False) -> dict:
+    """GET /api/p/<slug>/disk: the cached disk report and cleanup plan (measured in the background, never here)."""
+    return {**hygiene.report(p, refresh, log=log_error), "run_active": project_busy(p)}
+
+
+def disk_clean(p: core.Project, d: dict) -> dict:
+    """POST /api/p/<slug>/disk/clean: without `apply` a dry run (the plan, nothing deleted); with apply, confirm and
+    the chosen action ids, the cleanup runs in the background (each action is checked again first)."""
+    if d.get("apply") is not True:
+        return {"ok": True, "dry_run": True, **disk_view(p)}
+    if d.get("confirm") is not True:
+        return {"ok": False, "message": "this needs confirmation"}
+    ids = d.get("ids")
+    if not isinstance(ids, list) or not ids or not all(isinstance(x, str) for x in ids):
+        return {"ok": False, "message": "choose what to clean up"}
+    if project_busy(p):
+        return {"ok": False, "message": "a run or build is in progress for this project; nothing was deleted"}
+    return hygiene.start_clean(p, ids, run_active=project_busy, log=log_error)
 
 
 def attention_all() -> dict:
@@ -1893,6 +1930,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(git_get(p, parts[4], {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}), 200)
             if len(parts) == 4 and parts[3] == "build":
                 return self.json(core.build_job(p).info())
+            if len(parts) == 4 and parts[3] == "disk":
+                return self.json(disk_view(p, "refresh=1" in (urllib.parse.urlparse(self.path).query or "")))
             if len(parts) == 4 and parts[3] == "chat":
                 since = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("since", [""])[0]
                 return self.json(chat(p).info(int(since) if since.isascii() and since.isdigit() else None))
@@ -2005,6 +2044,8 @@ class Handler(BaseHTTPRequestHandler):
                         blocked = "a task run is in progress for this project; stop it first" if runner(p).running() else None
                         err = job.start(str(d.get("kind") or "build"), str(d.get("ref") or ""), blocked)
                     return self.json({"ok": False, "message": err} if err else {"ok": True})
+                if act == "disk" and parts[4:] == ["clean"]:
+                    return self.json(disk_clean(p, d))
                 if act == "autorunner" and len(parts) == 4:
                     core.set_autorunner(p, d.get("enabled") is True)
                     return self.json({"ok": True, "enabled": core.autorunner_cfg(core.project(p.slug))["enabled"]})
@@ -2216,6 +2257,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     threading.Thread(target=autorun_loop, daemon=True, name="autorunner").start()
     threading.Thread(target=usage_loop, daemon=True, name="usage-reader").start()
     threading.Thread(target=checkup_loop, daemon=True, name="checkups").start()
+    threading.Thread(target=hygiene_loop, daemon=True, name="disk-hygiene").start()
     threading.Thread(target=_load_sdk, daemon=True, name="sdk-preload").start()  # off the startup path
     try:
         if browser:

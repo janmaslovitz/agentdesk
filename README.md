@@ -133,6 +133,39 @@ Needs the [GitHub CLI](https://cli.github.com/) for the account and pull-request
 `gh auth login` again to add another account). Without it, or when it isn't logged in, the window says what to
 run; fetch, pull, push and merge keep working. gh answers are reused for 5 seconds; **Refresh** asks again.
 
+## Disk hygiene
+
+Each project's **Disk** section shows what it uses on disk, measured in the background (never while a dashboard
+request waits; cached for 5 minutes, **Measure again** asks now): every cargo target dir it uses (`CARGO_TARGET_DIR`
+from `[gates.env]`, `[hygiene] target_dirs`, `<repo>/target`, `<worktree>/target`, and `target*` folders with a
+`CACHEDIR.TAG`/`.rustc_info.json` next to the repository, the worktrees folder or the configured target dir) with
+their profiles (debug, release ...), the worktrees and the project's AgentDesk data folder. It warns when a target dir
+is over `max_target_gb` or the project over `max_total_gb`, and lists `[gates.env]` settings that make caches grow
+(CARGO_INCREMENTAL, debug info, one target shared by many worktrees); project.toml is never edited.
+
+**Clean up** first shows a dry run (what would be deleted and how much); only **Delete selected** (confirmed) deletes:
+- a target dir over its limit, or any when the project is over its total: files in `<profile>/deps`, `build`,
+  `.fingerprint`, `incremental` untouched for `stale_days` (cargo rebuilds what it needs); if the dir is still over
+  `max_target_gb`, the whole profile folder (e.g. `debug`, a build cache only);
+- per-task target dirs (`target-017`) no worktree or open task uses, untouched for `stale_days`;
+- worktrees of tasks that are done and merged into the base (or whose branch is gone) and have no uncommitted or
+  untracked files: `git worktree remove --force`, then `git worktree prune`; `auto/*` branches merged into the base
+  that no worktree and no open task needs (deleted after checking the merge again). Nothing is pushed;
+- run timelines (`runs/*.jsonl`) over `max_runs_mb` (oldest first, older than `stale_days`) and `agentdesk.log`
+  / `runner.log` over `max_log_mb` (the newest half is kept). Reports and state.json are never touched.
+
+Every deletion is checked again right before it happens: only inside the project's configured locations, only in
+folders that are clearly cargo target dirs (CACHEDIR.TAG, .rustc_info.json or named `target*`, no `.git`/`Cargo.toml`),
+never through a symlink or junction, never while a run or build is going for the project or a cargo/rustc/rustup
+process (or a program started from inside the folder) uses it. Processes come from `psutil` if installed, else
+PowerShell `Get-CimInstance` (Windows) or `/proc`; if they can't be listed, nothing is deleted. Each action and the
+space it freed goes to the project's `agentdesk.log`.
+
+Settings (`data/settings.toml` `[hygiene]`, overridable per project in `project.toml` `[hygiene]`; a bad value is
+ignored and logged): `enabled = true`, `auto = false` (true: the background job also cleans up by itself every
+`interval_min = 30` minutes), `max_target_gb = 60`, `max_total_gb = 150`, `stale_days = 3`, `max_runs_mb = 200`,
+`max_log_mb = 20`, `target_dirs = []`.
+
 ## The chat: Assistant, Coworker and Planner modes
 
 Each project has a chat with a mode switch in its header, saved in the project's `project.toml`

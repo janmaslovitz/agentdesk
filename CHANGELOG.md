@@ -13,6 +13,11 @@ them under the new version number, tags it and builds the installer (see README,
   per project (`[git] account` in project.toml) and runs pull, push, fetch and pull requests as it (token only in
   the command's environment, never shown or stored), lists open pull requests with their checks, opens them and
   creates new ones (title, description, draft). Every change asks first. A missing or logged-out gh is explained.
+- Disk hygiene: each project's Disk section measures its cargo target dirs, worktrees and data folder in the
+  background, warns over `[hygiene] max_target_gb` / `max_total_gb`, points out bloating `[gates.env]` settings, and
+  cleans up on request (dry run first): stale build artifacts, oversized profile folders, orphan per-task target dirs,
+  finished and merged worktrees and branches, old run timelines and big logs. Never while a run or a cargo process
+  uses the folder; `auto = true` cleans by itself. Every action and the space freed is logged.
 ### Changed
 - Push in the Git window can push the base branch as well as the current one, and says when it sets the upstream.
 
