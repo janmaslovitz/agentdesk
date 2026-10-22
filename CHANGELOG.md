@@ -6,7 +6,7 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
-- Per-project MCP servers for workers (and optionally the router) from `[mcp.<name>]` in project.toml; `.code-graph/`
+- Per-project MCP servers for workers from `[mcp.<name>]` in project.toml; `.code-graph/`
   is never committed.
 - Git window: shows the connected repository and connects/changes `origin` (paste a URL or owner/name, or pick from
   `gh repo list`), lists the GitHub CLI's accounts and switches them (`gh auth switch`), remembers a GitHub account
@@ -18,7 +18,11 @@ them under the new version number, tags it and builds the installer (see README,
   cleans up on request (dry run first): stale build artifacts, oversized profile folders, orphan per-task target dirs,
   finished and merged worktrees and branches, old run timelines and big logs. Never while a run or a cargo process
   uses the folder; `auto = true` cleans by itself. Every action and the space freed is logged.
+- Chat: message text is selectable and copyable (copy button on messages and tool output; polling never resets a selection).
 ### Changed
+- Task list: Active, Blocked and Done are collapsible groups (Done is collapsed by default).
+- Faster orchestration: the router's model call is skipped for tasks with a fixed `tier`, the task list is cached
+  until files change, and the Claude SDK is imported lazily (quicker start).
 - Push in the Git window can push the base branch as well as the current one, and says when it sets the upstream.
 
 ## 1.1.2 - 2026-10-20
