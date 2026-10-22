@@ -28,20 +28,31 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    PermissionResultAllow,
-    PermissionResultDeny,
-    RateLimitEvent,
-    ResultMessage,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-    query,
-)
+_SDK_NAMES = ("AssistantMessage", "ClaudeAgentOptions", "ClaudeSDKClient", "PermissionResultAllow", "PermissionResultDeny",
+              "RateLimitEvent", "ResultMessage", "TextBlock", "ToolResultBlock", "ToolUseBlock", "UserMessage", "query")
+_sdk_lock = threading.Lock()
+
+
+def _load_sdk() -> None:
+    """Import claude_agent_sdk (slow: ~1s) on first use instead of at program start; its names become
+    module globals, so tests can still patch them. Call before using any SDK name."""
+    if "query" in globals():
+        return
+    with _sdk_lock:
+        if "query" in globals():
+            return
+        import claude_agent_sdk
+        _hide_sdk_console()
+        for n in _SDK_NAMES:
+            globals().setdefault(n, getattr(claude_agent_sdk, n))
+
+
+def __getattr__(name: str):
+    if name in _SDK_NAMES:
+        _load_sdk()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 FROZEN = bool(getattr(sys, "frozen", False))  # PyInstaller program
 APP = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
@@ -77,8 +88,6 @@ def _hide_sdk_console() -> None:
 
     sc.anyio = _Proxy()
 
-
-_hide_sdk_console()
 
 
 def no_console_flags(flags: int = 0) -> int:
@@ -794,21 +803,43 @@ class Task:
     crates: list[str] = field(default_factory=list)
 
 
+_TASK_SKIP = object()  # cached verdict for a file that isn't a runnable task (no header, draft, invalid)
+_task_cache: dict[Path, tuple[tuple[int, int], object]] = {}
+_task_cache_lock = threading.Lock()
+
+
+def _parse_task(f: Path):
+    m = re.match(r"\+\+\+\s*\n(.*?)\n\+\+\+\s*\n(.*)", f.read_text(encoding="utf-8"), re.S)
+    if not m:
+        return _TASK_SKIP
+    try:
+        h = tomllib.loads(m.group(1))
+        if h.get("status") == "draft":
+            return _TASK_SKIP
+        return Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", [])))
+    except (tomllib.TOMLDecodeError, KeyError):
+        return _TASK_SKIP
+
+
 def load_tasks(p: Project) -> list[Task]:
     """The queue: `tasks/*.md` only. Draft plans live in `tasks/drafts/` (not globbed) and carry
-    `status = "draft"` in their header, which is skipped too wherever such a file ends up."""
+    `status = "draft"` in their header, which is skipped too wherever such a file ends up.
+    Files are re-parsed only when their (mtime, size) changed; callers get copies they may mutate."""
     tasks = []
-    for f in sorted(p.tasks_dir.glob("*.md")):
-        m = re.match(r"\+\+\+\s*\n(.*?)\n\+\+\+\s*\n(.*)", f.read_text(encoding="utf-8"), re.S)
-        if not m:
-            continue
-        try:
-            h = tomllib.loads(m.group(1))
-            if h.get("status") == "draft":
-                continue
-            tasks.append(Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", []))))
-        except (tomllib.TOMLDecodeError, KeyError):
-            continue
+    seen = set()
+    with _task_cache_lock:
+        for f in sorted(p.tasks_dir.glob("*.md")):
+            seen.add(f)
+            st = f.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            hit = _task_cache.get(f)
+            if hit is None or hit[0] != key:
+                hit = _task_cache[f] = (key, _parse_task(f))
+            t = hit[1]
+            if t is not _TASK_SKIP:
+                tasks.append(replace(t, depends=list(t.depends), crates=list(t.crates)))
+        for f in [f for f in _task_cache if f.parent == p.tasks_dir and f not in seen]:
+            del _task_cache[f]
     return tasks
 
 
@@ -1529,6 +1560,7 @@ def guard(wt: Path, also: tuple[Path, ...] = (), never: tuple[Path, ...] = (), e
     """can_use_tool for agents that work on their own: shell commands matching `[guard] deny` (or
     `extra_deny`) are refused, and edits must land inside `wt` or one of `also` (folders or files), but
     never inside `never` (other than `wt` itself). Everything else is allowed."""
+    _load_sdk()
     deny = [re.compile(x, re.I) for x in [*settings()["guard"]["deny"], *extra_deny]]
     root = norm_path(wt, wt)
     roots = [norm_path(a, wt) for a in also]
@@ -1591,6 +1623,7 @@ Full task:
 
 
 def options(p: Project, **kw) -> ClaudeAgentOptions:
+    _load_sdk()
     env = {**account_env(p.account), "AGENTDESK_HOME": scratch_home(), **kw.pop("env", {})}
     return ClaudeAgentOptions(env=env, **kw)
 
@@ -1699,6 +1732,10 @@ def read_activity(p: Project, task_id: str, limit: int = 500) -> list[dict]:
 
 
 async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
+    if task.tier in TIER_ORDER:  # the task file decides: no model call
+        Activity(p, task.id, "router").add("routed", tier=task.tier, text="set in the task file")
+        return {"tier": task.tier, "why": "set in the task file", "brief": task.body}
+    _load_sdk()
     r = settings()["router"]
     opts = options(p, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
                    allowed_tools=["Read", "Grep", "Glob"], disallowed_tools=["Edit", "Write", "Bash", "PowerShell"],
@@ -1737,13 +1774,12 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
             tries += 1
     if not result or result.get("tier") not in TIER_ORDER:
         result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
-    if task.tier in TIER_ORDER:
-        result.update(tier=task.tier, why="set in the task file")
     act.add("routed", tier=result.get("tier"), text=result.get("why", ""))
     return result
 
 
 async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter) -> tuple[bool, str]:
+    _load_sdk()
     s = settings()
     t = s["tiers"][tier]
     entry = meter.state["tasks"][task.id]
