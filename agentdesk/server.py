@@ -554,7 +554,7 @@ class Chat:
                 args = run_args(p, mode, tid)
             except ValueError as e:
                 return err(str(e))
-            e = runner(p).start(args or [])
+            e = start_run(p, args or [])
             return err(e) if e else ok(f"started: {' '.join(args or [])}. Progress shows on the dashboard and in agentdesk.log.")
 
         @tool("add_task", "Queue a task for the workers. body: the goal, what's wrong today, where (files), constraints, how to tell it's done.",
@@ -1747,6 +1747,13 @@ def autorun_loop() -> None:
             interval = 30
 
 
+def start_run(p: core.Project, args: list) -> str | None:
+    """Start a worker run, unless a disk cleanup is deleting build caches / worktrees of this project right now."""
+    if hygiene.cleaning(p.slug):
+        return "a disk cleanup is running; try again in a moment"
+    return runner(p).start(args)
+
+
 def project_busy(p: core.Project) -> bool:
     """A run or a dashboard build is going for the project: disk hygiene deletes nothing meanwhile."""
     return run_alive(p)[0] or core.build_job(p).running()
@@ -2004,7 +2011,7 @@ class Handler(BaseHTTPRequestHandler):
                     args = run_args(p, str(d.get("mode") or ""), str(d.get("id") or ""))
                     if args is None:
                         return self.json({"error": "unknown mode"}, 400)
-                    err = runner(p).start(args)
+                    err = start_run(p, args)
                     return self.json({"error": err} if err else {"ok": True})
                 if act == "git" and len(parts) == 5 and parts[4] in GIT_GH_POSTS:
                     if parts[4] == "remote" and runner(p).running():

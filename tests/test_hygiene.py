@@ -383,3 +383,24 @@ def test_loop_pass_logs_config_errors_and_respects_auto_off(project, tmp_path):
     assert hygiene._CACHE[p.slug]["total"] > 0
     assert (t / "debug" / "deps" / "libold-1111.rlib").exists()  # auto = false: nothing deleted
     assert any("stale_days" in x for x in logged)
+
+
+def test_worktree_with_ignored_file_or_orphan_commit_is_kept(project):
+    p = project
+    w = Path(p.cfg["repo"]["worktrees"])
+    git = lambda *a, cwd: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a], cwd=cwd, check=True, capture_output=True)
+    # 1. an ignored local file (.env) would be lost by `worktree remove --force`
+    core.add_worktree(p, w / "008", "auto/008", "main")
+    (w / "008" / ".gitignore").write_text(".env\n")
+    git("add", "-A", cwd=w / "008"); git("commit", "-q", "-m", "ign", cwd=w / "008")
+    git("merge", "-q", "--ff-only", "auto/008", cwd=p.repo)
+    (w / "008" / ".env").write_text("SECRET=1")
+    core.Store(p).save({"tasks": {"008": {"status": "done", "branch": "auto/008"}}, "spent_usd": 0})
+    core._MERGED_CACHE.clear()
+    assert "ignored files" in hygiene._worktree_refusal(p, str(w / "008"))
+    # 2. a commit on a detached HEAD that no branch contains
+    core.add_worktree(p, w / "009", "auto/009", "main")
+    git("checkout", "-q", "--detach", cwd=w / "009")
+    write(w / "009" / "x.txt", 3)
+    git("add", "-A", cwd=w / "009"); git("commit", "-q", "-m", "orphan", cwd=w / "009")
+    assert "no branch" in hygiene._worktree_refusal(p, str(w / "009"))

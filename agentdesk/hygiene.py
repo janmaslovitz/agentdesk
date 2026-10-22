@@ -936,6 +936,19 @@ def _worktree_refusal(p: core.Project, path: str) -> str | None:
         return f"git status failed: {out.strip()[:200]}"
     if out.strip():
         return "it has uncommitted changes or untracked files"
+    # ignored files (.env, local notes ...) are lost by `worktree remove --force`; build caches are fine to lose
+    code, out = core.git(["status", "--porcelain", "--ignored"], Path(path))
+    if code != 0:
+        return f"git status failed: {out.strip()[:200]}"
+    for line in out.splitlines():
+        if line.startswith("!! ") and not re.match(r"(?:target[^/]*|node_modules|__pycache__|\.pytest_cache|\.code-graph)/?($|/)", line[3:].strip().strip('"')):
+            return f"it holds ignored files ({line[3:].strip()}) that would be lost"
+    # commits that no branch contains (detached HEAD after a rebase / checkout <sha>) would become unreachable
+    code, out = core.git(["for-each-ref", "--contains", "HEAD", "refs/heads", "refs/remotes"], Path(path))
+    if code != 0:
+        return f"git for-each-ref failed: {out.strip()[:200]}"
+    if not out.strip():
+        return "its HEAD is on no branch (commits would be lost)"
     return None
 
 
