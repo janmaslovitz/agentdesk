@@ -489,3 +489,11 @@ def test_http_answer_leaves_empty_list_and_second_answer_404s(project, http):
     assert get(base + "/pending") == {"pending": []}
     assert isinstance(fut.result(2), PermissionResultDeny)
     assert post(f"{base}/pending/{req['id']}", {"action": "deny"})["error"].startswith("that request isn't waiting")
+
+
+def test_page_makes_chat_text_copyable():
+    """Source check only: selectable bubbles plus a plain-text copy button with an execCommand fallback."""
+    html = (server.Path(server.__file__).parent / "web" / "index.html").read_text(encoding="utf-8")
+    assert ".msg, .msg * { user-select: text;" in html
+    assert "async function copyText(" in html and 'document.execCommand("copy")' in html
+    assert "navigator.clipboard.writeText" in html and "copyButton(() => pre.textContent" in html

@@ -6,6 +6,8 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- Per-project MCP servers for workers (and optionally the router) from `[mcp.<name>]` in project.toml; `.code-graph/`
+  is never committed.
 - Git window: shows the connected repository and connects/changes `origin` (paste a URL or owner/name, or pick from
   `gh repo list`), lists the GitHub CLI's accounts and switches them (`gh auth switch`), remembers a GitHub account
   per project (`[git] account` in project.toml) and runs pull, push, fetch and pull requests as it (token only in
