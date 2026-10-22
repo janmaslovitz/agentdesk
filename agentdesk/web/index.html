@@ -332,7 +332,7 @@ function shell() {
   </div>
   <div class="grid">
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
-      <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody><tbody id="doneHead"></tbody><tbody id="doneTasks"></tbody></table>
+      <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 0"></div>
       <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
     <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button><button data-mode="planner" onclick="setMode('planner')" title="Reads only and writes a plan of tasks; nothing runs until you approve it">Planner</button></span>
@@ -487,11 +487,13 @@ async function refreshOnce() {
       <td class="num">${fmt(sumTok(t.tokens))}</td><td class="num">${money(t.cost)}<div class="muted">${t.runs.length?usedText(t.used_pct):""}</div></td>
       <td><button onclick="event.stopPropagation();runMode('task','${esc(t.id)}')" ${t.status==="done"||r.running?"disabled":""}>Run</button></td></tr>`;
   };
-  const activeT = st.tasks.filter(t => t.status !== "done"), doneT = st.tasks.filter(t => t.status === "done");
-  const doneOpen = localStorage.getItem("doneOpen") === "1";
-  $("tasks").innerHTML = activeT.map(taskRow).join("") || `<tr><td colspan="7" class="muted">${doneT.length ? "No open tasks." : 'No tasks yet: press "+ Task" or describe the work in the chat.'}</td></tr>`;
-  $("doneHead").innerHTML = doneT.length ? `<tr style="cursor:pointer" onclick="toggleDone()"><td colspan="7" class="muted"><b>${doneOpen?"▾":"▸"} Done (${doneT.length})</b></td></tr>` : "";
-  $("doneTasks").innerHTML = doneOpen ? doneT.map(taskRow).join("") : "";
+  const groups = [["active", "Active", st.tasks.filter(t => t.status !== "done" && t.status !== "blocked"), true],
+                  ["blocked", "Blocked", st.tasks.filter(t => t.status === "blocked"), true],
+                  ["done", "Done", st.tasks.filter(t => t.status === "done"), false]];
+  $("tasks").innerHTML = st.tasks.length ? groups.filter(g => g[2].length).map(([k, title, list, dflt]) => {
+    const open = (localStorage.getItem("grp_" + k) ?? (dflt ? "1" : "0")) === "1";
+    return `<tr style="cursor:pointer" onclick="toggleGroup('${k}')"><td colspan="7" class="muted"><b>${open ? "▾" : "▸"} ${title} (${list.length})</b></td></tr>` + (open ? list.map(taskRow).join("") : "");
+  }).join("") : `<tr><td colspan="7" class="muted">No tasks yet: press "+ Task" or describe the work in the chat.</td></tr>`;
   const box = $("log").parentElement, atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   $("log").textContent = st.log.join("\n") + (st.errors.length ? "\n\n— process output —\n" + st.errors.join("\n") : "");
   if (atEnd) box.scrollTop = box.scrollHeight;
@@ -573,7 +575,7 @@ async function showDetail(fetchText) {
   box.scrollTop = top;
 }
 
-function toggleDone() { localStorage.setItem("doneOpen", localStorage.getItem("doneOpen") === "1" ? "0" : "1"); if (typeof refresh === "function") refresh(); }
+function toggleGroup(k) { const d = k !== "done", v = (localStorage.getItem("grp_" + k) ?? (d ? "1" : "0")) === "1"; localStorage.setItem("grp_" + k, v ? "0" : "1"); if (typeof refresh === "function") refresh(); }
 async function run(mode) { runMode(mode); }
 async function runMode(mode, id) { const r = await api(`/api/p/${cur}/run`, {mode, id}); if (r.error) note(r.error); refresh(); }
 async function stop() { const r = await api(`/api/p/${cur}/stop`, {}); if (r.error) note(r.error); refresh(); }
