@@ -71,6 +71,11 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .msg .call summary { cursor: pointer; color: var(--muted); font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .msg .call summary b { color: var(--text); font-weight: 600; } .msg .call.err summary b { color: var(--bad); }
 .msg .call pre { max-height: 220px; overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border-radius: 6px; padding: 6px 8px; }
+.msg, .msg * { user-select: text; -webkit-user-select: text; }
+.msg { position: relative; }
+.msg button.copy { user-select: none; -webkit-user-select: none; position: absolute; top: 3px; right: 4px; font-size: 10px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); cursor: pointer; opacity: 0; }
+.msg:hover > button.copy, .msg .call[open]:hover > button.copy, button.copy:focus { opacity: 1; }
+.msg .call button.copy { position: static; display: block; margin: 3px 0 2px auto; opacity: 1; }
 .msg .cost { font-size: 11px; color: var(--muted); margin-top: 6px; white-space: normal; }
 .working { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .working i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: working 1.2s ease-in-out infinite; }
@@ -705,6 +710,24 @@ async function run(mode) { runMode(mode); }
 async function runMode(mode, id) { const r = await api(`/api/p/${cur}/run`, {mode, id}); if (r.error) note(r.error); refresh(); }
 async function stop() { const r = await api(`/api/p/${cur}/stop`, {}); if (r.error) note(r.error); refresh(); }
 
+// Copy plain text; navigator.clipboard may be refused in the webview, so fall back to a hidden textarea.
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+  const ta = document.createElement("textarea"); ta.value = text; ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+  document.body.appendChild(ta); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch (e) {}
+  ta.remove(); return ok;
+}
+function copyButton(getText) {
+  const b = document.createElement("button"); b.type = "button"; b.className = "copy"; b.textContent = "copy"; b.title = "Copy as plain text";
+  b.addEventListener("click", async ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const ok = await copyText(getText()); b.textContent = ok ? "copied" : "failed";
+    clearTimeout(b._t); b._t = setTimeout(() => { b.textContent = "copy"; }, 1500);
+  });
+  return b;
+}
+
 // A chat message; `meta` (assistant replies) has the tool calls, cost and tokens of that answer.
 function addMsg(role, text, meta) {
   const div = document.createElement("div"); div.className = "msg " + role + (meta?.kind === "progress" ? " progress" : ""); div.innerHTML = md(text);
@@ -714,8 +737,10 @@ function addMsg(role, text, meta) {
     d.className = "call" + (c.error ? " err" : "");
     d.innerHTML = `<summary><b>${esc(c.name)}</b> ${esc(c.input)}</summary>` +
       (c.input && c.input.length > 60 ? `<pre>${esc(c.input)}</pre>` : "") + `<pre>${esc(c.output || "(no output)")}</pre>`;
+    for (const pre of d.querySelectorAll("pre")) d.insertBefore(copyButton(() => pre.textContent), pre);
     div.appendChild(d);
   }
+  if (text) { div.dataset.raw = text; div.appendChild(copyButton(() => text)); }
   if (role === "assistant" && meta && meta.cost !== undefined) {
     const t = meta.tokens || {}, c = document.createElement("div"); c.className = "cost";
     c.textContent = `${money(meta.cost)} · ${fmt(sumTok(t))} tokens (in ${fmt(t.input)}, out ${fmt(t.output)}, cache ${fmt((t.cache_read||0)+(t.cache_write||0))})` + (meta.model ? ` · ${meta.model}` : "");
