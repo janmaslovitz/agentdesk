@@ -5,6 +5,14 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- Git window: shows the connected repository and connects/changes `origin` (paste a URL or owner/name, or pick from
+  `gh repo list`), lists the GitHub CLI's accounts and switches them (`gh auth switch`), remembers a GitHub account
+  per project (`[git] account` in project.toml) and runs pull, push, fetch and pull requests as it (token only in
+  the command's environment, never shown or stored), lists open pull requests with their checks, opens them and
+  creates new ones (title, description, draft). Every change asks first. A missing or logged-out gh is explained.
+### Changed
+- Push in the Git window can push the base branch as well as the current one, and says when it sets the upstream.
 
 ## 1.1.2 - 2026-10-20
 

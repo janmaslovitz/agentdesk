@@ -110,6 +110,13 @@ code { font: 12px var(--mono); }
 .livebar { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font-size: 12px; color: var(--muted); }
 .livebar[hidden], [hidden] { display: none !important; }
 .livebar button { padding: 1px 8px; font-size: 12px; margin-left: auto; }
+.gitp { padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; }
+.gitrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.gitrow > .k { font-size: 12px; color: var(--muted); min-width: 110px; }
+.gitrow input.wide, .gitrow select.wide { flex: 1; min-width: 220px; }
+.gitp details > summary { cursor: pointer; padding: 4px 0; }
+.gitp td button { padding: 1px 8px; font-size: 12px; }
+.gitnew { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 2px; } .gitnew textarea { height: 70px; resize: vertical; }
 </style>
 </head>
 <body>
@@ -348,10 +355,28 @@ function shell() {
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
   <section><h3>Git <span class="muted" id="gitHead"></span><span class="spacer"></span>
-      <button onclick="gitAct('fetch')">Refresh</button>
+      <button onclick="gitRefresh()" title="Fetch from the remote and reload the GitHub accounts and pull requests">Refresh</button>
       <select id="gitBranch"></select><button id="gitMerge" onclick="gitDo('merge')">Merge into base</button>
-      <button id="gitPull" onclick="gitDo('pull')">Pull</button><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
-    <div style="padding:8px 14px"><div id="gitInfo" class="muted"></div><pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
+      <button id="gitPull" onclick="gitDo('pull')">Pull</button>
+      <select id="gitPushBranch" title="Branch to push (sets its upstream when it has none)"></select><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
+    <div class="gitp"><div id="gitInfo" class="muted"></div>
+      <div class="gitrow"><span class="k">Repository</span><code id="gitRemote"></code></div>
+      <div class="gitrow"><span class="k">Connect to</span><input id="gitUrl" class="wide" placeholder="https://github.com/owner/name, git@github.com:owner/name.git or owner/name">
+        <button onclick="gitConnect()" title="Set origin to this repository (asks first)">Connect…</button></div>
+      <div class="gitrow"><span class="k">Repositories of</span><input id="gitOwner" size="16" placeholder="account or org">
+        <button onclick="gitRepos(true)">List</button><select id="gitRepoSel" class="wide" onchange="if (this.value) $('gitUrl').value = this.value"><option value="">(press List)</option></select></div>
+      <div class="gitrow"><span class="k">GitHub account</span><select id="gitAcct"></select>
+        <button onclick="gitUseAcct()" title="Pull, push, fetch and pull requests of this project run as this account (saved in project.toml)">Use for this project</button>
+        <button onclick="gitSwitch()" title="gh auth switch: changes gh's active account on this computer">Make active in gh</button></div>
+      <div class="muted" id="gitAcctNote"></div>
+      <details id="gitPrBox"><summary><b>Pull requests</b> <span class="muted" id="gitPrHead"></span></summary>
+        <table><thead><tr><th>#</th><th>Title</th><th>Branches</th><th>Author</th><th>Checks</th><th></th></tr></thead><tbody id="gitPrs"></tbody></table>
+        <div class="gitnew"><b>New pull request</b>
+          <div class="gitrow"><span class="k">From branch</span><input id="prHead" list="gitBranches" size="22"><datalist id="gitBranches"></datalist>
+            <span class="muted">into</span><input id="prBase" size="16"><label><input type="checkbox" id="prDraft"> Draft</label></div>
+          <input id="prTitle" placeholder="Title"><textarea id="prBody" placeholder="Description (optional)"></textarea>
+          <div><button class="primary" onclick="gitPrCreate()" title="gh pr create (asks first). Push the branch first.">Create pull request…</button></div></div></details>
+      <pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
   <section><h3>Build <span class="muted" id="bHead"></span><span class="spacer"></span>
       <input id="bRef" placeholder="branch or commit (default: base)" size="26">
       <button id="bBuild" onclick="buildGo('build')">Build</button><button id="bClean" onclick="buildGo('clean')">Clean + rebuild</button>
@@ -362,16 +387,23 @@ function shell() {
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
 }
 
-let gitSt = null, gitFor = null;
+let gitSt = null, gitFor = null, ghInfo = null, gitPrList = [];
 function gitShow(g, msg) {
   gitSt = g;
   const ab = g.upstream ? `${g.ahead} ahead, ${g.behind} behind ${g.upstream}` : (g.remote ? "no upstream branch yet" : "local-only project");
   $("gitHead").textContent = `on ${g.branch} · base ${g.base} · ${g.clean ? "clean" : "dirty (" + g.changes.length + " changed)"}`;
-  $("gitInfo").innerHTML = `${esc(ab)}${g.remote_url ? " · remote " + esc(g.remote_url) : ""}<br>auto branches: ` +
+  $("gitInfo").innerHTML = `${esc(ab)}<br>auto branches: ` +
     (g.autos.length ? g.autos.map(a => `${esc(a.branch)} (+${a.ahead})`).join(", ") : "none ahead of base");
+  $("gitRemote").textContent = g.remote_url ? `${g.remote}: ${g.remote_url}` : "none (local-only project): connect it below";
   $("gitBranch").innerHTML = g.autos.map(a => `<option value="${esc(a.branch)}">${esc(a.branch)} (+${a.ahead})</option>`).join("");
   $("gitMerge").disabled = !g.autos.length;
-  for (const id of ["gitPull", "gitPush"]) { $(id).disabled = !g.remote; $(id).title = g.remote ? "" : "local-only project"; }
+  const pb = $("gitPushBranch"), keep = pb.value, opts = [...new Set([g.branch, g.base])];
+  pb.innerHTML = opts.map(b => `<option value="${esc(b)}">${esc(b)}${b === g.branch ? " (current)" : ""}</option>`).join("");
+  if (opts.includes(keep)) pb.value = keep;
+  for (const id of ["gitPull", "gitPush", "gitPushBranch"]) { $(id).disabled = !g.remote; $(id).title = g.remote ? "" : "local-only project"; }
+  $("gitBranches").innerHTML = [g.branch, ...g.autos.map(a => a.branch)].filter(b => b !== g.base).map(b => `<option value="${esc(b)}">`).join("");
+  if (!$("prHead").value && g.branch !== g.base) $("prHead").value = g.branch;
+  if (!$("prBase").value) $("prBase").value = g.base;
   if (msg !== undefined) $("gitMsg").textContent = msg;
 }
 let buildFor = null, buildTimer = null;
@@ -399,7 +431,100 @@ async function buildGo(kind) {
 }
 async function buildStop() { await buildPost("/stop", {}); }
 async function buildOpen() { const r = await api(`/api/p/${cur}/build/open`, {}); if (r.error) alert(r.error); }
-async function gitLoad() { gitFor = cur; const g = await api(`/api/p/${cur}/git`); if (!g.error) gitShow(g); }
+async function gitLoad(refresh) {
+  const want = cur;
+  if (gitFor !== cur) {  // another project: start with an empty form
+    for (const id of ["prHead", "prBase", "prTitle", "prBody", "gitUrl", "gitOwner"]) $(id).value = "";
+    $("prDraft").checked = false; $("gitMsg").textContent = ""; $("gitPrs").innerHTML = ""; $("gitPrHead").textContent = "";
+    $("gitRepoSel").innerHTML = `<option value="">(press List)</option>`; $("gitAcct").innerHTML = ""; $("gitAcctNote").textContent = "";
+  }
+  gitFor = cur;
+  const g = await api(`/api/p/${want}/git`);
+  if (want !== cur) return;
+  if (!g.error) gitShow(g);
+  await ghLoad(refresh);
+}
+const ghActive = (host = "github.com") => (ghInfo?.accounts || []).find(a => a.active && a.host === host)?.login;
+async function ghLoad(refresh) {
+  const want = cur, h = await api(`/api/p/${want}/git/gh${refresh ? "?refresh=1" : ""}`);
+  if (want !== cur) return;
+  ghInfo = h;
+  const accts = h.accounts || [], sel = $("gitAcct");
+  sel.innerHTML = `<option value="">(none: git's own login, gh's active account)</option>` + accts.map(a =>
+    `<option value="${esc(a.login)}">${esc(a.login)}${a.host !== "github.com" ? " @ " + esc(a.host) : ""}${a.active ? " ★ active in gh" : ""}${a.ok ? "" : " (login broken)"}</option>`).join("") +
+    (h.account && !accts.some(a => a.login === h.account) ? `<option value="${esc(h.account)}">${esc(h.account)} (not logged in to gh)</option>` : "");
+  sel.value = h.account || "";
+  const n = $("gitAcctNote");
+  n.textContent = !h.ok ? h.message : h.account ? `This project's pull, push, fetch and pull requests run as ${h.account}.` :
+    `No account chosen: git uses its own login, gh its active account (${ghActive() || "none"}).`;
+  n.style.color = h.ok ? "" : "var(--warn)";
+  $("gitOwner").placeholder = h.account || ghActive() || "account or org";
+  if (h.remote?.github) await gitPrs(refresh);
+  else { gitPrList = []; $("gitPrs").innerHTML = ""; $("gitPrHead").textContent = h.remote?.url ? "(the remote is not on GitHub)" : "(no remote yet)"; }
+}
+async function gitRefresh() { await gitAct("fetch"); await ghLoad(true); }
+async function gitPrs(refresh) {
+  const want = cur, r = await api(`/api/p/${want}/git/prs${refresh ? "?refresh=1" : ""}`);
+  if (want !== cur) return;
+  gitPrList = r.prs || [];
+  $("gitPrHead").textContent = r.ok ? `${gitPrList.length} open in ${r.repo}${r.account ? " · as " + r.account : ""}` : "(could not list them)";
+  $("gitPrs").innerHTML = gitPrList.map((x, i) => `<tr><td class="num">${x.number}</td><td>${esc(x.title)}${x.draft ? ' <span class="st">draft</span>' : ""}</td>
+    <td><code>${esc(x.head)}</code> → <code>${esc(x.base)}</code></td><td>${esc(x.author)}</td>
+    <td id="prc_${x.number}"><button onclick="gitChecks(${x.number})">Checks</button></td><td><button onclick="gitOpenPr(${i})">Open</button></td></tr>`).join("") ||
+    `<tr><td colspan="6" class="muted">${r.ok ? "No open pull requests." : esc(r.message || "")}</td></tr>`;
+}
+async function gitChecks(num) {
+  const c = $("prc_" + num); if (c) c.textContent = "…";
+  const r = await api(`/api/p/${cur}/git/checks?number=${num}&refresh=1`), el = $("prc_" + num);
+  if (!el) return;
+  el.textContent = r.ok ? r.summary : "unknown"; el.title = r.ok ? (r.checks || []).map(x => `${x.name}: ${x.outcome}`).join("\n") : (r.message || "");
+  el.style.color = r.ok ? (r.failed ? "var(--bad)" : r.pending ? "var(--warn)" : "var(--ok)") : "var(--muted)";
+}
+async function gitOpenPr(i) { const x = gitPrList[i]; if (!x) return; const r = await api(`/api/p/${cur}/git/open`, {url: x.url}); if (!r.ok) $("gitMsg").textContent = r.message || "could not open it"; }
+async function gitRepos(refresh) {
+  const owner = $("gitOwner").value.trim(), sel = $("gitRepoSel");
+  sel.innerHTML = `<option value="">loading…</option>`;
+  const r = await api(`/api/p/${cur}/git/repos?owner=${encodeURIComponent(owner)}${refresh ? "&refresh=1" : ""}`);
+  sel.innerHTML = r.ok ? `<option value="">${(r.repos || []).length} repositories of ${esc(r.owner)}${r.account ? " (seen as " + esc(r.account) + ")" : ""}: pick one</option>` +
+    (r.repos || []).map(x => `<option value="${esc(x.name)}">${esc(x.name)}${x.private ? " (private)" : ""}</option>`).join("") : `<option value="">(none)</option>`;
+  if (!r.ok) $("gitMsg").textContent = r.message || "could not list repositories";
+}
+async function gitConnect() {
+  const url = $("gitUrl").value.trim(), g = gitSt;
+  if (!url) return ($("gitMsg").textContent = "Enter a repository URL or owner/name, or pick one from the list.");
+  if (!confirm((g?.remote_url && g.remote === "origin" ? `Change origin from\n${g.remote_url}\nto\n` : "Set origin to\n") + url +
+    "?\n\nowner/name becomes a GitHub URL. Nothing is fetched or pushed.")) return;
+  const r = await api(`/api/p/${cur}/git/remote`, {url, confirm: true});
+  if (r.status) gitShow(r.status, (r.ok ? "" : "Not done: ") + (r.message || ""));
+  else $("gitMsg").textContent = "Not done: " + (r.message || r.error || "failed");
+  if (r.ok) { $("gitUrl").value = ""; await ghLoad(true); }
+}
+async function gitUseAcct() {
+  const a = $("gitAcct").value;
+  if (!confirm(a ? `Run this project's pull, push, fetch and pull requests as the GitHub account ${a}?\n(Saved in project.toml as [git] account. gh's active account stays as it is.)`
+    : "Stop using a specific GitHub account for this project? git then uses its own login, gh its active account.")) return;
+  const r = await api(`/api/p/${cur}/git/account`, {account: a, confirm: true});
+  $("gitMsg").textContent = (r.ok ? "" : "Not done: ") + (r.message || r.error || "");
+  await ghLoad(true);
+}
+async function gitSwitch() {
+  const a = $("gitAcct").value, row = (ghInfo?.accounts || []).find(x => x.login === a);
+  if (!row) return ($("gitMsg").textContent = "Choose an account gh knows first.");
+  if (!confirm(`Make ${a} gh's active account (gh auth switch -u ${a})?\nThis changes gh on this computer for every program, not only this project.`)) return;
+  const r = await api(`/api/p/${cur}/git/switch`, {account: a, host: row.host, confirm: true});
+  $("gitMsg").textContent = (r.ok ? "" : "Not done: ") + (r.message || r.error || "");
+  await ghLoad(true);
+}
+async function gitPrCreate() {
+  const g = gitSt, head = $("prHead").value.trim() || g?.branch, base = $("prBase").value.trim() || g?.base;
+  const title = $("prTitle").value.trim(), draft = $("prDraft").checked;
+  if (!title) return ($("gitMsg").textContent = "A pull request needs a title.");
+  const repo = ghInfo?.remote?.github?.repo || g?.remote_url, who = ghInfo?.account || ghActive() || "gh's active account";
+  if (!confirm(`Create a ${draft ? "draft " : ""}pull request in ${repo}\n${head} → ${base}\n"${title}"\nas ${who}?`)) return;
+  const r = await api(`/api/p/${cur}/git/pr`, {title, body: $("prBody").value, head, base, draft, confirm: true});
+  $("gitMsg").textContent = (r.ok ? "" : "Not done: ") + (r.message || r.error || "");
+  if (r.ok) { $("prTitle").value = $("prBody").value = ""; $("prDraft").checked = false; await gitPrs(true); }
+}
 async function gitAct(act, body = {}) {
   const r = await api(`/api/p/${cur}/git/${act}`, body);
   if (r.status) gitShow(r.status, (r.ok ? "" : "Not done: ") + (r.message || ""));
@@ -408,14 +533,16 @@ async function gitAct(act, body = {}) {
 async function gitDo(act) {
   const g = gitSt; if (!g) return;
   let text, body = {confirm: true};
+  const as = g.account ? `\nAs GitHub account: ${g.account}` : "";
   if (act === "merge") {
     const b = $("gitBranch").value, n = (g.autos.find(a => a.branch === b) || {}).ahead || 0;
-    body.branch = b; text = `Merge ${b} (${n} commit${n === 1 ? "" : "s"}) into ${g.base}?
-A conflict is aborted and nothing changes.`;
-  } else if (act === "pull") text = `Pull ${g.upstream || g.remote} into ${g.branch} (fast-forward only, ${g.behind} commit${g.behind === 1 ? "" : "s"} behind)?
-Remote: ${g.remote_url}`;
-  else text = `Push ${g.branch} (${g.ahead} commit${g.ahead === 1 ? "" : "s"} ahead) to ${g.remote}?
-Remote: ${g.remote_url}`;
+    body.branch = b; text = `Merge ${b} (${n} commit${n === 1 ? "" : "s"}) into ${g.base}?\nA conflict is aborted and nothing changes.`;
+  } else if (act === "pull") text = `Pull ${g.upstream || g.remote} into ${g.branch} (fast-forward only, ${g.behind} commit${g.behind === 1 ? "" : "s"} behind)?\nRemote: ${g.remote_url}${as}`;
+  else {
+    const b = $("gitPushBranch").value || g.branch; body.branch = b;
+    const ahead = b === g.branch && g.upstream ? ` (${g.ahead} commit${g.ahead === 1 ? "" : "s"} ahead)` : "";
+    text = `Push ${b}${ahead} to ${g.remote}?${b === g.branch && !g.upstream ? "\nIt has no upstream yet: this sets it." : ""}\nRemote: ${g.remote_url}${as}`;
+  }
   if (confirm(text)) await gitAct(act, body);
 }
 

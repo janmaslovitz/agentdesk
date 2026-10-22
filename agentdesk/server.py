@@ -1753,6 +1753,53 @@ def attention_all() -> dict:
     return {"count": len(items), "items": items}
 
 
+# ----------------------------------------------------------------------------- git panel: GitHub (gh) routes
+# Each request runs in its own server thread (ThreadingHTTPServer), so slow git/gh calls never hold up the rest of
+# the dashboard; every call has a timeout and gh answers are cached for a few seconds (core.GH_TTL).
+
+GIT_GH_POSTS = ("remote", "account", "switch", "pr", "open")
+_PR_URL = re.compile(r"https://[A-Za-z0-9.-]+(?::\d+)?/[A-Za-z0-9_.~%/+#?=&-]*")
+
+
+def git_get(p: core.Project, what: str, q: dict) -> dict:
+    """GET /api/p/<slug>/git/<what>: gh (accounts and remote), repos, prs, checks. `refresh=1` skips the cache."""
+    refresh = q.get("refresh") in ("1", "true")
+    if what == "gh":
+        return {**core.gh_accounts(refresh), "account": core.git_account(p), "remote": core.git_remote_info(p)}
+    if what == "repos":
+        return core.gh_repo_list(p, str(q.get("owner") or ""), refresh)
+    if what == "prs":
+        return core.git_prs(p, refresh)
+    if what == "checks":
+        n = str(q.get("number") or "")
+        return core.git_pr_checks(p, int(n), refresh) if n.isdigit() else {"ok": False, "message": "which pull request?"}
+    return {"ok": False, "error": "unknown git view"}
+
+
+def git_post(p: core.Project, what: str, d: dict) -> dict:
+    """POST /api/p/<slug>/git/<what> (confirmed by the user, except open): remote, account, switch, pr, open."""
+    if what == "open":
+        url = str(d.get("url") or "")
+        if not _PR_URL.fullmatch(url):
+            return {"ok": False, "message": "not a web address"}
+        webbrowser.open(url)
+        return {"ok": True}
+    if what == "remote":
+        return {**core.git_set_remote(p, str(d.get("url") or "")), "status": core.git_status(p)}
+    if what == "account":
+        try:
+            core.set_git_account(p, str(d.get("account") or ""))
+        except ValueError as e:
+            return {"ok": False, "message": str(e)}
+        who = core.git_account(p)
+        return {"ok": True, "account": who, "message": f"This project now uses the GitHub account {who}." if who
+                else "This project now uses git's own credentials and gh's active account."}
+    if what == "switch":
+        return core.gh_switch(str(d.get("account") or ""), str(d.get("host") or "github.com"))
+    return core.git_pr_create(p, str(d.get("title") or ""), str(d.get("body") or ""), str(d.get("head") or ""),
+                              str(d.get("base") or ""), d.get("draft") is True)
+
+
 # ----------------------------------------------------------------------------- http
 
 class Handler(BaseHTTPRequestHandler):
@@ -1842,6 +1889,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(project_state(p))
             if len(parts) == 4 and parts[3] == "git":
                 return self.json(core.git_status(p))
+            if len(parts) == 5 and parts[3] == "git":
+                return self.json(git_get(p, parts[4], {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}), 200)
             if len(parts) == 4 and parts[3] == "build":
                 return self.json(core.build_job(p).info())
             if len(parts) == 4 and parts[3] == "chat":
@@ -1918,6 +1967,12 @@ class Handler(BaseHTTPRequestHandler):
                         return self.json({"error": "unknown mode"}, 400)
                     err = runner(p).start(args)
                     return self.json({"error": err} if err else {"ok": True})
+                if act == "git" and len(parts) == 5 and parts[4] in GIT_GH_POSTS:
+                    if parts[4] == "remote" and runner(p).running():
+                        return self.json({"ok": False, "message": "a run is in progress for this project; stop it first"})
+                    if parts[4] != "open" and d.get("confirm") is not True:
+                        return self.json({"ok": False, "message": "this needs confirmation"}, 400)
+                    return self.json(git_post(p, parts[4], d))
                 if act == "git" and len(parts) == 5:
                     if parts[4] not in ("fetch", "merge", "pull", "push"):
                         return self.json({"error": "unknown git action"}, 400)
