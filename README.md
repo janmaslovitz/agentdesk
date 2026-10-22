@@ -74,6 +74,24 @@ current branch becomes the base. This is local only: nothing is pushed and no re
 has no name/email, `AgentDesk <agentdesk@localhost>` is set for that repo only. Existing repos with
 commits are never changed.
 
+## MCP servers
+
+A project can give its workers extra MCP servers in `project.toml`:
+
+```toml
+[mcp.code-graph]
+command = "npx"
+args = ["-y", "@sdsrs/code-graph"]
+env = { CODE_GRAPH_NO_AUTO_UPDATE = "1" }
+enabled = true                  # default false
+roles = ["worker", "router"]    # default ["worker"]
+```
+
+Only `enabled = true` entries for the role are passed to the agent; `npx` is resolved with `which` (`npx.cmd` on
+Windows). The server runs in the agent's working directory (the worker's worktree). `allowed_tools` is not
+widened and the worker guard allows `mcp__*` tools. Invalid entries are skipped with a log line.
+`.code-graph/` is never committed by the orchestrator.
+
 ## How work flows
 
 1. You add tasks: **+ Task**, or describe the work to the project's assistant in the chat (it

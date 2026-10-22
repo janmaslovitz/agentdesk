@@ -537,6 +537,40 @@ class Project:
     def path(self, name: str) -> Path:
         return self.dir / name
 
+    def mcp(self, log=None) -> dict[str, dict]:
+        """Valid `[mcp.<name>]` entries of project.toml: command (str), args (list of str), env (str -> str),
+        enabled (bool, default false), roles (subset of worker/router, default ["worker"]). Invalid entries are
+        skipped (one line to `log`); a bad config never breaks a run."""
+        raw = self.cfg.get("mcp")
+        out: dict[str, dict] = {}
+        if not isinstance(raw, dict):
+            return out
+
+        def bad(name: str, why: str) -> None:
+            if log:
+                log(f"mcp.{name}: skipped ({why})")
+
+        for name, c in raw.items():
+            if not isinstance(c, dict):
+                bad(name, "not a table")
+            elif not re.fullmatch(r"[A-Za-z0-9_-]+", str(name)):
+                bad(name, "bad name")
+            elif not isinstance(c.get("command"), str) or not c["command"].strip():
+                bad(name, "command must be a non-empty string")
+            elif not isinstance(c.get("enabled", False), bool):
+                bad(name, "enabled must be true/false")
+            elif not isinstance(c.get("args", []), list) or not all(isinstance(a, str) for a in c.get("args", [])):
+                bad(name, "args must be a list of strings")
+            elif not isinstance(c.get("env", {}), dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in c.get("env", {}).items()):
+                bad(name, "env must map strings to strings")
+            elif (not isinstance(c.get("roles", ["worker"]), list)
+                  or not all(r in ("worker", "router") for r in c.get("roles", ["worker"]))):
+                bad(name, "roles must be a list of worker/router")
+            elif c.get("enabled", False):
+                out[name] = {"command": c["command"].strip(), "args": list(c.get("args", [])), "env": dict(c.get("env", {})),
+                             "roles": list(c.get("roles", ["worker"]))}
+        return out
+
 
 def projects() -> list[Project]:
     out = []
@@ -2019,6 +2053,7 @@ def guard(wt: Path, also: tuple[Path, ...] = (), never: tuple[Path, ...] = (), e
                                                             and not any(inside(target, b) for b in blocked)))
             if not ok:
                 return PermissionResultDeny(message=f"edit files inside your worktree only ({wt})")
+        # mcp__<server>__* tools fall through: allowed here; which servers exist is decided by project.toml [mcp.*]
         return PermissionResultAllow()
 
     return can_use_tool
@@ -2062,9 +2097,32 @@ Full task:
 """
 
 
-def options(p: Project, **kw) -> ClaudeAgentOptions:
+def mcp_servers(p: Project, role: str | None, log=None) -> dict[str, dict]:
+    """The project's extra MCP servers for `role` ("worker"/"router") as SDK stdio configs. `npx` and other
+    shims resolve through shutil.which (npx.cmd on Windows). The SDK config has no cwd: the server inherits the
+    CLI's cwd, which is the worktree for workers (options(cwd=wt))."""
+    if not role:
+        return {}
+    out = {}
+    for name, c in p.mcp(log).items():
+        if role in c["roles"]:
+            out[name] = {"type": "stdio", "command": shutil.which(c["command"]) or c["command"], "args": c["args"], "env": c["env"]}
+    return out
+
+
+def options(p: Project, role: str | None = None, log=None, **kw) -> ClaudeAgentOptions:
+    """ClaudeAgentOptions for a project. With `role`, the project's `[mcp.*]` servers for that role are added to
+    mcp_servers (merged with any passed in). allowed_tools is left alone: list `mcp__<name>__*` there if wanted."""
     _load_sdk()
     env = {**account_env(p.account), "AGENTDESK_HOME": scratch_home(), **kw.pop("env", {})}
+    try:
+        extra = mcp_servers(p, role, log)
+    except Exception as e:  # never break a run over optional config
+        extra = {}
+        if log:
+            log(f"mcp: skipped ({type(e).__name__}: {e})")
+    if extra:
+        kw["mcp_servers"] = {**extra, **(kw.get("mcp_servers") or {})}
     return ClaudeAgentOptions(env=env, **kw)
 
 
@@ -2177,7 +2235,7 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
         return {"tier": task.tier, "why": "set in the task file", "brief": task.body}
     _load_sdk()
     r = settings()["router"]
-    opts = options(p, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
+    opts = options(p, role="router", log=store.log, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
                    allowed_tools=["Read", "Grep", "Glob"], disallowed_tools=["Edit", "Write", "Bash", "PowerShell"],
                    permission_mode="default", setting_sources=["project"], output_format={"type": "json_schema", "schema": ROUTER_SCHEMA})
     result = None
@@ -2224,7 +2282,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
     t = s["tiers"][tier]
     entry = meter.state["tasks"][task.id]
     gate_env = {k: str(v) for k, v in p.cfg.get("gates", {}).get("env", {}).items()}
-    opts = options(p, model=t["model"], effort=t.get("effort"), max_turns=int(t["max_turns"]), max_budget_usd=float(t["budget_usd"]),
+    opts = options(p, role="worker", log=store.log, model=t["model"], effort=t.get("effort"), max_turns=int(t["max_turns"]), max_budget_usd=float(t["budget_usd"]),
                    cwd=str(wt), permission_mode="acceptEdits", setting_sources=["project"], can_use_tool=guard(wt), env=gate_env)
     summary = ""
     message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
@@ -2285,7 +2343,9 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
 
 
 def commit(p: Project, task: Task, wt: Path, tiers: str) -> str:
-    git(["add", "-A"], wt)
+    # .code-graph/ is the code-graph MCP index: never commit it (info/exclude is per common git dir, so don't rely on it)
+    git(["add", "-A", "--", ".", ":(exclude).code-graph"], wt)
+    git(["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".code-graph"], wt)
     code, out = git(["commit", "-q", "-m", f"{task.id}: {task.title}\n\nAutomated by AgentDesk ({tiers}).\n\n{p.cfg['repo']['co_author']}"], wt)
     if code != 0 and "nothing to commit" not in out:
         raise RuntimeError(out)
