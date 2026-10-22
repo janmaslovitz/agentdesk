@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.2.0 - 2026-10-22
+
 ### Added
 - Per-project MCP servers for workers from `[mcp.<name>]` in project.toml; `.code-graph/`
   is never committed.
