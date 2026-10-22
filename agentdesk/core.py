@@ -28,20 +28,31 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    ClaudeSDKClient,
-    PermissionResultAllow,
-    PermissionResultDeny,
-    RateLimitEvent,
-    ResultMessage,
-    TextBlock,
-    ToolResultBlock,
-    ToolUseBlock,
-    UserMessage,
-    query,
-)
+_SDK_NAMES = ("AssistantMessage", "ClaudeAgentOptions", "ClaudeSDKClient", "PermissionResultAllow", "PermissionResultDeny",
+              "RateLimitEvent", "ResultMessage", "TextBlock", "ToolResultBlock", "ToolUseBlock", "UserMessage", "query")
+_sdk_lock = threading.Lock()
+
+
+def _load_sdk() -> None:
+    """Import claude_agent_sdk (slow: ~1s) on first use instead of at program start; its names become
+    module globals, so tests can still patch them. Call before using any SDK name."""
+    if "query" in globals():
+        return
+    with _sdk_lock:
+        if "query" in globals():
+            return
+        import claude_agent_sdk
+        _hide_sdk_console()
+        for n in _SDK_NAMES:
+            globals().setdefault(n, getattr(claude_agent_sdk, n))
+
+
+def __getattr__(name: str):
+    if name in _SDK_NAMES:
+        _load_sdk()
+        return globals()[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 FROZEN = bool(getattr(sys, "frozen", False))  # PyInstaller program
 APP = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
@@ -77,8 +88,6 @@ def _hide_sdk_console() -> None:
 
     sc.anyio = _Proxy()
 
-
-_hide_sdk_console()
 
 
 def no_console_flags(flags: int = 0) -> int:
@@ -794,21 +803,43 @@ class Task:
     crates: list[str] = field(default_factory=list)
 
 
+_TASK_SKIP = object()  # cached verdict for a file that isn't a runnable task (no header, draft, invalid)
+_task_cache: dict[Path, tuple[tuple[int, int], object]] = {}
+_task_cache_lock = threading.Lock()
+
+
+def _parse_task(f: Path):
+    m = re.match(r"\+\+\+\s*\n(.*?)\n\+\+\+\s*\n(.*)", f.read_text(encoding="utf-8"), re.S)
+    if not m:
+        return _TASK_SKIP
+    try:
+        h = tomllib.loads(m.group(1))
+        if h.get("status") == "draft":
+            return _TASK_SKIP
+        return Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", [])))
+    except (tomllib.TOMLDecodeError, KeyError):
+        return _TASK_SKIP
+
+
 def load_tasks(p: Project) -> list[Task]:
     """The queue: `tasks/*.md` only. Draft plans live in `tasks/drafts/` (not globbed) and carry
-    `status = "draft"` in their header, which is skipped too wherever such a file ends up."""
+    `status = "draft"` in their header, which is skipped too wherever such a file ends up.
+    Files are re-parsed only when their (mtime, size) changed; callers get copies they may mutate."""
     tasks = []
-    for f in sorted(p.tasks_dir.glob("*.md")):
-        m = re.match(r"\+\+\+\s*\n(.*?)\n\+\+\+\s*\n(.*)", f.read_text(encoding="utf-8"), re.S)
-        if not m:
-            continue
-        try:
-            h = tomllib.loads(m.group(1))
-            if h.get("status") == "draft":
-                continue
-            tasks.append(Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", []))))
-        except (tomllib.TOMLDecodeError, KeyError):
-            continue
+    seen = set()
+    with _task_cache_lock:
+        for f in sorted(p.tasks_dir.glob("*.md")):
+            seen.add(f)
+            st = f.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            hit = _task_cache.get(f)
+            if hit is None or hit[0] != key:
+                hit = _task_cache[f] = (key, _parse_task(f))
+            t = hit[1]
+            if t is not _TASK_SKIP:
+                tasks.append(replace(t, depends=list(t.depends), crates=list(t.crates)))
+        for f in [f for f in _task_cache if f.parent == p.tasks_dir and f not in seen]:
+            del _task_cache[f]
     return tasks
 
 
@@ -1084,8 +1115,8 @@ def git(args: list[str], cwd: Path) -> tuple[int, str]:
 
 # ----------------------------------------------------------------------------- git panel (user actions only)
 
-def _g(p: "Project", *args: str, timeout: int = 120) -> tuple[int, str]:
-    code, out = run(["git", *args], p.repo, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=timeout)
+def _g(p: "Project", *args: str, timeout: int = 120, env: dict | None = None) -> tuple[int, str]:
+    code, out = run(["git", *args], p.repo, env={"GIT_TERMINAL_PROMPT": "0", **(env or {})}, timeout=timeout)
     return code, out.strip()
 
 
@@ -1111,8 +1142,8 @@ def git_status(p: "Project") -> dict:
     _, porcelain = _g(p, "status", "--porcelain")
     remote = git_remote(p)
     st = {"branch": branch, "base": base, "clean": porcelain == "", "changes": porcelain.splitlines()[:50],
-          "remote": remote[0] if remote else None, "remote_url": remote[1] if remote else None,
-          "upstream": None, "ahead": 0, "behind": 0, "autos": []}
+          "remote": remote[0] if remote else None, "remote_url": gh_redact(remote[1]) if remote else None,
+          "upstream": None, "ahead": 0, "behind": 0, "autos": [], "account": git_account(p)}
     code, up = _g(p, "rev-parse", "--abbrev-ref", "@{u}")
     if code != 0 and remote:
         cand = f"{remote[0]}/{branch}"
@@ -1138,10 +1169,14 @@ def git_status(p: "Project") -> dict:
 
 
 def git_fetch(p: "Project") -> dict:
-    if git_remote(p) is None:
+    remote = git_remote(p)
+    if remote is None:
         return {"ok": False, "message": "local-only project: there is no remote to fetch from"}
-    code, out = _g(p, "fetch", "--prune")
-    return {"ok": code == 0, "message": out or "Fetched. Nothing new." if code == 0 else out}
+    cfg, env, who, err = _git_auth(p, remote[1])
+    if err:
+        return _as({"ok": False, "message": err}, who)
+    code, out = _g(p, *cfg, "fetch", "--prune", env=env)
+    return _as({"ok": code == 0, "message": out or "Fetched. Nothing new." if code == 0 else out}, who, env)
 
 
 def git_merge(p: "Project", branch: str) -> dict:
@@ -1171,16 +1206,20 @@ def git_merge(p: "Project", branch: str) -> dict:
 
 
 def git_pull(p: "Project", ff_only: bool = True) -> dict:
-    if git_remote(p) is None:
+    remote = git_remote(p)
+    if remote is None:
         return {"ok": False, "message": "local-only project: there is no remote to pull from"}
-    code, out = _g(p, "pull", "--ff-only" if ff_only else "--no-rebase", timeout=300)
+    cfg, env, who, err = _git_auth(p, remote[1])
+    if err:
+        return _as({"ok": False, "message": err}, who)
+    code, out = _g(p, *cfg, "pull", "--ff-only" if ff_only else "--no-rebase", timeout=300, env=env)
     if code != 0 and ff_only and "fast-forward" in out.lower():
         out += "\nThe branches have diverged, so a fast-forward is not possible. Nothing was changed."
-    return {"ok": code == 0, "message": out}
+    return _as({"ok": code == 0, "message": out}, who, env)
 
 
 def git_push(p: "Project", branch: str | None = None) -> dict:
-    """Push the current or base branch to the remote. Never forced."""
+    """Push the current or base branch to the remote, setting it as the upstream (-u). Never forced."""
     remote = git_remote(p)
     if remote is None:
         return {"ok": False, "message": "local-only project: there is no remote to push to"}
@@ -1189,8 +1228,440 @@ def git_push(p: "Project", branch: str | None = None) -> dict:
     branch = branch or cur
     if branch not in (cur, base):
         return {"ok": False, "message": f"only the current branch '{cur}' or the base branch '{base}' can be pushed"}
-    code, out = _g(p, "push", "-u", remote[0], f"refs/heads/{branch}:refs/heads/{branch}", timeout=300)
-    return {"ok": code == 0, "message": out or f"Pushed '{branch}' to {remote[0]}."}
+    cfg, env, who, err = _git_auth(p, remote[1])
+    if err:
+        return _as({"ok": False, "message": err}, who)
+    code, out = _g(p, *cfg, "push", "-u", remote[0], f"refs/heads/{branch}:refs/heads/{branch}", timeout=300, env=env)
+    return _as({"ok": code == 0, "message": out or f"Pushed '{branch}' to {remote[0]}."}, who, env)
+
+
+# ----------------------------------------------------------------------------- GitHub (gh CLI) for the git panel
+# Accounts, repositories and pull requests come from the `gh` command-line tool. A project may name one gh account
+# (project.toml `[git] account = "login"`); push/pull/fetch and gh calls then run as that account by giving the child
+# process its token in the environment (from `gh auth token`), never on a command line, in a file, a log or a reply.
+# Without an account, git uses its own credentials and gh its active account, as before.
+
+GH_TTL = 5.0  # seconds a gh answer (accounts, repos, PRs, checks) is reused; Refresh asks again
+_GH_CACHE: dict[tuple, tuple[float, object]] = {}
+_GH_LOCK = threading.Lock()
+GH_MISSING = ("The GitHub CLI (gh) is not installed or not on PATH. Install it from https://cli.github.com/, "
+              "then run `gh auth login` in a terminal and press Refresh.")
+GH_LOGIN = "gh is not logged in to GitHub. Run `gh auth login` in a terminal, then press Refresh."
+_GH_OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}")  # GitHub logins and orgs (enterprise ones may have _)
+_GH_REPO = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.-]{0,99}")
+_HOST = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?")
+_PATH_SEG = r"[A-Za-z0-9_.~%+-]+"
+_REMOTE_BAD = re.compile(r"[\s;&|`$<>(){}'\"\\!*?\[\]^,]")
+_TOKEN_SHAPE = re.compile(r"\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{16,}")
+_CHECK_OK = {"SUCCESS", "NEUTRAL"}
+_CHECK_SKIP = {"SKIPPED"}
+
+
+def gh_redact(text: str, *secrets: str) -> str:
+    """Text safe to show: the given secrets, anything shaped like a token and passwords inside URLs are masked."""
+    for s in secrets:
+        if s:
+            text = text.replace(s, "[redacted]")
+    text = _TOKEN_SHAPE.sub("[redacted]", _SECRET_TEXT.sub("[redacted]", text))
+    return re.sub(r"(://)[^/@\s:]*:[^/@\s]*@", r"\1[redacted]@", text)
+
+
+def valid_login(name: str) -> bool:
+    return bool(name) and _GH_OWNER.fullmatch(name) is not None
+
+
+def _gh(args: list[str], cwd: Path | None = None, token: str | None = None, host: str | None = None,
+        timeout: int = 30, raw: bool = False) -> tuple[int, str]:
+    """Run gh windowless with a timeout, never prompting. `token` goes to the child's environment only.
+    The output is redacted unless `raw` (only for reading a token)."""
+    exe = shutil.which("gh")
+    if not exe:
+        return 127, GH_MISSING
+    env = {"GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "NO_COLOR": "1", "GH_SPINNER_DISABLED": "1",
+           "CLICOLOR": "0", "GIT_TERMINAL_PROMPT": "0"}
+    if token:
+        env["GH_TOKEN"] = token
+    if host and host != "github.com":
+        env["GH_HOST"] = host
+    code, out = run([exe, *args], cwd or Path.home(), env=env, timeout=timeout)
+    return code, out.strip() if raw else gh_redact(out, token or "").strip()
+
+
+def _gh_cached(key: tuple, load, refresh: bool = False):
+    with _GH_LOCK:
+        hit = _GH_CACHE.get(key)
+    if hit is not None and not refresh and time.time() - hit[0] < GH_TTL:
+        return hit[1]
+    val = load()
+    with _GH_LOCK:
+        _GH_CACHE[key] = (time.time(), val)
+    return val
+
+
+def _gh_forget(kind: str | None = None) -> None:
+    with _GH_LOCK:
+        for k in [k for k in _GH_CACHE if kind is None or k[0] == kind]:
+            del _GH_CACHE[k]
+
+
+def _json_or_none(out: str):
+    i = min([j for j in (out.find("{"), out.find("[")) if j >= 0], default=-1)
+    if i < 0:
+        return None
+    try:
+        return json.loads(out[i:])
+    except ValueError:
+        return None
+
+
+def parse_gh_accounts(out: str) -> list[dict]:
+    """Accounts from `gh auth status --json hosts`, or from the text of `gh auth status` (older gh):
+    [{host, login, active, ok, protocol, error}]."""
+    rows: list[dict] = []
+    data = _json_or_none(out)
+    if isinstance(data, dict) and isinstance(data.get("hosts"), dict):
+        for host, accts in data["hosts"].items():
+            for a in accts if isinstance(accts, list) else []:
+                if isinstance(a, dict) and a.get("login"):
+                    rows.append({"host": str(a.get("host") or host), "login": str(a["login"]), "active": a.get("active") is True,
+                                 "ok": str(a.get("state") or "success") == "success",
+                                 "protocol": str(a.get("gitProtocol") or "https"), "error": gh_redact(str(a.get("error") or ""))})
+        return rows
+    for line in out.splitlines():
+        s = line.strip()
+        m = re.search(r"(Logged in|Failed to log in) to (\S+) (?:account|as) ([A-Za-z0-9_-]+)", s)
+        if m:
+            rows.append({"host": m.group(2), "login": m.group(3), "active": False, "ok": m.group(1) == "Logged in",
+                         "protocol": "https", "error": "" if m.group(1) == "Logged in" else gh_redact(s)})
+            continue
+        m = re.match(r"- Active account: (true|false)", s)
+        if m and rows:
+            rows[-1]["active"] = m.group(1) == "true"
+        m = re.match(r"- Git operations protocol: (\S+)", s)
+        if m and rows:
+            rows[-1]["protocol"] = m.group(1)
+    for host in {r["host"] for r in rows}:  # a gh that predates several accounts: its one account is the active one
+        same = [r for r in rows if r["host"] == host]
+        if not any(r["active"] for r in same):
+            same[0]["active"] = True
+    return rows
+
+
+def gh_accounts(refresh: bool = False) -> dict:
+    """{ok, gh (installed), message, accounts}. Never raises; a missing or logged-out gh is a message."""
+    def load() -> dict:
+        code, out = _gh(["auth", "status", "--json", "hosts"], timeout=20)
+        if code == 127 and out == GH_MISSING:
+            return {"ok": False, "gh": False, "message": GH_MISSING, "accounts": []}
+        rows = parse_gh_accounts(out)
+        if not rows and "unknown flag" in out:  # an older gh has no --json here
+            code, out = _gh(["auth", "status"], timeout=20)
+            rows = parse_gh_accounts(out)
+        if not rows:
+            detail = out if out and _json_or_none(out) is None else ""
+            return {"ok": False, "gh": True, "message": GH_LOGIN + (f"\n{detail}" if detail else ""), "accounts": []}
+        return {"ok": True, "gh": True, "message": "", "accounts": rows}
+    return _gh_cached(("accounts",), load, refresh)
+
+
+def gh_switch_cmd(login: str, host: str = "github.com") -> list[str]:
+    """The gh arguments that make `login` gh's active account on `host`."""
+    if not valid_login(login):
+        raise ValueError(f"'{login}' is not a GitHub account name")
+    if not _HOST.fullmatch(host or ""):
+        raise ValueError(f"'{host}' is not a host name")
+    return ["auth", "switch", "--hostname", host, "--user", login]
+
+
+def gh_switch(login: str, host: str = "github.com") -> dict:
+    try:
+        args = gh_switch_cmd(login, host)
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    code, out = _gh(args, timeout=20)
+    _gh_forget()
+    return {"ok": code == 0, "message": out or f"gh now uses {login} on {host}.", "account": login}
+
+
+def gh_token(login: str, host: str = "github.com") -> tuple[str | None, str | None]:
+    """(token, error) of one gh account, for a child process's environment only: never logged, cached, returned to
+    the dashboard or written anywhere."""
+    if not valid_login(login) or not _HOST.fullmatch(host or ""):
+        return None, f"'{login}' is not a GitHub account name"
+    code, out = _gh(["auth", "token", "--hostname", host, "--user", login], timeout=20, raw=True)
+    if code == 127 and out == GH_MISSING:
+        return None, GH_MISSING
+    tok = next((ln.strip() for ln in reversed(out.splitlines()) if re.fullmatch(r"[A-Za-z0-9_.-]{20,}", ln.strip())), None)
+    if code == 0 and tok:
+        return tok, None
+    detail = gh_redact(out, tok or "").splitlines()
+    return None, (f"gh has no login for {login} on {host}. Run `gh auth login --hostname {host}` and sign in as {login}, "
+                  f"then press Refresh." + (f"\n{detail[0]}" if detail else ""))
+
+
+def parse_github_remote(url: str) -> dict | None:
+    """{host, owner, name, repo} of a GitHub-style remote URL (https, ssh:// or git@host:), else None."""
+    u = (url or "").strip()
+    seg = r"(?P<o>[^/\s:]+)/(?P<n>[^/\s]+?)(?:\.git)?/?"
+    m = (re.fullmatch(rf"https?://(?:[^/@\s]+@)?(?P<h>[^/\s:@]+)(?::\d+)?/{seg}", u)
+         or re.fullmatch(rf"ssh://(?:[^/@\s]+@)?(?P<h>[^/\s:@]+)(?::\d+)?/{seg}", u)
+         or re.fullmatch(rf"[A-Za-z0-9_.-]+@(?P<h>[^/\s:@]+):/?{seg}", u))
+    if not m or not _GH_OWNER.fullmatch(m["o"]) or not _GH_REPO.fullmatch(m["n"]):
+        return None
+    return {"host": m["h"].lower(), "owner": m["o"], "name": m["n"], "repo": f"{m['o']}/{m['n']}"}
+
+
+def normalize_remote(text: str, host: str = "github.com", protocol: str = "https") -> tuple[str | None, str | None]:
+    """(url, error) for a repository the user typed: an https or ssh URL, git@host:owner/name, or owner/name (made
+    into a URL on `host` with gh's git protocol). Refuses anything with spaces, shell characters, a leading '-',
+    a password in the URL, or another form (local paths, ext::, file://)."""
+    s = (text or "").strip()
+    if not s:
+        return None, "enter a repository: a URL or owner/name"
+    if s.startswith("-"):
+        return None, "a repository can't start with '-'"
+    if _REMOTE_BAD.search(s):
+        return None, "the repository contains spaces or shell characters; paste a plain URL or owner/name"
+    m = re.fullmatch(r"([^/:@]+)/([^/:@]+?)(?:\.git)?", s)
+    if m:
+        o, n = m.groups()
+        if not _GH_OWNER.fullmatch(o) or not _GH_REPO.fullmatch(n) or n in (".", ".."):
+            return None, f"'{s}' is not a valid owner/name"
+        return (f"git@{host}:{o}/{n}.git" if protocol == "ssh" else f"https://{host}/{o}/{n}.git"), None
+    if re.match(r"https?://[^/]*@", s):
+        return None, "don't put a user name, password or token in the URL; choose the GitHub account instead"
+    if re.fullmatch(rf"https://{_HOST.pattern}(?::\d{{1,5}})?(?:/{_PATH_SEG})+/?", s):
+        return s, None
+    if re.fullmatch(rf"ssh://(?:[A-Za-z0-9_.-]+@)?{_HOST.pattern}(?::\d{{1,5}})?(?:/{_PATH_SEG})+/?", s):
+        return s, None
+    if re.fullmatch(rf"[A-Za-z0-9_][A-Za-z0-9_.-]*@{_HOST.pattern}:{_PATH_SEG}(?:/{_PATH_SEG})*/?", s):
+        return s, None
+    return None, f"'{s}' is not a repository URL: use https://host/owner/name, git@host:owner/name.git or owner/name"
+
+
+def git_account(p: "Project") -> str:
+    """The gh account this project's git/GitHub operations run as ('' = git's own credentials, gh's active account)."""
+    return str(p.cfg.get("git", {}).get("account") or "")
+
+
+def set_git_account(p: "Project", login: str) -> None:
+    login = (login or "").strip()
+    if login and not valid_login(login):
+        raise ValueError(f"'{login}' is not a GitHub account name")
+    _write_project(p, _set_toml_key(_project_text(p), "git", "account", toml_str(login)))
+
+
+def _account_row(login: str, host: str) -> dict | None:
+    return next((a for a in gh_accounts()["accounts"] if a["login"] == login and a["host"] == host), None)
+
+
+def _gh_identity(p: "Project", host: str = "github.com") -> tuple[str | None, str | None, str | None]:
+    """(token for the child env or None, the account the gh call runs as, error)."""
+    login = git_account(p)
+    if login:
+        tok, err = gh_token(login, host)
+        return tok, login, err
+    acc = gh_accounts()
+    if not acc["ok"]:
+        return None, None, acc["message"]
+    active = next((a["login"] for a in acc["accounts"] if a["host"] == host and a["active"]), None)
+    return None, active, None
+
+
+def _git_auth(p: "Project", url: str) -> tuple[list[str], dict, str | None, str | None]:
+    """(git -c options, env, account, error) to run a git network command as the project's gh account. Only for an
+    https remote; ssh and local remotes keep git's own credentials. The token is only in the child's environment:
+    the credential helper (replacing the configured ones for this one command) reads it from there."""
+    login, gh = git_account(p), parse_github_remote(url or "")
+    if not login or gh is None or not url.startswith("https://"):
+        return [], {}, None, None
+    tok, err = gh_token(login, gh["host"])
+    if err:
+        return [], {}, login, err
+    helper = f'!f() {{ if [ "$1" = get ]; then echo username={login}; echo "password=$AGENTDESK_GIT_TOKEN"; fi; }}; f'
+    return ["-c", "credential.helper=", "-c", f"credential.helper={helper}"], {"AGENTDESK_GIT_TOKEN": tok}, login, None
+
+
+def _as(res: dict, who: str | None, env: dict | None = None) -> dict:
+    """The result with tokens redacted and the account it ran as."""
+    res["message"] = gh_redact(str(res.get("message") or ""), *(env or {}).values())
+    if who:
+        res["account"] = who
+        res["message"] = (res["message"] + "\n" if res["message"] else "") + f"(as GitHub account {who})"
+    return res
+
+
+def git_remote_info(p: "Project") -> dict:
+    """origin (or the first remote) for the panel: {name, url (passwords masked), github: {host, owner, name, repo}}."""
+    r = git_remote(p)
+    if r is None:
+        return {"name": None, "url": None, "github": None}
+    return {"name": r[0], "url": gh_redact(r[1]), "github": parse_github_remote(r[1])}
+
+
+def git_set_remote(p: "Project", text: str, protocol: str | None = None) -> dict:
+    """Point origin at the repository the user chose (set-url, or add when there is no origin)."""
+    login = git_account(p)
+    host = "github.com"
+    row = _account_row(login, host) if login else None
+    url, err = normalize_remote(text, host, protocol or (row or {}).get("protocol") or "https")
+    if err:
+        return {"ok": False, "message": err}
+    code, out = _g(p, "remote")
+    if code != 0:
+        return {"ok": False, "message": gh_redact(out)}
+    if "origin" in out.split():
+        _, old = _g(p, "remote", "get-url", "origin")
+        if old == url:
+            return {"ok": True, "message": f"origin is already {url}.", "url": url}
+        code, out = _g(p, "remote", "set-url", "origin", url)
+        msg = f"origin changed from {gh_redact(old)} to {url}."
+    else:
+        code, out = _g(p, "remote", "add", "origin", url)
+        msg = f"origin added: {url}."
+    _gh_forget("prs")
+    return {"ok": code == 0, "message": msg if code == 0 else gh_redact(out), "url": url}
+
+
+def parse_repos(out: str) -> list[dict]:
+    """`gh repo list --json nameWithOwner,url,isPrivate` -> [{name, url, private}]."""
+    data = _json_or_none(out)
+    return [{"name": str(x["nameWithOwner"]), "url": str(x.get("url") or ""), "private": x.get("isPrivate") is True}
+            for x in (data if isinstance(data, list) else []) if isinstance(x, dict) and x.get("nameWithOwner")]
+
+
+def gh_repo_list(p: "Project", owner: str = "", refresh: bool = False) -> dict:
+    """Repositories of `owner` (default: the project's account, else gh's active one) visible to that account."""
+    tok, who, err = _gh_identity(p)
+    if err:
+        return {"ok": False, "message": err, "repos": [], "account": who}
+    owner = (owner or who or "").strip()
+    if not valid_login(owner):
+        return {"ok": False, "message": f"'{owner}' is not a GitHub user or organization name", "repos": [], "account": who}
+
+    def load() -> dict:
+        code, out = _gh(["repo", "list", owner, "--json", "nameWithOwner,url,isPrivate", "--limit", "100"], token=tok)
+        if code != 0:
+            return {"ok": False, "message": out, "repos": []}
+        return {"ok": True, "message": "", "repos": parse_repos(out)}
+    return {**_gh_cached(("repos", owner, who), load, refresh), "owner": owner, "account": who}
+
+
+PR_FIELDS = "number,title,headRefName,baseRefName,author,url,state,isDraft"
+
+
+def parse_prs(out: str) -> list[dict]:
+    """`gh pr list --json PR_FIELDS` -> [{number, title, head, base, author, url, state, draft}]."""
+    data = _json_or_none(out)
+    rows = []
+    for x in data if isinstance(data, list) else []:
+        if not isinstance(x, dict):
+            continue
+        a = x.get("author")
+        rows.append({"number": int(x.get("number") or 0), "title": str(x.get("title") or ""),
+                     "head": str(x.get("headRefName") or ""), "base": str(x.get("baseRefName") or ""),
+                     "author": str(a.get("login") or "") if isinstance(a, dict) else str(a or ""),
+                     "url": str(x.get("url") or ""), "state": str(x.get("state") or ""), "draft": x.get("isDraft") is True})
+    return rows
+
+
+def parse_checks(out: str) -> dict:
+    """`gh pr view --json statusCheckRollup` -> {passed, failed, pending, skipped, total, summary, checks: [{name, outcome}]}."""
+    data = _json_or_none(out)
+    items = data.get("statusCheckRollup") if isinstance(data, dict) else None
+    checks = []
+    for c in items if isinstance(items, list) else []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("__typename") == "StatusContext" or ("context" in c and "conclusion" not in c):
+            name, state = str(c.get("context") or "status"), str(c.get("state") or "").upper()
+            outcome = "passed" if state == "SUCCESS" else "failed" if state in ("FAILURE", "ERROR") else "pending"
+        else:
+            name = str(c.get("name") or c.get("workflowName") or "check")
+            status, concl = str(c.get("status") or "").upper(), str(c.get("conclusion") or "").upper()
+            outcome = ("pending" if status != "COMPLETED" else "passed" if concl in _CHECK_OK
+                       else "skipped" if concl in _CHECK_SKIP else "failed")
+        checks.append({"name": name, "outcome": outcome})
+    n = {k: sum(1 for c in checks if c["outcome"] == k) for k in ("passed", "failed", "pending", "skipped")}
+    summary = ", ".join(f"{v} {k}" for k, v in n.items() if v) or "no checks"
+    return {**n, "total": len(checks), "summary": summary, "checks": checks}
+
+
+def _gh_repo(p: "Project") -> tuple[dict | None, str | None]:
+    info = git_remote_info(p)
+    if info["github"] is None:
+        return None, ("local-only project: connect it to a GitHub repository first" if info["url"] is None
+                      else f"the remote {info['url']} is not a GitHub repository")
+    return info["github"], None
+
+
+def git_prs(p: "Project", refresh: bool = False) -> dict:
+    """Open pull requests of the connected repository."""
+    gh, err = _gh_repo(p)
+    if err:
+        return {"ok": False, "message": err, "prs": []}
+    tok, who, err = _gh_identity(p, gh["host"])
+    if err:
+        return {"ok": False, "message": err, "prs": [], "account": who}
+    repo = f"{gh['host']}/{gh['repo']}"
+
+    def load() -> dict:
+        code, out = _gh(["pr", "list", "--repo", repo, "--state", "open", "--limit", "50", "--json", PR_FIELDS],
+                        cwd=p.repo, token=tok, host=gh["host"])
+        return {"ok": code == 0, "message": "" if code == 0 else out, "prs": parse_prs(out) if code == 0 else []}
+    return {**_gh_cached(("prs", repo, who), load, refresh), "repo": gh["repo"], "account": who}
+
+
+def git_pr_checks(p: "Project", number: int, refresh: bool = False) -> dict:
+    gh, err = _gh_repo(p)
+    if err:
+        return {"ok": False, "message": err}
+    tok, who, err = _gh_identity(p, gh["host"])
+    if err:
+        return {"ok": False, "message": err, "account": who}
+    repo = f"{gh['host']}/{gh['repo']}"
+
+    def load() -> dict:
+        code, out = _gh(["pr", "view", str(int(number)), "--repo", repo, "--json", "statusCheckRollup"],
+                        cwd=p.repo, token=tok, host=gh["host"])
+        return {"ok": True, "message": "", **parse_checks(out)} if code == 0 else {"ok": False, "message": out}
+    return {**_gh_cached(("checks", repo, int(number), who), load, refresh), "number": int(number), "account": who}
+
+
+def _branch_name_ok(p: "Project", b: str) -> bool:
+    return bool(b) and not b.startswith("-") and _g(p, "check-ref-format", "--branch", b)[0] == 0
+
+
+def git_pr_create(p: "Project", title: str, body: str = "", head: str = "", base: str = "", draft: bool = False) -> dict:
+    """Open a pull request from `head` (default: the current branch) into `base` (default: the project's base).
+    The branch must be on the remote already (Push it first)."""
+    gh, err = _gh_repo(p)
+    if err:
+        return {"ok": False, "message": err}
+    title, body = (title or "").strip(), (body or "").strip()
+    head = (head or "").strip() or _g(p, "rev-parse", "--abbrev-ref", "HEAD")[1]
+    base = (base or "").strip() or p.cfg["repo"]["base"]
+    if not title:
+        return {"ok": False, "message": "a pull request needs a title"}
+    if len(title) > 256 or len(body) > 60_000:
+        return {"ok": False, "message": "the title or description is too long"}
+    for b in (head, base):
+        if not _branch_name_ok(p, b):
+            return {"ok": False, "message": f"'{b}' is not a valid branch name"}
+    if head == base:
+        return {"ok": False, "message": f"the pull request needs a branch other than the base '{base}'"}
+    remote = git_remote(p)
+    if remote and _g(p, "rev-parse", "--verify", "-q", f"refs/remotes/{remote[0]}/{head}")[0] != 0:
+        return {"ok": False, "message": f"'{head}' is not on {remote[0]} yet: push it first."}
+    tok, who, err = _gh_identity(p, gh["host"])
+    if err:
+        return {"ok": False, "message": err, "account": who}
+    args = ["pr", "create", "--repo", f"{gh['host']}/{gh['repo']}", "--head", head, "--base", base,
+            f"--title={title}", f"--body={body}"] + (["--draft"] if draft else [])
+    code, out = _gh(args, cwd=p.repo, token=tok, host=gh["host"], timeout=60)
+    url = next((w for w in reversed(out.split()) if w.startswith("https://")), "") if code == 0 else ""
+    _gh_forget("prs")
+    return _as({"ok": code == 0, "message": out or (f"Opened {url}" if url else ""), "url": url}, who)
 
 
 def add_worktree(p: Project, wt: Path, branch: str, base: str) -> None:
@@ -1529,6 +2000,7 @@ def guard(wt: Path, also: tuple[Path, ...] = (), never: tuple[Path, ...] = (), e
     """can_use_tool for agents that work on their own: shell commands matching `[guard] deny` (or
     `extra_deny`) are refused, and edits must land inside `wt` or one of `also` (folders or files), but
     never inside `never` (other than `wt` itself). Everything else is allowed."""
+    _load_sdk()
     deny = [re.compile(x, re.I) for x in [*settings()["guard"]["deny"], *extra_deny]]
     root = norm_path(wt, wt)
     roots = [norm_path(a, wt) for a in also]
@@ -1591,6 +2063,7 @@ Full task:
 
 
 def options(p: Project, **kw) -> ClaudeAgentOptions:
+    _load_sdk()
     env = {**account_env(p.account), "AGENTDESK_HOME": scratch_home(), **kw.pop("env", {})}
     return ClaudeAgentOptions(env=env, **kw)
 
@@ -1699,6 +2172,10 @@ def read_activity(p: Project, task_id: str, limit: int = 500) -> list[dict]:
 
 
 async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
+    if task.tier in TIER_ORDER:  # the task file decides: no model call
+        Activity(p, task.id, "router").add("routed", tier=task.tier, text="set in the task file")
+        return {"tier": task.tier, "why": "set in the task file", "brief": task.body}
+    _load_sdk()
     r = settings()["router"]
     opts = options(p, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
                    allowed_tools=["Read", "Grep", "Glob"], disallowed_tools=["Edit", "Write", "Bash", "PowerShell"],
@@ -1737,13 +2214,12 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
             tries += 1
     if not result or result.get("tier") not in TIER_ORDER:
         result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
-    if task.tier in TIER_ORDER:
-        result.update(tier=task.tier, why="set in the task file")
     act.add("routed", tier=result.get("tier"), text=result.get("why", ""))
     return result
 
 
 async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter) -> tuple[bool, str]:
+    _load_sdk()
     s = settings()
     t = s["tiers"][tier]
     entry = meter.state["tasks"][task.id]
@@ -1977,13 +2453,13 @@ def _toml_edit(text: str, drop: set[tuple[str, str]], blank_secret_env: bool = F
 
 def _portable_toml(text: str) -> str:
     """project.toml without the machine-specific repo path/worktrees and the account; secret-looking env values blanked."""
-    res = _toml_edit(text, {("", "account"), ("repo", "path"), ("repo", "worktrees")}, blank_secret_env=True)
+    res = _toml_edit(text, {("", "account"), ("repo", "path"), ("repo", "worktrees"), ("git", "account")}, blank_secret_env=True)
     tomllib.loads(res)
     return res
 
 
 def _localize_toml(text: str, name: str, repo: str, worktrees: str, account: str | None) -> str:
-    text = _toml_edit(text, {("", "account"), ("", "name"), ("repo", "path"), ("repo", "worktrees")}, blank_secret_env=True)
+    text = _toml_edit(text, {("", "account"), ("", "name"), ("repo", "path"), ("repo", "worktrees"), ("git", "account")}, blank_secret_env=True)
     lines = text.splitlines()
     head = [f"name = {toml_str(name)}"] + ([f"account = {toml_str(account)}"] if account else [])
     first = next((i for i, l in enumerate(lines) if l.lstrip().startswith("[")), len(lines))

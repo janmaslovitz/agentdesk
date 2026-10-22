@@ -90,6 +90,30 @@ Limits: a budget per call and per run, and a pause at the account's usage thresh
 (`data/settings.toml`, `[limits]`). Workers can't push, change remotes, publish or edit outside
 their worktree (`[guard]`).
 
+## The Git window
+
+Each project's **Git** section shows the branch, what is ahead/behind, the `auto/*` branches, and the repository
+it is connected to (`origin`). Everything that changes something asks first; nothing happens on its own.
+
+- **Refresh** fetches and reloads the lists below. **Merge into base**, **Pull** (fast-forward only) and **Push**
+  (the current or the base branch, never forced; sets the upstream when there is none) work as before.
+- **Connect to**: paste `https://github.com/owner/name`, `git@github.com:owner/name.git` or just `owner/name`, or
+  press **List** to pick one of the repositories of an account or organization (`gh repo list`). **Connect…**
+  sets `origin` (`git remote set-url`, or `add` when there is none); git's error is shown as it is.
+- **GitHub account**: the accounts the GitHub CLI knows (`gh auth status`; ★ = gh's active one). **Use for this
+  project** saves it in `project.toml` as `[git] account = "name"` (not exported: it is per computer); pull, push,
+  fetch and the pull-request calls then run as that account, and each result says which account it used. The
+  token comes from `gh auth token` and is passed only in that one command's environment: it is never shown,
+  logged or stored. ssh and local remotes keep git's own credentials. **Make active in gh** runs
+  `gh auth switch -u <name>`, which changes gh for every program on this computer.
+- **Pull requests** lists the open ones (`gh pr list`), shows a PR's checks on demand and opens it in the
+  browser. **New pull request** (from branch, into, title, description, draft) runs `gh pr create`; push the
+  branch first. Merging a pull request is left to GitHub.
+
+Needs the [GitHub CLI](https://cli.github.com/) for the account and pull-request parts (`gh auth login` once;
+`gh auth login` again to add another account). Without it, or when it isn't logged in, the window says what to
+run; fetch, pull, push and merge keep working. gh answers are reused for 5 seconds; **Refresh** asks again.
+
 ## The chat: Assistant, Coworker and Planner modes
 
 Each project has a chat with a mode switch in its header, saved in the project's `project.toml`
