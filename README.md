@@ -84,13 +84,14 @@ command = "npx"
 args = ["-y", "@sdsrs/code-graph"]
 env = { CODE_GRAPH_NO_AUTO_UPDATE = "1" }
 enabled = true                  # default false
-roles = ["worker", "router"]    # default ["worker"]
+roles = ["worker"]              # default ["worker"]; "router" is not supported yet (its tools are read-only and not pre-approved)
 ```
 
 Only `enabled = true` entries for the role are passed to the agent; `npx` is resolved with `which` (`npx.cmd` on
 Windows). The server runs in the agent's working directory (the worker's worktree). `allowed_tools` is not
 widened and the worker guard allows `mcp__*` tools. Invalid entries are skipped with a log line.
-`.code-graph/` is never committed by the orchestrator.
+`.code-graph/` is never committed by the orchestrator. Do not put secrets in `env`: it reaches the CLI as a
+command-line argument; use the OS environment instead.
 
 ## How work flows
 
