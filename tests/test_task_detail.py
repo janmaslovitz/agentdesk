@@ -208,7 +208,7 @@ def test_run_timelines_are_exported_only_with_the_logs(project, tmp_path):
 def test_panel_source_sections_and_no_reset_on_polling():
     html = (Path(server.WEB) / "index.html").read_text(encoding="utf-8")
     i = html.index("async function showDetail")
-    js = html[i:html.index("\nfunction toggleDone", i)]
+    js = html[i:html.index("\nfunction toggleGroup", i)]
     for title in ('"Prompt"', '"Orchestrator handoff"', '"Agent work"', '"Agent report"'):
         assert title in js
     assert js.index('"Prompt"') < js.index('"Orchestrator handoff"') < js.index('"Agent work"') < js.index('"Agent report"')
