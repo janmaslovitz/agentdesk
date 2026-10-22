@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.2.1 - 2026-10-22
+
 ### Fixed
 - After an update the dashboard could show no projects at all: the installed app had been started from an agent's
   shell (an install or restart done by the Coworker) that carried the workers' throw-away `AGENTDESK_HOME`
