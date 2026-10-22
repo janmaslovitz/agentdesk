@@ -289,7 +289,7 @@ async function refreshAllOnce() {
     const c = p.counts, done = c.done||0, total = Object.values(c).reduce((a,b)=>a+b,0);
     return `<div class="proj${p.slug===cur?" sel":""}" onclick="pickProject('${esc(p.slug)}')">
       <div class="n"><span class="dot${p.running?" live":""}"></span>${esc(p.name)}</div>
-      <div class="m">${done}/${total} done${c.blocked?` · ${c.blocked} blocked`:""} · ${money(p.spent_usd)} · ${esc(p.account)}</div></div>`;
+      <div class="m">${done}/${total} done${c.blocked?` · ${c.blocked} blocked`:""} · ${money(p.spent_usd)} · ${esc(p.account)}${p.disk?` · <span title="Disk use${p.disk.warn?": over the limit, see Disk":""}" style="${p.disk.warn?"color:var(--warn)":""}">${p.disk.warn?"⚠ ":""}${bytesText(p.disk.total)}</span>`:""}</div></div>`;
   }).join("") || `<div class="muted">No projects yet.</div>`;
   if (ov.version && $("ver")) $("ver").textContent = `AgentDesk v${ov.version.version}` + (ov.version.commit ? ` · ${ov.version.commit}` : "") + (ov.version.built ? ` · built ${ov.version.built}` : "");
   $("accounts").innerHTML = ov.accounts.map(a => {
@@ -383,8 +383,62 @@ function shell() {
       <button id="bCustom" onclick="buildGo('custom')" hidden>Custom build</button>
       <button id="bStop" onclick="buildStop()" disabled>Stop</button><button onclick="buildOpen()">Open folder</button></h3>
     <div style="padding:8px 14px"><div id="bInfo" class="muted"></div><pre id="bLog" style="white-space:pre-wrap;max-height:260px;overflow:auto"></pre></div></section>
+  <section><h3>Disk <span class="muted" id="dHead"></span><span class="spacer"></span>
+      <button onclick="diskLoad(true)">Measure again</button><button id="dClean" onclick="diskPreview()" title="Shows what would be deleted first (dry run)">Clean up</button></h3>
+    <div style="padding:8px 14px"><div id="dWarn"></div><div id="dInfo"></div><div id="dPlan"></div><pre id="dMsg" style="white-space:pre-wrap"></pre></div></section>
   <section><h3>Needs attention <span class="badge" id="attnCount">0</span></h3><div id="attn"></div></section>
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
+}
+
+const bytesText = n => { n = n || 0; for (const [u, s] of [["GB", 1073741824], ["MB", 1048576], ["KB", 1024]]) if (n >= s) return (n / s).toFixed(1) + " " + u; return n + " B"; };
+let diskFor = null, diskAt = 0, diskTimer = null, diskSt = null;
+async function diskLoad(refresh) {
+  const want = cur; diskFor = cur; diskAt = Date.now();
+  const d = await api(`/api/p/${want}/disk${refresh ? "?refresh=1" : ""}`);
+  if (want !== cur || d.error) return;
+  diskShow(d);
+}
+function diskShow(d) {
+  diskSt = d; clearTimeout(diskTimer);
+  const busy = d.measuring || d.job?.running;
+  if (busy) diskTimer = setTimeout(() => { if (diskFor === cur) diskLoad(); }, 3000);  // follows a measurement/cleanup until it ends
+  const r = d.report, base = p => p.split(/[\\/]/).filter(Boolean).pop();
+  const errs = (d.errors || []).map(e => `<div style="color:var(--warn)">config: ${esc(e)}</div>`).join("");
+  $("dClean").disabled = !d.enabled || !r || !(r.actions || []).length || !!d.job?.running;
+  if (!d.enabled) { $("dHead").textContent = "off ([hygiene] enabled = false)"; $("dWarn").innerHTML = errs; $("dInfo").innerHTML = ""; return; }
+  if (!r || r.error) { $("dHead").textContent = d.measuring ? "measuring…" : r?.error ? "measuring failed" : "not measured yet"; $("dWarn").innerHTML = errs + (r?.error ? `<div style="color:var(--bad)">${esc(r.error)}</div>` : ""); $("dInfo").innerHTML = ""; return; }
+  $("dHead").textContent = `${bytesText(r.total)} · measured ${new Date(r.ts * 1000).toLocaleTimeString()}${d.measuring ? " · measuring again…" : ""} · ${d.auto ? "auto cleanup on" : "suggest only"}`;
+  $("dWarn").innerHTML = errs + (r.warnings || []).map(w => `<div style="color:var(--warn)">⚠ ${esc(w)}</div>`).join("");
+  const t = (r.targets || []).map(x => `<div><code>${esc(base(x.path))}</code> ${bytesText(x.bytes)}${x.over ? ' <b style="color:var(--warn)">over limit</b>' : ""}
+    <span class="muted">${esc(x.kind)}${x.task ? " · task " + esc(x.task) : ""}${x.profiles.length ? " · " + x.profiles.map(p => `${esc(p.name)} ${bytesText(p.bytes)}`).join(", ") : ""}${x.stale_bytes ? ` · ${bytesText(x.stale_bytes)} untouched ${r.cfg.stale_days}+ days` : ""}</span></div>`).join("");
+  const w = r.worktrees, dd = r.data;
+  const job = d.job?.running ? `<div>Cleaning up…</div>` : d.job?.result ? `<div>Last cleanup freed <b>${bytesText(d.job.result.freed)}</b>: ${d.job.result.done.length} done, ${d.job.result.skipped.length} skipped${d.job.result.skipped.length ? "<div class=\"muted\">" + d.job.result.skipped.map(s => `skipped ${esc(s.kind)} ${esc(s.path)}: ${esc(s.reason)}`).join("<br>") + "</div>" : ""}</div>` : d.job?.error ? `<div style="color:var(--bad)">Cleanup failed: ${esc(d.job.error)}</div>` : "";
+  $("dInfo").innerHTML = (t || `<div class="muted">No cargo target dirs found.</div>`) +
+    `<div>Worktrees ${bytesText(w.bytes)} <span class="muted">${w.items.length} in ${esc(w.path || "-")}</span></div>` +
+    `<div>AgentDesk data ${bytesText(dd.bytes)} <span class="muted">${Object.entries(dd.parts).map(([k, v]) => `${k} ${bytesText(v)}`).join(" · ")}</span></div>` +
+    (r.advice || []).map(a => `<div class="muted">💡 ${esc(a)}</div>`).join("") +
+    `<div class="muted">${(r.actions || []).length ? `Clean up could free about ${bytesText(r.reclaimable)} (${r.actions.length} item${r.actions.length === 1 ? "" : "s"}).` : "Nothing to clean up."}${d.run_active ? " A run or build is going: nothing is deleted meanwhile." : ""}</div>` + job;
+}
+async function diskPreview() {
+  const d = await api(`/api/p/${cur}/disk/clean`, {apply: false});  // dry run: only the plan, nothing is deleted
+  if (d.error || !d.report) return ($("dMsg").textContent = d.error || "Not measured yet: wait a moment.");
+  diskShow(d);
+  const acts = d.report.actions || [];
+  $("dPlan").innerHTML = `<div class="muted" style="margin-top:6px">Dry run, nothing has been deleted. Choose what to clean up:</div>` +
+    acts.map((a, i) => `<label style="display:block;margin:4px 0"><input type="checkbox" class="dAct" value="${i}" checked> <b>${esc(a.kind)}</b> <code>${esc(a.path)}</code> ${bytesText(a.bytes)}
+      <div class="muted" style="margin-left:22px">${esc(a.why)}</div></label>`).join("") +
+    `<button class="primary" onclick="diskApply()">Delete selected</button> <button onclick="$('dPlan').innerHTML=''">Cancel</button>`;
+}
+async function diskApply() {
+  const acts = diskSt?.report?.actions || [], sel = [...document.querySelectorAll(".dAct:checked")].map(x => acts[+x.value]).filter(Boolean);
+  if (!sel.length) return;
+  const total = sel.reduce((s, a) => s + a.bytes, 0);
+  if (!confirm(`Delete ${sel.length} item${sel.length === 1 ? "" : "s"}, about ${bytesText(total)}?
+Each one is checked again first; nothing is deleted while a run, a build or a cargo process uses it.`)) return;
+  const r = await api(`/api/p/${cur}/disk/clean`, {apply: true, confirm: true, ids: sel.map(a => a.id)});
+  $("dMsg").textContent = r.ok ? "Cleaning up… each action and the space it freed go to the Activity log." : "Not done: " + (r.message || r.error || "");
+  $("dPlan").innerHTML = "";
+  await diskLoad();
 }
 
 let gitSt = null, gitFor = null, ghInfo = null, gitPrList = [];
@@ -572,6 +626,8 @@ async function refreshOnce() {
   showLive(st);
   if (gitFor !== cur) gitLoad();
   if (buildFor !== cur) buildLoad();
+  if (diskFor !== cur) { $("dPlan").innerHTML = ""; $("dMsg").textContent = ""; diskLoad(); }
+  else if (Date.now() - diskAt > 60000) diskLoad();
   showPlan(st.plan, st.runner.running);
   const p = st.project, r = st.runner;
   const po = ov?.projects.find(x => x.slug === cur);
