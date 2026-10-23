@@ -28,6 +28,8 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import reliability
+
 _SDK_NAMES = ("AssistantMessage", "ClaudeAgentOptions", "ClaudeSDKClient", "PermissionResultAllow", "PermissionResultDeny",
               "RateLimitEvent", "ResultMessage", "TextBlock", "ToolResultBlock", "ToolUseBlock", "UserMessage", "query")
 _sdk_lock = threading.Lock()
@@ -215,6 +217,8 @@ budget_usd = 5.0
 enabled = true
 interval_s = 30
 retry_crashed = 1
+run_timeout_min = 720     # kill a run (and its git / claude children) that is older than this; 0 = never
+min_free_gb = 1.0         # no run starts with less free disk space
 
 # Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
 [chat.planner]
@@ -1034,7 +1038,9 @@ class Store:
     def log(self, msg: str) -> None:
         line = f"[{dt.datetime.now():%m-%d %H:%M:%S}] {msg}"
         print(line, flush=True)
-        with self.p.path("agentdesk.log").open("a", encoding="utf-8") as f:
+        lf = self.p.path("agentdesk.log")
+        reliability.rotate(lf)
+        with lf.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
     def load(self) -> dict:
@@ -2016,7 +2022,8 @@ def run_gates(p: Project, store: Store, wt: Path, kind: str, crates: list[str] |
 # ----------------------------------------------------------------------------- auto-runner (pure logic; the loop is in server.py)
 
 NL = chr(10)
-AUTO_DEFAULTS = {"enabled": True, "interval_s": 30, "retry_crashed": 1}
+# run_timeout_min: a run older than this is killed with all its children (0 = never); min_free_gb: no run starts below it.
+AUTO_DEFAULTS = {"enabled": True, "interval_s": 30, "retry_crashed": 1, "run_timeout_min": 720, "min_free_gb": 1.0}
 
 
 def autorunner_cfg(p: Project | None = None, global_cfg: dict | None = None, project_cfg: dict | None = None) -> dict:
@@ -2027,6 +2034,8 @@ def autorunner_cfg(p: Project | None = None, global_cfg: dict | None = None, pro
     out["enabled"] = bool(out["enabled"])
     out["interval_s"] = max(5, int(out["interval_s"]))
     out["retry_crashed"] = max(0, int(out["retry_crashed"]))
+    out["run_timeout_min"] = max(0, int(out["run_timeout_min"]))
+    out["min_free_gb"] = max(0.0, float(out["min_free_gb"]))
     return out
 
 

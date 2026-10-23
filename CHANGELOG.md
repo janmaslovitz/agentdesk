@@ -6,6 +6,18 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- Server reliability (docs/SERVER.md): systemd `Type=notify` with `WatchdogSec=60`, `Restart=always`, unlimited start
+  retries, enabled at install; the gateway and instances send `READY=1` and `WATCHDOG=1` (pure Python, no-op outside
+  systemd) and ping only while a self-check passes (loopback `/gateway/health`, user store readable, disk not full), so
+  a hung server is restarted. `/gateway/health` returns JSON (ok, version, instances up / down); `agentdesk-server
+  status` and `doctor` show it.
+- Crash / boot recovery at gateway and instance start: stale pid files (dead process or reused pid), orphan children of
+  dead runs, tasks left `working`, orphan and half-created worktrees; a chat cut off mid-turn shows "interrupted by a
+  restart". `autostart_instances` (default on) restarts the instances of users who were active before a reboot so
+  their auto-runner continues the queue.
+- Guards: `[autorunner] run_timeout_min` kills a run and its children after a hard timeout, `min_free_gb` refuses to
+  start runs on a nearly full disk; graceful SIGTERM shutdown (`shutdown_grace_seconds`); size-based rotation of
+  `audit.log`, `agentdesk.log`, `runner.log` and instance logs (`log_max_mb`, `log_keep`).
 - Console admin tool `agentdesk-server` (also `python -m agentdesk server ...`, stdlib only, works over SSH): `init`
   (server home, `server.toml` with defaults, first admin interactively or `--admin-password-file`), `user
   add|list|passwd|disable|enable|delete`, `status`, `config get|set` (host, port, tls, idle_timeout, run_as_users, ...) and

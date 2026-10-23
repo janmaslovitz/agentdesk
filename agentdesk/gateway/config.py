@@ -24,6 +24,11 @@ DEFAULTS: dict = {
     "run_as": "sudo",              # "sudo" (sudo -n -u agentdesk-<username>) or "systemd-run"
     "python": "",                  # interpreter for the instances (default: the gateway's own)
     "max_body_mb": 200,            # largest request body passed through (uploads)
+    "autostart_instances": True,   # at start, start the instances of users that were active before a reboot / crash
+    "shutdown_grace_seconds": 25.0,  # on SIGTERM each instance gets this long to finish its step (keep < TimeoutStopSec)
+    "log_max_mb": 10.0,            # rotate audit.log and the instance logs at this size ...
+    "log_keep": 5,                 # ... keeping this many old files
+    "min_free_gb": 1.0,            # the watchdog stops pinging (systemd restarts the service) below this much free disk
 }
 
 EXAMPLE = """# AgentDesk Server gateway settings. Restart the gateway after a change.
@@ -35,6 +40,8 @@ port = 8080
 session_hours = 12
 session_idle_minutes = 120
 idle_stop_minutes = 30      # stop idle user instances (runs, chats and builds keep them alive)
+autostart_instances = true  # after a reboot, start the instances of users who were active so their queues go on
+# shutdown_grace_seconds = 25   log_max_mb = 10   log_keep = 5   min_free_gb = 1
 run_as_users = false        # true: each instance runs as OS user agentdesk-<username> (see README)
 # run_as = "sudo"           # or "systemd-run"
 """

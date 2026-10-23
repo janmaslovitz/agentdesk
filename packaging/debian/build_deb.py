@@ -91,16 +91,23 @@ Description=AgentDesk Server (login gateway and per-user AgentDesk instances)
 Documentation=file:///usr/share/doc/agentdesk-server/README.Debian
 After=network-online.target
 Wants=network-online.target
+# Restart forever after crashes: never give up (a burst of failures at boot must not leave the server down).
+StartLimitIntervalSec=0
 
 [Service]
-Type=simple
+# notify: the gateway sends READY=1 after it listens and WATCHDOG=1 pings while its self-check passes; a hung
+# gateway misses the pings and is killed and restarted after WatchdogSec.
+Type=notify
+NotifyAccess=main
+WatchdogSec=60
 User=agentdesk
 Group=agentdesk
 EnvironmentFile=-/etc/default/agentdesk-server
 ExecStart=/opt/agentdesk-server/venv/bin/python -m agentdesk gateway --home ${AGENTDESK_SERVER_HOME}
-Restart=on-failure
+Restart=always
 RestartSec=3
-TimeoutStopSec=30
+# SIGTERM: instances get shutdown_grace_seconds (25) to finish their step; then SIGKILL after TimeoutStopSec.
+TimeoutStopSec=45
 SyslogIdentifier=agentdesk-server
 # State (users, projects, instance data). Logs go to the journal: journalctl -u agentdesk-server
 StateDirectory=agentdesk-server
@@ -186,15 +193,17 @@ case "$1" in
 
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload || true
-      if systemctl is-enabled --quiet agentdesk-server 2>/dev/null; then
+      # enabled at install: the server comes back by itself after a reboot (started once `init` made the first admin)
+      systemctl enable agentdesk-server >/dev/null 2>&1 || true
+      if systemctl is-active --quiet agentdesk-server 2>/dev/null; then
         systemctl try-restart agentdesk-server || true
       fi
     fi
     cat <<'MSG'
 
-AgentDesk Server is installed but not started. Next:
+AgentDesk Server is installed and enabled at boot, but not started yet. Next:
   sudo agentdesk-server init                 # first admin (asks for a password)
-  sudo systemctl enable --now agentdesk-server
+  sudo systemctl start agentdesk-server
   sudo agentdesk-server doctor               # git, claude CLI and login, port, disk
 See /usr/share/doc/agentdesk-server/README.Debian (TLS, firewall, claude login).
 

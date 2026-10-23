@@ -19,6 +19,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .. import reliability
+
 try:
     import fcntl  # POSIX
 except ImportError:  # Windows
@@ -179,6 +181,7 @@ class Audit:
         with self.lock:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
+                reliability.rotate(self.path)
                 new = not self.path.exists()
                 with self.path.open("a", encoding="utf-8") as f:
                     f.write(line)

@@ -22,6 +22,7 @@ import signal
 import sys
 import threading
 
+from .. import reliability
 from . import config
 
 
@@ -112,6 +113,8 @@ def start(argv: list[str], instances=None):
     if gw.users.count() == 0:
         print(f"AgentDesk gateway: no users yet. Add one: python -m agentdesk gateway --home {home} user add NAME --admin",
               flush=True)
+    for line in gw.recover():
+        print(f"AgentDesk gateway: recovery: {line}", flush=True)
     srv = gw.make_server()
     quit_ev = threading.Event()
     thread = threading.Thread(target=srv.serve_forever, daemon=True, name="gateway-http")
@@ -120,12 +123,18 @@ def start(argv: list[str], instances=None):
     host, port = srv.server_address[:2]
     gw.audit.log("gateway started", host=str(host), port=port, tls=gw.ssl_ctx is not None)
     print(f"AgentDesk gateway listening on {gw.scheme}://{host}:{port}  (home: {home})", flush=True)
+    wd = reliability.start_watchdog(lambda: gw.self_check(port), name="gateway-watchdog")  # only under systemd
+    reliability.sd_notify("READY=1")
+    threading.Thread(target=gw.resume, daemon=True, name="gateway-resume").start()  # autostart_instances
 
     def stop() -> None:
+        reliability.sd_notify("STOPPING=1")
+        if wd:
+            wd.stop()
         quit_ev.set()
-        srv.shutdown()
+        srv.shutdown()  # no new requests
         srv.server_close()
-        gw.instances.stop_all()
+        gw.instances.stop_all()  # every instance finishes its step (or is checkpointed) within shutdown_grace_seconds
         gw.audit.log("gateway stopped")
 
     srv.thread = thread  # type: ignore[attr-defined]

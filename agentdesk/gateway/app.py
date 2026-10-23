@@ -10,7 +10,9 @@ import hmac
 import html
 import http.client
 import json
+import os
 import re
+import signal
 import socket
 import ssl
 import threading
@@ -19,6 +21,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .. import __version__, reliability
 from . import admin as admin_mod
 from .instances import GATEWAY_HEADER, InstanceError, InstanceManager
 from .sessions import SessionTable, Throttle
@@ -128,6 +131,59 @@ class Gateway:
         if self.instances.prepare is None:
             self.instances.prepare = self.prepare_instance
         harden_home(home, not cfg.get("run_as_users"))
+        reliability.configure_logs(cfg.get("log_max_mb"), cfg.get("log_keep"))
+
+    def health(self) -> dict:
+        """GET /gateway/health: no secrets, no user names."""
+        return {"ok": True, "version": __version__, "instances": self.instances.health()}
+
+    def recover(self) -> list[str]:
+        """At start: instances left over from a gateway that crashed (their pid files) are ended, since their tokens are
+        gone with it; the new instance's own recovery then fixes tasks they left `working`. Old token files go too."""
+        did = []
+        d = self.home / "instances"
+        for f in sorted(d.glob("*.pid")) if d.is_dir() else []:
+            try:
+                pid = int(f.read_text(encoding="utf-8").split()[0])
+                since = f.stat().st_mtime
+            except (OSError, ValueError, IndexError):
+                pid, since = 0, None
+            if pid > 0 and reliability.pid_is_ours(pid, since, ("agentdesk",)):
+                if not reliability.kill_group(pid):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                did.append(f"ended orphan instance of {f.stem} (pid {pid})")
+            f.unlink(missing_ok=True)
+        for f in sorted(d.glob("*.token")) if d.is_dir() else []:
+            f.unlink(missing_ok=True)
+        for line in did:
+            self.audit.log("recovery", note=line)
+        return did
+
+    def resume(self) -> list[str]:
+        """autostart_instances: start the instance of every enabled user who was active before the reboot / crash."""
+        if not self.cfg.get("autostart_instances", True):
+            return []
+        try:
+            users = [(u["username"], self.users.user_home(u["username"])) for u in self.users.list() if not u["disabled"]]
+        except RuntimeError:
+            return []
+        return self.instances.resume(users)
+
+    def self_check(self, port: int) -> tuple[bool, str]:
+        """Watchdog check: the request loop answers on loopback, users.json is readable, the disk is not full."""
+        allowed = self.cfg.get("allowed_hosts") or []
+        ok, why = reliability.loopback_get(port, "/gateway/health", tls=self.ssl_ctx is not None,
+                                           host_header=allowed[0] if allowed else None)
+        if not ok:
+            return False, why
+        try:
+            self.users.count()
+        except Exception as e:
+            return False, f"user store unreadable: {e}"
+        return reliability.disk_ok(self.home, float(self.cfg.get("min_free_gb", 1.0)))
 
     def prepare_instance(self, username: str, user_home: Path) -> list[str]:
         """Before an instance starts: its settings.toml holds exactly the user's assigned accounts, and the key
@@ -171,6 +227,7 @@ class Gateway:
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128  # the default backlog of 5 resets connections under a burst (seen on Windows)
 
     def handle_error(self, request, client_address):  # a client that went away is not worth a traceback
         import sys
@@ -319,7 +376,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, b"forbidden host", "text/plain")
         path = urllib.parse.urlsplit(self.path).path
         if path == "/gateway/health":
-            return self.send(200, b"ok", "text/plain")
+            return self.send(200, json.dumps(self.gw.health()).encode("utf-8"), "application/json")
         if path == "/login":
             return self.login_post() if self.command == "POST" else self.send(200, login_page(next_url=self.query("next")))
         sid = self.cookie_value()

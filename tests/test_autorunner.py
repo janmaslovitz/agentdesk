@@ -76,7 +76,7 @@ def test_attention_items():
 def test_new_project_is_auto_managed_without_keys(project):
     assert "autorunner" not in project.cfg
     assert "autorunner" not in (project.dir / "project.toml").read_text(encoding="utf-8")
-    assert core.autorunner_cfg(project) == {"enabled": True, "interval_s": 30, "retry_crashed": 1}
+    assert core.autorunner_cfg(project) == {**core.AUTO_DEFAULTS}
     assert core.settings()["autorunner"]["enabled"] is True
     assert server.autorun_status(project) == "Auto: on"
 

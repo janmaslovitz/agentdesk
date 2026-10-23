@@ -151,7 +151,7 @@ def test_deb_layout(tmp_path):
     reqs = (d / "opt/agentdesk-server/requirements-server.txt").read_text().lower()
     assert "claude-agent-sdk" in reqs and "pywebview" not in reqs and "pystray" not in reqs
     unit = (d / "lib/systemd/system/agentdesk-server.service").read_text()
-    for needle in ("Restart=on-failure", "NoNewPrivileges=true", "ProtectSystem=", "PrivateTmp=true", "User=agentdesk",
+    for needle in ("Restart=always", "Type=notify", "WatchdogSec=60", "RestartSec=3", "StartLimitIntervalSec=0", "After=network-online.target", "NoNewPrivileges=true", "ProtectSystem=", "PrivateTmp=true", "User=agentdesk",
                    "gateway --home"):
         assert needle in unit, needle
     for script in SCRIPTS:

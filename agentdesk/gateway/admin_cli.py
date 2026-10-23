@@ -259,6 +259,35 @@ def listening(host: str, port: int) -> bool:
         return False
 
 
+def fetch_health(cfg: dict) -> dict | None:
+    """The gateway's /gateway/health answer (no auth needed), or None when it doesn't answer."""
+    import http.client
+    import ssl
+    host = "127.0.0.1" if cfg["host"] in ("0.0.0.0", "", "::") else cfg["host"]
+    allowed = cfg.get("allowed_hosts") or []
+    try:
+        if cfg["tls_cert"]:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+            c: http.client.HTTPConnection = http.client.HTTPSConnection(host, cfg["port"], timeout=3, context=ctx)
+        else:
+            c = http.client.HTTPConnection(host, cfg["port"], timeout=3)
+        c.request("GET", "/gateway/health", headers={"Host": allowed[0]} if allowed else {})
+        r = c.getresponse()
+        data = json.loads(r.read(65536) or b"{}")
+        c.close()
+        return data if r.status == 200 and isinstance(data, dict) else None
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+
+
+def health_text(h: dict | None) -> str:
+    if not h:
+        return "no answer from /gateway/health"
+    i = h.get("instances") or {}
+    return f"{'ok' if h.get('ok') else 'NOT ok'}, version {h.get('version', '?')}, instances {i.get('up', 0)} up / {i.get('down', 0)} down"
+
+
 def systemd_state() -> str:
     if not shutil.which("systemctl"):
         return "n/a"
@@ -277,6 +306,7 @@ def cmd_status(home: Path, _args) -> None:
     print(f"home:      {home}\nsettings:  {config.config_path(home)}")
     print(f"listen:    {scheme}://{cfg['host']}:{cfg['port']}  ({reach})")
     print(f"service:   {systemd_state()}")
+    print(f"health:    {health_text(fetch_health(cfg))}")
     print(f"users:     {len(users)} ({sum(1 for u in users if u['role'] == 'admin')} admin, {sum(1 for u in users if u['disabled'])} disabled)")
     inst = home / "instances"
     print(f"instances: {len(list(inst.glob('*'))) if inst.is_dir() else 0} record(s) in {inst}")
@@ -343,6 +373,17 @@ def cmd_doctor(home: Path, _args) -> int:
             line("WARN", f"{uj} is readable by others (chmod 600)")
     else:
         line("FAIL", f"server home {home} does not exist (run `agentdesk-server init`)")
+    h = fetch_health(cfg) if port else None
+    if h:
+        line("ok" if h.get("ok") else "FAIL", f"health: {health_text(h)}")
+    elif port and listening(cfg["host"], port):
+        line("FAIL", "the port is open but /gateway/health does not answer (hung? systemd's watchdog restarts it)")
+    if shutil.which("systemctl"):
+        wd = subprocess.run(["systemctl", "show", "agentdesk-server", "-p", "WatchdogUSec", "--value"], capture_output=True, text=True).stdout.strip()
+        if wd and wd not in ("0", "infinity"):
+            line("ok", f"systemd watchdog: {wd}")
+        elif systemd_state() != "n/a":
+            line("WARN", "no systemd watchdog on agentdesk-server.service (WatchdogSec=60 in the packaged unit)")
     free = shutil.disk_usage(home if home.exists() else Path.home()).free / 2**30
     line("ok" if free >= 5 else ("WARN" if free >= 1 else "FAIL"), f"disk free: {free:.1f} GiB")
     if cfg["run_as_users"] and cfg["run_as"] == "sudo" and not shutil.which("sudo"):

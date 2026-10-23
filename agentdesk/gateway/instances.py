@@ -21,6 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .. import reliability
+
+SHUTDOWN = "gateway shutting down"
 GATEWAY_HEADER = "X-AgentDesk-Gateway-Token"  # = agentdesk.server.GATEWAY_HEADER (not imported: that pulls in core)
 APP = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent.parent
 RESTART_WINDOW_S = 600
@@ -86,6 +89,25 @@ def harden_dir(path: Path) -> None:
             pass
 
 
+ACTIVE_MARK = "was_active"
+
+
+def mark_active(user_home: Path, active: bool) -> None:
+    """Record in the user's data whether their instance was in use, so that a reboot or crash resumes their queue."""
+    f = user_home / ACTIVE_MARK
+    try:
+        if active:
+            f.write_text(str(int(time.time())), encoding="utf-8")
+        else:
+            f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def was_active(user_home: Path) -> bool:
+    return (user_home / ACTIVE_MARK).exists()
+
+
 @dataclass
 class InstanceManager:
     home: Path                        # the server home
@@ -127,6 +149,13 @@ class InstanceManager:
             fh.write(token)
         return str(f)
 
+    def _write_pid(self, username: str, pid: int) -> None:
+        try:
+            (self.home / "instances").mkdir(parents=True, exist_ok=True)
+            (self.home / "instances" / f"{username}.pid").write_text(str(pid), encoding="utf-8")
+        except OSError:
+            pass
+
     def _log(self, event: str, username: str, **kw) -> None:
         if self.audit is not None:
             self.audit.log(event, user=username, **kw)
@@ -151,10 +180,14 @@ class InstanceManager:
         for _attempt in range(3):  # a picked port can be taken before the instance binds it: try another
             port, token = free_port(), secrets.token_urlsafe(32)
             argv = (self.command or self.serve_command)(username, user_home, port, self._token_arg(username, token))
-            env = {k: v for k, v in os.environ.items() if k != "AGENTDESK_SERVER_HOME" and k not in hidden}
-            env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home))
+            env = {k: v for k, v in reliability.strip_systemd_env(dict(os.environ)).items()
+                   if k != "AGENTDESK_SERVER_HOME" and k not in hidden}
+            env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home),
+                       AGENTDESK_LOG_MAX_MB=str(self.cfg.get("log_max_mb", 10)), AGENTDESK_LOG_KEEP=str(self.cfg.get("log_keep", 5)),
+                       AGENTDESK_SHUTDOWN_GRACE=str(self.cfg.get("shutdown_grace_seconds", 25)))
             kw: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
                         if sys.platform == "win32" else {"start_new_session": True})
+            reliability.rotate(logf, self._log_max(), int(self.cfg.get("log_keep", 5)))
             out = logf.open("ab")
             try:
                 proc = subprocess.Popen(argv, cwd=APP, env=env, stdout=out, stderr=out,
@@ -180,6 +213,8 @@ class InstanceManager:
             if verified and proc.poll() is None:
                 now = self.clock()
                 inst = Instance(username, user_home, port, token, proc, now, now, log=logf)
+                mark_active(user_home, True)
+                self._write_pid(username, proc.pid)
                 self._log("instance started", username, port=port, pid=proc.pid)
                 return inst
             if proc.poll() is None:  # never verified: kill it; a foreign listener on the port gets another port
@@ -237,6 +272,12 @@ class InstanceManager:
         if event:
             self._log(event, inst.username, **kw)
 
+    def _log_max(self) -> int:
+        return max(1024, int(float(self.cfg.get("log_max_mb", 10)) * 1024 * 1024))
+
+    def _grace(self) -> float:
+        return float(self.cfg.get("shutdown_grace_seconds", 25))
+
     @staticmethod
     def _terminate(proc: subprocess.Popen, wait_s: float = 10) -> None:
         if proc.poll() is not None:
@@ -260,13 +301,39 @@ class InstanceManager:
                 inst.stopping = True
         if inst is None:
             return False
-        self._terminate(inst.proc)
+        self._terminate(inst.proc, self._grace())
+        if reason != SHUTDOWN:  # a deliberate stop; a shutdown / reboot keeps "was active" so the queue resumes
+            mark_active(inst.home, False)
         self._log("instance stopped", username, reason=reason)
         return True
 
     def stop_all(self) -> None:
-        for name in list(self.instances):
-            self.stop(name, "gateway shutting down")
+        """Stop every instance at once (each gets the grace period to finish its step), for the gateway's shutdown."""
+        threads = [threading.Thread(target=self.stop, args=(name, SHUTDOWN)) for name in list(self.instances)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def resume(self, users: list[tuple[str, Path]]) -> list[str]:
+        """Start the instance of every (name, home) that was active before the reboot / crash (autostart_instances)."""
+        started = []
+        for name, home in users:
+            if not was_active(home):
+                continue
+            try:
+                self.ensure(name, home)
+                self._log("instance resumed", name)
+                started.append(name)
+            except InstanceError as e:
+                self._log("instance resume failed", name, why=str(e)[:200])
+        return started
+
+    def health(self) -> dict:
+        with self._lock:
+            cur = list(self.instances.values())
+        up = sum(1 for i in cur if i.alive() and not i.stopping)
+        return {"up": up, "down": len(cur) - up}
 
     # -- supervision
     def busy_info(self, inst: Instance) -> dict:
@@ -294,6 +361,8 @@ class InstanceManager:
         for inst in current:
             if inst.stopping:
                 continue
+            if inst.log is not None:
+                reliability.rotate(inst.log, self._log_max(), int(self.cfg.get("log_keep", 5)), copytruncate=True)
             if not inst.alive():
                 self._forget(inst, "instance exited", code=inst.proc.returncode)
                 recent = [t for t in self.restarts.get(inst.username, []) if now - t < RESTART_WINDOW_S]
@@ -318,7 +387,8 @@ class InstanceManager:
                     continue
                 inst.stopping = True
                 del self.instances[inst.username]
-            self._terminate(inst.proc)
+            self._terminate(inst.proc, self._grace())
+            mark_active(inst.home, False)
             self._log("instance stopped", inst.username, reason="idle")
 
     def status(self) -> list[dict]:
