@@ -5,6 +5,14 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- Export a project to GitHub as its own branch (`agentdesk-export/<slug>`) of the project's repo, without touching the
+  checkout; optional push (never forced). Import can clone that branch.
+- Browse buttons (native folder / file picker) in the Export and Import dialogs.
+
+### Fixed
+- Export / Import dialogs: layout and alignment; path placeholders no longer show tabs and line breaks.
+
 
 ## 1.3.2 - 2026-10-23
 
