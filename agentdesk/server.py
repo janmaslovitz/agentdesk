@@ -1702,6 +1702,17 @@ def any_run_active() -> bool:
         return False
 
 
+def busy_info() -> dict:
+    """GET /api/busy: is work going on that must keep this instance running (a run, a chat turn, a build)?"""
+    runs = any_run_active()
+    chats = any(c.busy for c in list(CHATS.values()))
+    try:
+        builds = any(core.build_job(p).running() for p in core.projects())
+    except Exception:
+        builds = False
+    return {"busy": runs or chats or builds, "runs": runs, "chats": chats, "builds": builds}
+
+
 def update_status(force: bool = False) -> dict:
     """GET /api/update. Dev mode (not installed) only reports; a disabled check answers "unknown" without a request."""
     try:
@@ -2152,6 +2163,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(update_status())
         if parts == ["api", "overview"]:
             return self.json(overview())
+        if parts == ["api", "busy"]:  # the gateway keeps an instance alive while this says busy
+            return self.json(busy_info())
         if len(parts) >= 3 and parts[:2] == ["api", "p"]:
             p = self.proj(parts[2])
             if p is None:
