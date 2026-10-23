@@ -208,3 +208,59 @@ def test_http_routes(full, tmp_path, monkeypatch):
         assert r["name_clash"] and r["suggested"]
     finally:
         srv.shutdown()
+
+
+def test_branch_export_leaves_checkout_alone(full, tmp_path, monkeypatch):
+    repo = full.repo
+    (repo / "wip.txt").write_text("uncommitted", encoding="utf-8")
+    cur, head = g(repo, "rev-parse", "--abbrev-ref", "HEAD"), g(repo, "rev-parse", "HEAD")
+    status = g(repo, "status", "--porcelain")
+    res = core.export_to_branch(full)
+    br = "agentdesk-export/" + full.slug
+    assert res["ok"] and res["committed"] and res["branch"] == br and not res["pushed"], res
+    assert g(repo, "rev-parse", "--abbrev-ref", "HEAD") == cur and g(repo, "rev-parse", "HEAD") == head
+    assert g(repo, "status", "--porcelain") == status and (repo / "wip.txt").read_text(encoding="utf-8") == "uncommitted"
+    assert not (repo / ".agentdesk").exists()
+    tip = g(repo, "rev-parse", br)
+    assert tip.startswith(res["commit"])
+    blob = g(repo, "show", f"{br}:manifest.json") + g(repo, "show", f"{br}:project.toml")
+    no_secrets(blob.encode())
+    # no changes: no new commit
+    again = core.export_to_branch(full)
+    assert again["ok"] and again["committed"] is False and g(repo, "rev-parse", br) == tip
+    # a change: fast-forward child of the previous tip
+    (full.dir / "notes.md").write_text("changed\n", encoding="utf-8")
+    third = core.export_to_branch(full)
+    assert third["committed"] and g(repo, "rev-parse", br + "^") == tip
+    # the branch checked out in the repo is refused, not touched
+    g(repo, "checkout", "-q", br)
+    assert core.export_to_branch(full)["ok"] is False
+
+
+def test_branch_export_push_and_import(full, tmp_path, monkeypatch):
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+    assert core.export_to_branch(full, push=True)["ok"] is False  # no remote
+    g(full.repo, "remote", "add", "origin", str(bare))
+    res = core.export_to_branch(full, push=True)
+    br = res["branch"]
+    assert res["ok"] and res["pushed"], res
+    assert g(bare, "rev-parse", br) == g(full.repo, "rev-parse", br)
+    # a diverged remote branch is refused (never forced)
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(bare), str(other)], check=True)
+    g(other, "checkout", "-q", br)
+    (other / "x.txt").write_text("x")
+    g(other, "add", "-A")
+    g(other, "commit", "-qm", "remote work")
+    g(other, "push", "-q", "origin", br)
+    (full.dir / "notes.md").write_text("changed again\n", encoding="utf-8")
+    bad = core.export_to_branch(full, push=True)
+    assert bad["ok"] is False and bad["committed"] and not bad["pushed"]
+
+    new_home(monkeypatch, tmp_path)
+    clone = core.clone_for_import(str(bare), branch=br)
+    repo2 = tmp_path / "repo2"
+    repo2.mkdir()
+    q = core.import_project(clone, str(repo2))
+    assert [t.id for t in core.load_tasks(q)] == ["001", "002"]

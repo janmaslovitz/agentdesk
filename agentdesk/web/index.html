@@ -111,6 +111,14 @@ dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--p
 dialog::backdrop { background: rgb(0 0 0 / .35); }
 dialog h3 { margin: 0 0 12px; } dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 3px; }
 dialog input, dialog select, dialog textarea { width: 100%; } dialog textarea { height: 140px; }
+dialog.wide { width: min(560px, 94vw); max-height: 92vh; overflow: auto; box-sizing: border-box; }
+dialog .grp { border: 1px solid var(--line); border-radius: 10px; padding: 4px 12px 12px; margin: 0 0 12px; }
+dialog .grp h4 { margin: 8px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+dialog input, dialog select { box-sizing: border-box; min-width: 0; }
+dialog .pick { display: flex; gap: 8px; } dialog .pick input { flex: 1; width: auto; } dialog .pick button { flex: none; }
+dialog .seg { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; } dialog .seg label, dialog label.chk { display: flex; gap: 6px; align-items: center; color: var(--text); font-size: 13px; margin: 6px 0 0; }
+dialog .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+dialog .msgbox { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; min-height: 2.8em; max-height: 8em; overflow: auto; padding: 6px 8px; font: 12px/1.4 ui-monospace, Consolas, monospace; background: var(--bg); border-radius: 8px; }
 dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .attn { padding: 8px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
 .attn .k { font-size: 11px; font-weight: 600; color: var(--warn); text-transform: uppercase; min-width: 70px; }
@@ -177,28 +185,44 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
   <div class="row"><button onclick="closeDlg('dProject')">Cancel</button><button class="primary" onclick="addProject()">Add</button></div>
 </dialog>
 
-<dialog id="dExport"><h3>Export project</h3>
-  <label><input type="checkbox" id="xLogs"> Include the activity log (agentdesk.log)</label>
-  <div class="row"><button class="primary" onclick="exportZip()">Save as .zip…</button></div>
-  <label style="margin-top:10px">Or commit into git: config repo folder (empty: <code>.agentdesk/</code> in the project's repo)</label>
-  <input id="xRepo" placeholder="C:\path	o\config-repo">
-  <label><input type="checkbox" id="xPush"> Also push to the remote (never forced)</label>
-  <div class="row"><button onclick="closeDlg('dExport')">Close</button><button onclick="exportGit()">Commit export</button></div>
-  <pre id="xMsg" style="white-space:pre-wrap"></pre>
+<dialog id="dExport" class="wide"><h3>Export project</h3>
+  <div class="grp"><h4>Where to</h4>
+    <div class="seg" id="xMode">
+      <label><input type="radio" name="xmode" value="zip" checked onchange="xModeSet()"> Zip file</label>
+      <label><input type="radio" name="xmode" value="branch" onchange="xModeSet()"> GitHub branch</label>
+      <label><input type="radio" name="xmode" value="git" onchange="xModeSet()"> Git folder</label>
+    </div>
+    <p class="hint" id="xHint"></p>
+    <div id="xRepoBox"><label for="xRepo">Config repo folder (empty: <code>.agentdesk/</code> in the project's repo)</label>
+      <div class="pick"><input id="xRepo" placeholder="D:/work/config-repo"><button type="button" onclick="browse('xRepo')">Browse…</button></div></div>
+  </div>
+  <div class="grp"><h4>Options</h4>
+    <label class="chk"><input type="checkbox" id="xLogs"> Include the activity log (agentdesk.log)</label>
+    <label class="chk" id="xPushL"><input type="checkbox" id="xPush"> Also push to the remote (never forced)</label>
+  </div>
+  <pre id="xMsg" class="msgbox"></pre>
+  <div class="row"><button onclick="closeDlg('dExport')">Close</button><button class="primary" id="xGo" onclick="exportGo()">Save as .zip…</button></div>
 </dialog>
 
-<dialog id="dImport"><h3>Import project</h3>
-  <label>From a .zip file</label><input type="file" id="iFile" accept=".zip">
-  <label>Or from a repo / folder on this computer (<code>.agentdesk/</code> or a config repo)</label><input id="iSource" placeholder="C:\path	o
-epo">
-  <label>Or clone a repo from a URL</label><input id="iUrl" placeholder="https://… or path of a bare repo">
-  <label>This project's repository folder on this computer</label><input id="iRepo" placeholder="C:\path	o
-epo">
-  <label>…or clone the code from a URL into that folder (new or empty)</label><input id="iRepoUrl" placeholder="https://…">
-  <label>Account</label><select id="iAccount"></select>
-  <label>Project name (empty: the exported name)</label><input id="iName">
+<dialog id="dImport" class="wide"><h3>Import project</h3>
+  <div class="grp"><h4>Export to import (use one)</h4>
+    <label for="iFile">A .zip file</label><input type="file" id="iFile" accept=".zip">
+    <label for="iSource">A repo / folder on this computer (<code>.agentdesk/</code> or a config repo)</label>
+    <div class="pick"><input id="iSource" placeholder="D:/work/config-repo"><button type="button" onclick="browse('iSource')">Browse…</button></div>
+    <label for="iUrl">Or clone a repo from a URL</label><input id="iUrl" placeholder="https://github.com/you/repo.git">
+    <label for="iBranch">Branch to clone (optional, e.g. <code>agentdesk-export/my-project</code>)</label><input id="iBranch" placeholder="agentdesk-export/my-project">
+  </div>
+  <div class="grp"><h4>This computer</h4>
+    <label for="iRepo">Project's repository folder</label>
+    <div class="pick"><input id="iRepo" placeholder="D:/work/my-repo"><button type="button" onclick="browse('iRepo')">Browse…</button></div>
+    <label for="iRepoUrl">…or clone the code from a URL into that folder (new or empty)</label><input id="iRepoUrl" placeholder="https://github.com/you/code.git">
+  </div>
+  <div class="grp"><h4>Project</h4>
+    <label for="iAccount">Account</label><select id="iAccount"></select>
+    <label for="iName">Project name (empty: the exported name)</label><input id="iName">
+  </div>
+  <pre id="iMsg" class="msgbox"></pre>
   <div class="row"><button onclick="closeDlg('dImport')">Cancel</button><button class="primary" onclick="importProject()">Import</button></div>
-  <pre id="iMsg" style="white-space:pre-wrap"></pre>
 </dialog>
 
 <dialog id="dAccount"><h3>Add account</h3>
@@ -231,6 +255,7 @@ async function api(path, body) {
   return r.json();
 }
 function openDlg(id) {
+  if (id === "dExport") xModeSet();
   if (id === "dImport") $("iAccount").innerHTML = `<option value="">(none: pick later)</option>` + (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
   if (id === "dProject") {
     $("pPreset").innerHTML = (ov?.presets||[]).map(p => `<option>${esc(p)}</option>`).join("");
@@ -261,11 +286,31 @@ async function exportZip() {
   }
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); $("xMsg").textContent = "Downloaded " + name;
 }
-async function exportGit() {
+function xModeSet() {
+  const m = document.querySelector('input[name=xmode]:checked').value;
+  $("xRepoBox").style.display = m === "git" ? "" : "none";
+  $("xPushL").style.display = m === "zip" ? "none" : "";
+  $("xGo").textContent = m === "zip" ? "Save as .zip…" : m === "branch" ? "Export to branch" : "Commit export";
+  $("xHint").textContent = m === "zip" ? "Download the project as a .zip file."
+    : m === "branch" ? "Commits the export onto its own branch agentdesk-export/<project> of the project's repo. Your checkout, current branch and uncommitted changes are not touched."
+    : "Commits the export into .agentdesk/ of the project's repo, or into a config repo folder, on its current branch.";
+}
+async function browse(id) {
+  const r = await api("/api/pick", {kind: "folder", start: $(id).value.trim()}).catch(() => ({}));
+  if (r.ok && r.path) $(id).value = r.path;
+  else if (r.available === false || !r.ok) { const m = id[0] === "x" ? "xMsg" : "iMsg"; $(m).textContent = "Browse is only available in the desktop window; type the path."; }
+}
+async function exportGo() {
+  const m = document.querySelector('input[name=xmode]:checked').value;
+  if (m === "zip") return exportZip();
   const push = $("xPush").checked, repo = $("xRepo").value.trim();
-  if (!confirm(`Commit the export into ${repo || ".agentdesk/ of the project's repo"}` + (push ? " and push it to the remote (never forced)?" : "?"))) return;
-  const r = await api(`/api/projects/${cur}/export`, {mode: "git", confirm: true, push, config_repo: repo, include_logs: $("xLogs").checked});
-  $("xMsg").textContent = (r.ok ? "" : "Not done: ") + (r.message || r.error || "");
+  const what = m === "branch" ? "Commit the export onto the branch agentdesk-export/" + cur : `Commit the export into ${repo || ".agentdesk/ of the project's repo"}`;
+  if (!confirm(what + (push ? " and push it to the remote (never forced)?" : "?"))) return;
+  const r = await api(`/api/projects/${cur}/export`, {mode: m, confirm: true, push, config_repo: m === "git" ? repo : "", include_logs: $("xLogs").checked});
+  $("xMsg").textContent = (r.ok ? "" : "Not done: ") + (r.message || r.error || "") + (r.branch ? `
+branch: ${r.branch}
+commit: ${r.commit || "-"}
+pushed: ${r.pushed ? "yes" : "no"}` : "");
 }
 async function importProject() {
   const opts = {repo: $("iRepo").value.trim(), repo_url: $("iRepoUrl").value.trim(), account: $("iAccount").value, new_name: $("iName").value.trim()};
@@ -275,7 +320,7 @@ async function importProject() {
     if (f) {
       const q = new URLSearchParams(Object.entries(opts).filter(([, v]) => v));
       r = await (await fetch("/api/projects/import?" + q, {method: "POST", headers: {"Content-Type": "application/zip"}, body: f})).json();
-    } else r = await api("/api/projects/import", {...opts, source: $("iSource").value.trim(), source_url: $("iUrl").value.trim()});
+    } else r = await api("/api/projects/import", {...opts, source: $("iSource").value.trim(), source_url: $("iUrl").value.trim(), source_branch: $("iBranch").value.trim()});
     if (r.name_clash) {  // never overwrites: ask for another name
       const n = prompt(`${r.message}
 

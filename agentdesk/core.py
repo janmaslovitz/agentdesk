@@ -2977,6 +2977,87 @@ def export_to_git(p: Project, config_repo: str | None = None, include_logs: bool
     return res
 
 
+EXPORT_BRANCH_PREFIX = "agentdesk-export/"
+
+
+def export_to_branch(p: Project, include_logs: bool = False, push: bool = False, branch: str | None = None) -> dict:
+    """Commit the export onto its own branch `agentdesk-export/<slug>` of the project's repo, without touching the
+    checkout: the files are staged with a temporary index/work tree and the commit is made with plumbing
+    (`write-tree`, `commit-tree`, `update-ref`), so the current branch, the working tree and uncommitted changes
+    stay as they are. Layout: the export sits at the BRANCH ROOT (manifest.json, project.toml, tasks/ ...), so
+    importing needs only the clone URL + branch. Each export is a child of the branch tip (fast-forward, never
+    forced); unchanged content makes no commit. `push=True` pushes only that branch to origin (-u, never forced)."""
+    import tempfile
+    repo = p.repo
+    branch = (branch or EXPORT_BRANCH_PREFIX + p.slug).strip()
+    ref = f"refs/heads/{branch}"
+    genv = {"GIT_TERMINAL_PROMPT": "0"}
+
+    def g(*a, env=None, timeout=120):
+        code, out = run(["git", *a], repo, env={**genv, **(env or {})}, timeout=timeout)
+        return code, out.strip()
+    if not repo.is_dir() or g("rev-parse", "--git-dir")[0] != 0:
+        return {"ok": False, "message": f"{repo} is not a git repository"}
+    if g("check-ref-format", "--branch", branch)[0] != 0 or branch.startswith("-"):
+        return {"ok": False, "message": f"'{branch}' is not a valid branch name"}
+    if g("rev-parse", "--abbrev-ref", "HEAD")[1] == branch:
+        return {"ok": False, "message": f"'{branch}' is checked out in the repo; switch to another branch first"}
+    code, tip = g("rev-parse", "--verify", "-q", ref + "^{commit}")
+    tip = tip if code == 0 else ""
+    files = export_files(p, include_logs)
+
+    with tempfile.TemporaryDirectory(prefix="agentdesk-export-") as tmp:
+        work, index = Path(tmp) / "w", Path(tmp) / "index"
+        work.mkdir()
+        env = {"GIT_WORK_TREE": str(work), "GIT_INDEX_FILE": str(index)}
+
+        def tree_for(manifest: bytes) -> str:
+            shutil.rmtree(work, ignore_errors=True)
+            work.mkdir()
+            index.unlink(missing_ok=True)
+            (work / "manifest.json").write_bytes(manifest)
+            for rel, data in files.items():
+                t = work / rel
+                t.parent.mkdir(parents=True, exist_ok=True)
+                t.write_bytes(data)
+            if g("add", "-A", "-f", env=env)[0] != 0:
+                return ""
+            return g("write-tree", env=env)[1]
+        tree, old_tree = "", g("rev-parse", "--verify", "-q", tip + "^{tree}")[1] if tip else ""
+        if tip:  # unchanged content keeps the old manifest (its timestamp) so there is nothing to commit
+            code, old = run(["git", "show", f"{tip}:manifest.json"], repo)
+            try:
+                if code == 0 and json.loads(old).get("includes_logs") == include_logs:
+                    tree = tree_for(old.encode("utf-8"))
+            except ValueError:
+                pass
+        if not tree or tree != old_tree:
+            tree = tree_for(_manifest(p, files, include_logs))
+    if not tree:
+        return {"ok": False, "message": "git add failed"}
+
+    res = {"ok": True, "branch": branch, "commit": tip[:12], "committed": False, "pushed": False,
+           "message": f"nothing changed since the last export on '{branch}'"}
+    if tree != old_tree:
+        ident = ["-c", "user.name=AgentDesk", "-c", "user.email=agentdesk@localhost"]
+        code, new = g(*ident, "commit-tree", tree, *(["-p", tip] if tip else []), "-m", f"AgentDesk: export project {p.name}")
+        if code != 0:
+            return {"ok": False, "message": f"git commit failed: {new}"}
+        # old value given: the update fails rather than overwrite a branch that moved meanwhile
+        code, out = g("update-ref", "-m", "AgentDesk export", ref, new, tip or "0" * 40)
+        if code != 0:
+            return {"ok": False, "message": f"could not update '{branch}': {out}"}
+        res.update(commit=new[:12], committed=True, message=f"committed to branch '{branch}'")
+    if push:
+        names = g("remote")[1].split()
+        if not names:
+            return {**res, "ok": False, "message": res["message"] + "; local-only: there is no remote to push to"}
+        remote = "origin" if "origin" in names else names[0]
+        code, out = g("push", "-u", remote, f"{ref}:{ref}", timeout=300)  # no --force: a diverged remote is refused
+        res.update(ok=code == 0, pushed=code == 0, message=res["message"] + "; " + (out or f"pushed '{branch}' to {remote}"))
+    return res
+
+
 def _safe_rel(name: str) -> str | None:
     """The cleaned relative path of an archive entry; raises BadExport if it escapes the project folder."""
     n = name.replace("\\", "/")
@@ -3075,15 +3156,16 @@ def _free_name(name: str) -> str:
     return f"{name} {n}"
 
 
-def clone_for_import(url: str, into: Path | None = None) -> Path:
-    """Clone a config repo (git URL or local path) into a new folder and return it."""
+def clone_for_import(url: str, into: Path | None = None, branch: str | None = None) -> Path:
+    """Clone a config repo (git URL or local path) into a new folder and return it. `branch`: e.g. an
+    `agentdesk-export/<slug>` branch made by export_to_branch."""
     import tempfile
     if into is not None and into.exists() and any(into.iterdir()):
         raise BadExport(f"{into} already exists and is not empty")
     imports = DATA / "imports"
     imports.mkdir(parents=True, exist_ok=True)
     dest = into or Path(tempfile.mkdtemp(prefix="agentdesk-import-", dir=imports))
-    code, out = run(["git", "clone", "--", url, str(dest)], imports, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=600)
+    code, out = run(["git", "clone", *(["--branch", branch] if branch else []), "--", url, str(dest)], imports, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=600)
     if code != 0:
         raise BadExport(f"git clone failed: {out.strip()}")
     return dest

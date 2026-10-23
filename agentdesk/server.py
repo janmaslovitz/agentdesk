@@ -2041,7 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
                 if core.repo_state(repo) != "plain" or (Path(repo).exists() and any(Path(repo).iterdir())):
                     return {"ok": False, "message": f"{repo} already exists and is not empty; choose a new folder to clone into"}
                 core.clone_for_import(str(d["repo_url"]), Path(repo))
-            src = upload or (core.clone_for_import(str(d["source_url"])) if d.get("source_url") else Path(str(d.get("source") or "")))
+            src = upload or (core.clone_for_import(str(d["source_url"]), None, str(d.get("source_branch") or "").strip() or None) if d.get("source_url") else Path(str(d.get("source") or "")))
             if not str(src):
                 return {"ok": False, "message": "choose an export file, folder or repository"}
             p = core.import_project(src, repo, str(d.get("new_name") or ""), str(d.get("account") or "") or None,
@@ -2120,6 +2120,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json({"ok": True, "slug": p.slug})
             if parts == ["api", "projects", "import"]:
                 return self.json(self.import_route(d, query))
+            if parts == ["api", "pick"]:
+                return self.json(pick_path(str(d.get("kind") or "folder"), str(d.get("start") or "")))
             if len(parts) == 4 and parts[:2] == ["api", "projects"] and parts[3] == "export":
                 p = self.proj(parts[2])
                 if p is None:
@@ -2127,6 +2129,10 @@ class Handler(BaseHTTPRequestHandler):
                 if runner(p).running():
                     return self.json({"ok": False, "message": "a run is in progress for this project; stop it first"})
                 logs = d.get("include_logs") is True
+                if d.get("mode") == "branch":
+                    if d.get("confirm") is not True:
+                        return self.json({"ok": False, "message": "this needs confirmation"}, 400)
+                    return self.json(core.export_to_branch(p, logs, push=d.get("push") is True))
                 if d.get("mode") == "git":
                     if d.get("confirm") is not True:
                         return self.json({"ok": False, "message": "this needs confirmation"}, 400)
@@ -2336,9 +2342,33 @@ def start_tray(win, show, quit_app):
         return None
 
 
+_WINDOW = None  # the native window, once open_window created it (None in a browser)
+
+
+def pick_path(kind: str, start: str = "") -> dict:
+    """Native folder / file picker through the desktop window. {"available": False} in a browser (the page keeps
+    its plain text field). {"ok": True, "path": ""} when the user cancels."""
+    win = _WINDOW
+    if win is None:
+        return {"ok": False, "available": False, "message": "no native window: type the path"}
+    try:
+        import webview
+        kinds = webview.FileDialog if hasattr(webview, "FileDialog") else webview
+        folder = kinds.FOLDER if hasattr(kinds, "FOLDER") else webview.FOLDER_DIALOG
+        opened = kinds.OPEN if hasattr(kinds, "OPEN") else webview.OPEN_DIALOG
+        kw = {"directory": start} if start and Path(start).is_dir() else {}
+        if kind == "file":
+            kw["file_types"] = ("Export (*.zip)",)
+        res = win.create_file_dialog(folder if kind == "folder" else opened, **kw)
+    except Exception as e:
+        return {"ok": False, "available": True, "message": f"could not open the dialog: {e}"}
+    return {"ok": True, "available": True, "path": str(res[0]) if res else ""}
+
+
 def open_window(url: str, tray: bool = False) -> bool:
     """Show the dashboard in a native window; blocks until it is closed. False if no window could be shown.
     tray=True: closing (X) hides the window to a tray icon instead (if the tray can start); tray Quit sets QUIT."""
+    global _WINDOW
     try:
         import webview
         w = window_settings()
@@ -2346,6 +2376,7 @@ def open_window(url: str, tray: bool = False) -> bool:
         pos = {k: int(w[k]) for k in ("x", "y") if isinstance(w.get(k), int)}
         win = webview.create_window("AgentDesk", url, width=int(w.get("width", WINDOW_DEFAULTS["width"])),
                                     height=int(w.get("height", WINDOW_DEFAULTS["height"])), **pos)
+        _WINDOW = win
 
         def resized(width, height):
             geo.update(width=width, height=height)
