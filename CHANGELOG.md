@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.3.0 - 2026-10-23
+
 ### Added
 - Quick-question buttons above the chat (what is the agent doing, queue status, what needs attention, spending, tool stats). The chat reads the agent timeline with the new `task_activity` tool; `queue_status` shows a "now:" line for running tasks.
 - The selected task opens as its own framed card with a Close button.
