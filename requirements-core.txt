@@ -1,0 +1,2 @@
+# Core runtime, shared by the desktop App and the headless Server (no GUI libraries).
+claude-agent-sdk>=0.2.166

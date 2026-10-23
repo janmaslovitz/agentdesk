@@ -6,6 +6,11 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- Two products, one core: the desktop **App** and the headless **Server** are built independently (README, "Two products").
+  `pyproject.toml` dependencies are the core only, with extras `app` (pywebview, tray) and `server`; new
+  `requirements-core.txt`. `agentdesk.spec` leaves the gateway / server code out of `AgentDesk.exe`; the `.deb` leaves out
+  GUI icons and GUI packages. `release.ps1 -Target app|server|both`. A test imports serve, the gateway and the console tool
+  with every GUI module blocked.
 - Server disk budget (docs/SERVER.md, "Disk budget"): `disk_total_gb` (512), `disk_reserve_gb` (40), soft limit
   (80 %: warn + automatic cleanup) and hard limit (92 %: new runs, clones, imports and uploads are refused with the
   reason; running work goes on), measured by a background, cached walker plus the real file-system usage.

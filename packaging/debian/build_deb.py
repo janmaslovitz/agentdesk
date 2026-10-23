@@ -4,8 +4,8 @@
     python3 packaging/debian/build_deb.py [--out DIR] [--version X.Y.Z] [--bundle-wheels] [--stage-only DIR]
 
 Layout of the package (architecture "all": pure Python + sh; the virtualenv is created on the target by postinst):
-    /opt/agentdesk-server/app/agentdesk/          the program (no GUI libraries are needed or installed)
-    /opt/agentdesk-server/requirements-server.txt requirements.txt without pywebview (the window is not used on a server)
+    /opt/agentdesk-server/app/agentdesk/          the program (no GUI libraries or window icons)
+    /opt/agentdesk-server/requirements-server.txt requirements-core.txt (no GUI libraries; the window is not used on a server)
     /opt/agentdesk-server/wheels/                 only with --bundle-wheels: wheels for an offline install (built for THIS
                                                   machine's Python / platform; build on the same distro as the target)
     /opt/agentdesk-server/venv/                   created by postinst (python3 -m venv + pip install)
@@ -39,10 +39,14 @@ def read_version() -> str:
     return m.group(1)
 
 
+GUI_PACKAGES = re.compile(r"\s*(pywebview|pystray|pillow)\b", re.I)
+GUI_FILES = {".ico", ".icns"}  # window / tray icons: only the desktop App uses them
+
+
 def server_requirements() -> str:
-    """requirements.txt minus the GUI packages (pywebview, pystray): a server has no window."""
-    lines = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
-    keep = [ln for ln in lines if ln.strip() and not re.match(r"\s*(pywebview|pystray|pillow)\b", ln, re.I)]
+    """requirements-core.txt (the shared core, no GUI) minus any GUI package: a server has no window."""
+    lines = (ROOT / "requirements-core.txt").read_text(encoding="utf-8").splitlines()
+    keep = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith(("#", "-")) and not GUI_PACKAGES.match(ln)]
     return "\n".join(keep) + "\n"
 
 
@@ -54,7 +58,8 @@ def write(path: Path, text: str, mode: int = 0o644) -> None:
 
 def copy_tree(src: Path, dst: Path) -> None:
     for f in sorted(src.rglob("*")):
-        if f.is_dir() or "__pycache__" in f.relative_to(src).parts or f.suffix in (".pyc", ".pyo"):
+        if f.is_dir() or "__pycache__" in f.relative_to(src).parts or f.suffix in (".pyc", ".pyo") \
+                or f.suffix in GUI_FILES or f.name == "_buildinfo.py":  # _buildinfo is the App's build stamp
             continue
         t = dst / f.relative_to(src)
         t.parent.mkdir(parents=True, exist_ok=True)

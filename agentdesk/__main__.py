@@ -28,6 +28,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+if __name__ == "__main__" and getattr(sys, "frozen", False) and sys.argv[1:2] in (["serve"], ["gateway"], ["server"]):
+    # AgentDesk.exe is the desktop App; serve / gateway / server belong to the headless Server product (the .deb)
+    sys.exit(f"AgentDesk {sys.argv[1]}: not part of the desktop App. Use the AgentDesk Server (agentdesk-server_*.deb) on Linux.")
 if __name__ == "__main__" and sys.argv[1:2] == ["serve"]:  # headless server: --data must be set before core is imported
     from . import serve
     serve.main(sys.argv[2:])

@@ -2,6 +2,16 @@
 name = "agentdesk"
 dynamic = ["version"]
 requires-python = ">=3.11"
+# Core only (shared by both products); no GUI library. Keep in step with requirements-core.txt (tests check it).
+dependencies = ["claude-agent-sdk>=0.2.166"]
+
+[project.optional-dependencies]
+# (A) desktop App: window + tray. Keep in step with requirements.txt / requirements-tray.txt.
+app = ["pywebview>=5.0", "pystray>=0.19", "Pillow>=10"]
+# (B) headless Server: nothing beyond the core (the gateway and console tool are stdlib only).
+server = []
+# Building: `pip install .[build]` for PyInstaller (App).
+build = ["pyinstaller>=6"]
 
 [project.scripts]
 agentdesk-serve = "agentdesk.serve:main"

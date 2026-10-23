@@ -4,6 +4,22 @@ Delegates coding tasks to Claude agents, choosing the cheapest model that can do
 across any number of projects and Claude accounts, with a dashboard to follow progress and spend
 and a chat to talk to.
 
+## Two products
+
+AgentDesk ships as two products that share one core and one version number:
+
+| | **App** (desktop) | **Server** (headless) |
+|---|---|---|
+| For | one person on their own computer | several people on a LAN, one Linux machine |
+| Has | window, tray, `AgentDesk.exe` + installer | login gateway, per-user instances, console tool, systemd |
+| Download | `AgentDesk-Setup-x.y.z.exe` (macOS / Linux archives too) | `agentdesk-server_x.y.z_all.deb` |
+| Build | `build_exe.ps1` / `build_installer.ps1` (`agentdesk.spec`) | `packaging/debian/build_deb.py` |
+| Python extra | `pip install ".[app]"` (pywebview, tray) | `pip install ".[server]"` (core only, no GUI libraries) |
+
+Pick the App to work alone; pick the Server to give a team browser access. They never need each other: the App build
+leaves out the gateway and server code, the `.deb` leaves out the GUI code and libraries. `release.ps1 -Target app|server|both`
+builds one or both. `pip install .` installs the core only. Details for the Server: [Server (Debian, headless)](#server-debian-headless).
+
 ## Downloads
 
 Every release on the [Releases page](https://github.com/janmaslovitz/agentdesk/releases/latest) has ready-made builds

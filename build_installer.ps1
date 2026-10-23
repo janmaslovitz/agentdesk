@@ -1,5 +1,5 @@
 <#
-Builds dist\installer\AgentDesk-Setup.exe: runs build_exe.ps1 (the PyInstaller program), then Inno Setup's ISCC.exe
+Builds the desktop App installer ONLY (product A), dist\installer\AgentDesk-Setup-x.y.z.exe: runs build_exe.ps1 (the PyInstaller program), then Inno Setup's ISCC.exe
 on installer\AgentDesk.iss. Run it from a clean checkout. Needs Inno Setup 6 (winget install JRSoftware.InnoSetup).
   .\build_installer.ps1 [-Version 1.0] [-SkipExe]   # -SkipExe reuses an existing dist\AgentDesk
 #>

@@ -73,7 +73,7 @@ jobs:
             gh release create "$TAG" --draft --verify-tag --title "AgentDesk ${TAG#v}" --notes-file release-notes.md
           fi
 
-  build:
+  build:  # product A: the desktop App (no gateway / server code)
     needs: release
     strategy:
       fail-fast: false
@@ -113,7 +113,7 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "::error::no build output in dist/"; exit 1; }
           gh release upload "$TAG" "${files[@]}" --clobber
 
-  deb:
+  deb:  # product B: the headless Server (no GUI code or libraries)
     needs: release
     runs-on: ubuntu-22.04
     steps:
@@ -123,7 +123,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - name: Build the Debian server package
+      - name: Headless import isolation (core dependencies only, no GUI libraries)
+        run: |
+          python -m pip install -r requirements-core.txt pytest
+          python -m pytest -q -p no:cacheprovider tests/test_product_split.py -k "headless or pyproject"
+      - name: Build the Debian server package (product B only)
         run: python3 packaging/debian/build_deb.py --out dist
       - name: Attach to the release
         run: |
