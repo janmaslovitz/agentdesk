@@ -227,17 +227,21 @@ class InstanceManager:
             self.stop(name, "gateway shutting down")
 
     # -- supervision
-    def busy(self, inst: Instance) -> bool:
-        """Does the instance report a run / chat turn / build in progress? (An unreachable instance is not busy.)"""
+    def busy_info(self, inst: Instance) -> dict:
+        """The instance's GET /api/busy answer ({} when it can't be reached)."""
         try:
             c = http.client.HTTPConnection("127.0.0.1", inst.port, timeout=5)
             c.request("GET", "/api/busy", headers={GATEWAY_HEADER: inst.token, "Host": f"127.0.0.1:{inst.port}"})
             r = c.getresponse()
             data = json.loads(r.read(65536) or b"{}") if r.status == 200 else {}
             c.close()
-            return bool(data.get("busy"))
+            return data if isinstance(data, dict) else {}
         except (OSError, ValueError, http.client.HTTPException):
-            return False
+            return {}
+
+    def busy(self, inst: Instance) -> bool:
+        """Does the instance report a run / chat turn / build in progress? (An unreachable instance is not busy.)"""
+        return bool(self.busy_info(inst).get("busy"))
 
     def tick(self) -> None:
         """One supervision pass: restart crashed instances that were in use, stop idle ones."""

@@ -21,6 +21,12 @@ them under the new version number, tags it and builds the installer (see README,
   `users.json`); sign-ins and user changes go to `audit.log`. Optional HTTPS (`tls_cert`, `tls_key`) and optional
   separate OS accounts per user (`run_as_users`, see README).
 - `GET /api/busy` on the dashboard: whether a run, chat turn or build is in progress.
+- Gateway admin cabinet at `/admin` (admins only; a normal user gets 403 on every route): create, disable/enable, delete
+  (the data folder is kept unless a separate box is ticked) and reset the password of users; per-user projects with size
+  on disk, add from a git URL (cloned on the server) or an exported .zip, remove; Claude accounts (API key by the name
+  of an environment variable, or a config folder) assigned to users, keys are never shown; instance status, start /
+  stop / restart and log tail; server health (free disk, version); audit log viewer. Every user can change their own
+  password at `/account`. The dashboard pages get a small "Admin / Account / Sign out" bar from the gateway.
 
 ### Changed
 - The dashboard checks the Host header of every request and the Origin of every POST against a configurable list

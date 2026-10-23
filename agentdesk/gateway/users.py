@@ -13,6 +13,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -250,11 +251,16 @@ class UserStore:
                 u["accounts"] = sorted(set(accounts))
         return self._change(name, fn, "assignments changed", by, projects=projects, accounts=accounts)
 
-    def remove(self, name: str, by: str = "") -> None:
-        """Delete the account. The user's data folder is kept (delete it by hand if wanted)."""
+    def remove(self, name: str, by: str = "", delete_data: bool = False) -> None:
+        """Delete the account. The user's data folder is kept unless delete_data (only ever a folder under users/)."""
         with self.lock:
             data = self._load()
             if data["users"].pop(name, None) is None:
                 raise KeyError(f"no user {name!r}")
             self._save(data)
-        self.audit.log("user removed", user=name, by=by)
+        gone = False
+        home = self.user_home(name)
+        if delete_data and USERNAME.fullmatch(name) and home.is_dir() and not home.is_symlink():
+            shutil.rmtree(home, ignore_errors=True)
+            gone = not home.exists()
+        self.audit.log("user removed", user=name, by=by, data_deleted=gone)

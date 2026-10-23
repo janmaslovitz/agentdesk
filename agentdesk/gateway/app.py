@@ -10,6 +10,7 @@ import hmac
 import html
 import http.client
 import json
+import re
 import socket
 import ssl
 import threading
@@ -18,6 +19,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from . import admin as admin_mod
 from .instances import GATEWAY_HEADER, InstanceError, InstanceManager
 from .sessions import SessionTable, Throttle
 from .users import Audit, UserStore
@@ -81,6 +83,25 @@ def message_page(title: str, text: str) -> bytes:
                        f'<p>{html.escape(text)}</p><p><a href="/">Try again</a></p></div>').encode("utf-8")
 
 
+BAR_ID = "agentdesk-gateway-bar"
+
+
+def inject_bar(page: bytes, username: str, is_admin: bool) -> bytes:
+    """The gateway's small floating bar (user name, Account, Admin for admins) inside the dashboard page; the
+    dashboard's own index.html is not touched. Pages without a <body> are left as they are."""
+    m = re.search(rb"<body[^>]*>", page, re.I)
+    if not m:
+        return page
+    links = ('<a href="/admin">Admin</a>' if is_admin else "") + '<a href="/account">Account</a>'
+    bar = (f'<div id="{BAR_ID}" style="position:fixed;top:6px;right:8px;z-index:2147483000;display:flex;gap:10px;align-items:center;'
+           'padding:3px 10px;border-radius:14px;font:12px/1.4 system-ui,sans-serif;background:rgba(127,127,127,.18);'
+           'backdrop-filter:blur(4px)">'
+           f'<span style="opacity:.7">{html.escape(username)}</span>{links}'
+           '<a href="/logout">Sign out</a></div>'
+           f'<style>#{BAR_ID} a{{color:inherit;text-decoration:none;font-weight:600}}#{BAR_ID} a:hover{{text-decoration:underline}}</style>')
+    return page[:m.end()] + bar.encode("utf-8") + page[m.end():]
+
+
 class Gateway:
     def __init__(self, home: Path, cfg: dict, instances: InstanceManager | None = None, clock=time.time):
         self.home, self.cfg, self.clock = home, cfg, clock
@@ -100,6 +121,7 @@ class Gateway:
         self.cookie = "__Host-agentdesk_session" if self.ssl_ctx else "agentdesk_session"
         self.max_body = int(cfg["max_body_mb"]) * 1024 * 1024
         self.proxy_timeout = 600.0
+        self.admin = admin_mod.Admin(self)
 
     @property
     def scheme(self) -> str:
@@ -303,6 +325,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.command in UNSAFE and not self.csrf_ok(sess):
             self.gw.audit.log("csrf refused", user=sess.username, ip=self.ip, path=path[:200])
             return self.json({"error": "cross-site request refused"}, 403)
+        if admin_mod.dispatch(self, user, sess, path):
+            return None
         return self.proxy(user)
 
     def store_error(self, e: Exception) -> None:
@@ -400,6 +424,7 @@ class Handler(BaseHTTPRequestHandler):
                         held = True
                     except InstanceError as e:
                         return self.send(503, message_page("Not available", str(e)))
+            self.role = user["role"]
             self.forward(conn, inst, name, n)
         finally:
             if held:
@@ -435,6 +460,20 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return self.send(502, message_page("Not available", "Your AgentDesk instance did not answer the request."))
         try:
+            ctype = (resp.getheader("Content-Type") or "").lower()
+            if (self.command == "GET" and resp.status == 200 and ctype.startswith("text/html")
+                    and not resp.getheader("Content-Encoding") and (resp.getheader("Content-Length") or "0").isdigit()
+                    and int(resp.getheader("Content-Length") or 0) <= 4 * 1024 * 1024):
+                page = inject_bar(resp.read(), username, getattr(self, "role", "user") == "admin")
+                self.send_response(resp.status, resp.reason)
+                for k, v in resp.getheaders():
+                    if k.lower() not in DROP_RESPONSE and k.lower() != "content-length":
+                        self.send_header(k, v)
+                self.send_header("Content-Length", str(len(page)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(page)
+                return
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
                 if k.lower() not in DROP_RESPONSE:

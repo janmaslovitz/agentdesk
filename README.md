@@ -395,6 +395,12 @@ gateway's own origin or carry the session's CSRF token (`X-AgentDesk-CSRF`, from
 `login_max_failures` wrong passwords for one user from one address (or many from one address) that pair is locked for
 `login_lockout_minutes`.
 
+**Admin cabinet.** Admins open `/admin` (link "Admin" in the bar the gateway adds to every page): users, per-user projects
+(git URL or exported .zip), Claude accounts, instances (start / stop / restart, log tail, disk free) and the audit log.
+Accounts are kept in `<server-home>/accounts.json` and written to the assigned user's `settings.toml`; an API-key account
+only names the environment variable holding the key (set it where the gateway runs). Everyone changes their own password
+at `/account`.
+
 **HTTPS:** set `tls_cert` and `tls_key` (PEM files) in server.toml. Without TLS, passwords cross the LAN unencrypted.
 
 **Separate OS accounts (optional, Linux).** Without it every instance runs as the gateway's OS user, so the agents of one
