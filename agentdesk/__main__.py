@@ -1,6 +1,7 @@
 """AgentDesk command line.
 
     python -m agentdesk [dashboard] [--browser]  open the dashboard in a window (--browser: in a browser tab)
+    python -m agentdesk serve [--host H] [--port N] [--data DIR] ...   headless server, no window (see agentdesk/serve.py)
     python -m agentdesk stop [--runs]            end the dashboard (--runs: also stop runs it started)
     python -m agentdesk projects                 list projects
     python -m agentdesk add-project NAME REPO BASE [--preset rust|node|python|go|none] [--account A]
@@ -24,6 +25,11 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+if __name__ == "__main__" and sys.argv[1:2] == ["serve"]:  # headless server: --data must be set before core is imported
+    from . import serve
+    serve.main(sys.argv[2:])
+    raise SystemExit(0)
 
 from . import core
 

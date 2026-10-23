@@ -1,0 +1,13 @@
+[project]
+name = "agentdesk"
+dynamic = ["version"]
+requires-python = ">=3.11"
+
+[project.scripts]
+agentdesk-server = "agentdesk.serve:main"
+
+[tool.setuptools]
+packages = ["agentdesk"]
+
+[tool.setuptools.dynamic]
+version = { attr = "agentdesk.__version__" }
