@@ -6,7 +6,16 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
-- Headless server mode: `python -m agentdesk serve` (also `agentdesk-server`) runs the dashboard with no window, tray or
+- Console admin tool `agentdesk-server` (also `python -m agentdesk server ...`, stdlib only, works over SSH): `init`
+  (server home, `server.toml` with defaults, first admin interactively or `--admin-password-file`), `user
+  add|list|passwd|disable|enable|delete`, `status`, `config get|set` (host, port, tls, idle_timeout, run_as_users, ...) and
+  `doctor` (git, claude CLI and login, port, permissions, disk). The headless `serve` command is now `agentdesk-serve`.
+- Debian package `agentdesk-server_<version>_all.deb` (`python3 packaging/debian/build_deb.py`, attached to releases by
+  CI): virtualenv in `/opt/agentdesk-server` created by the postinst, system user `agentdesk`, state in
+  `/var/lib/agentdesk-server`, settings in `/etc/agentdesk-server/server.toml` (`AGENTDESK_SERVER_CONFIG` overrides the
+  location), systemd unit `agentdesk-server.service` (hardened, logs in the journal), nginx / Caddy TLS examples. No
+  pywebview or pystray on the server. README: "Server (Debian, headless)".
+- Headless server mode: `python -m agentdesk serve` (also `agentdesk-serve`) runs the dashboard with no window, tray or
   browser, on Linux without a display. Options: `--host`, `--port` (0 = free port), `--data` (sets AGENTDESK_HOME),
   `--allowed-host`, `--pid-file`; logs to stdout; SIGTERM / SIGINT shut it down cleanly.
 - Binding a non-loopback address needs `--auth-token-file`: every request must then carry the secret in the

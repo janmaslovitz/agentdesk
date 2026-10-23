@@ -4,7 +4,8 @@ dynamic = ["version"]
 requires-python = ">=3.11"
 
 [project.scripts]
-agentdesk-server = "agentdesk.serve:main"
+agentdesk-serve = "agentdesk.serve:main"
+agentdesk-server = "agentdesk.gateway.admin_cli:main"
 agentdesk-gateway = "agentdesk.gateway.cli:main"
 
 [tool.setuptools]

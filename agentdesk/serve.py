@@ -1,4 +1,4 @@
-"""`python -m agentdesk serve` / `agentdesk-server`: the dashboard as a headless server (no window, tray or browser).
+"""`python -m agentdesk serve` / `agentdesk-serve`: the dashboard as a headless server (no window, tray or browser).
 
     python -m agentdesk serve [--host 127.0.0.1] [--port 8765] [--data DIR] [--allowed-host H[:PORT]]...
                               [--auth-token-file FILE [--trust-proxy-auth]] [--pid-file FILE]

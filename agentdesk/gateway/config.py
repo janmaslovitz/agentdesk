@@ -46,12 +46,18 @@ def server_home(arg: str | None = None) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def config_path(home: Path) -> Path:
+    """AGENTDESK_SERVER_CONFIG (the Debian package: /etc/agentdesk-server/server.toml), else <home>/server.toml."""
+    env = os.environ.get("AGENTDESK_SERVER_CONFIG")
+    return Path(env).expanduser() if env else home / "server.toml"
+
+
 def load(home: Path) -> dict:
     """DEFAULTS overlaid with server.toml (written with the example on first start). Unknown keys are ignored;
     a value of the wrong type is an error (better than silently listening somewhere else)."""
-    f = home / "server.toml"
+    f = config_path(home)
     if not f.exists():
-        home.mkdir(parents=True, exist_ok=True)
+        f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(EXAMPLE, encoding="utf-8")
     with f.open("rb") as fh:
         raw = tomllib.load(fh)

@@ -1,7 +1,8 @@
 # Release builds: pushing a tag vX.Y.Z (release.ps1 makes it; `git push --follow-tags`) runs the tests, builds
 # AgentDesk on Windows, macOS and Linux and attaches the downloads to the GitHub Release of that tag:
 #   AgentDesk-Setup-X.Y.Z.exe (the in-app updater looks for AgentDesk-Setup*.exe: keep the name),
-#   AgentDesk-X.Y.Z-macos-<arch>.zip, AgentDesk-X.Y.Z-linux-x86_64.tar.gz.
+#   AgentDesk-X.Y.Z-macos-<arch>.zip, AgentDesk-X.Y.Z-linux-x86_64.tar.gz,
+#   agentdesk-server_X.Y.Z_all.deb (Debian server package, job "deb").
 # A missing release is created as a draft with the notes of that version from CHANGELOG.md and published once all
 # three builds are attached. Run it by hand (Actions > Release > Run workflow) to rebuild an existing tag.
 name: Release
@@ -112,8 +113,28 @@ jobs:
           [ ${#files[@]} -gt 0 ] || { echo "::error::no build output in dist/"; exit 1; }
           gh release upload "$TAG" "${files[@]}" --clobber
 
+  deb:
+    needs: release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build the Debian server package
+        run: python3 packaging/debian/build_deb.py --out dist
+      - name: Attach to the release
+        run: |
+          version="${TAG#v}"
+          shopt -s nullglob
+          files=(dist/agentdesk-server_"$version"_all.deb)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no .deb in dist/"; exit 1; }
+          gh release upload "$TAG" "${files[@]}" --clobber
+
   publish:
-    needs: build
+    needs: [build, deb]
     runs-on: ubuntu-22.04
     steps:
       - name: Publish the release (if it is still a draft)
