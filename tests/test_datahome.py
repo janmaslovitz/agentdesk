@@ -4,6 +4,7 @@ from agentdesk import core
 
 def test_data_home_rules(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.setattr(core, "user_data_dir", lambda: tmp_path / "local" / "AgentDesk")  # same on every OS
     monkeypatch.setattr(core, "APP", tmp_path / "app")
     monkeypatch.delenv("AGENTDESK_HOME", raising=False)
     monkeypatch.setattr(core, "FROZEN", False)

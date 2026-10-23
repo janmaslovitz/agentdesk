@@ -15,6 +15,7 @@ def test_installed_app_ignores_the_scratch_home(monkeypatch, tmp_path):
     monkeypatch.setattr(core, "FROZEN", True)
     monkeypatch.setattr(core, "APP", tmp_path / "app")  # no data folder next to the exe
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    monkeypatch.setattr(core, "user_data_dir", lambda: tmp_path / "local" / "AgentDesk")  # same on every OS
     monkeypatch.setenv("AGENTDESK_HOME", scratch())
     assert core._data_home() == tmp_path / "local" / "AgentDesk"
     monkeypatch.setenv("AGENTDESK_HOME", str(Path(scratch()) / ".." / "agentdesk-worker-home"))
