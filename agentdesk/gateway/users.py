@@ -24,7 +24,7 @@ MAX_PASSWORD = 1024
 # Becomes a folder name and the OS account agentdesk-<username> (Linux user names: at most 32 characters).
 USERNAME = re.compile(r"[a-z][a-z0-9_-]{0,21}")
 ROLES = ("admin", "user")
-ITEM = re.compile(r"[A-Za-z0-9_.-]{1,80}")  # project slugs / account names
+ITEM = re.compile(r"(?!\.+$)[A-Za-z0-9_.-]{1,80}")  # project slugs / account names
 
 
 # ----------------------------------------------------------------------------- durable files
@@ -213,7 +213,7 @@ class UserStore:
             home.mkdir(parents=True, exist_ok=True)
             u = {"role": role, "password": hashed, "disabled": False,
                  "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                 "home": str(home), "projects": [], "accounts": []}
+                 "home": str(home), "projects": [], "accounts": [], "sessions_after": time.time()}  # cookies of an earlier same-named user stay dead
             data["users"][name] = u
             self._save(data)
         self.audit.log("user added", user=name, by=by, role=role)

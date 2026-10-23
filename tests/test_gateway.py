@@ -455,3 +455,14 @@ def test_tls_listener_secure_cookie(tmp_path):
         assert c.getresponse().status == 403
     finally:
         stop()
+
+
+def test_item_names_reject_dot_only_and_traversal():
+    from agentdesk.gateway import users
+    assert users.ITEM.fullmatch("my-proj_1.x") and not users.ITEM.fullmatch("..") and not users.ITEM.fullmatch(".")
+
+
+def test_new_user_starts_with_sessions_after_set(tmp_path):
+    import inspect
+    from agentdesk.gateway import users
+    assert '"sessions_after": time.time()' in inspect.getsource(users.UserStore.add)

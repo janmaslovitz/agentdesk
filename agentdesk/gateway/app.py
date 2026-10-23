@@ -88,6 +88,7 @@ class Gateway:
         self.users = UserStore(home, self.audit)
         self.sessions = SessionTable(float(cfg["session_hours"]) * 3600, float(cfg["session_idle_minutes"]) * 60, clock)
         w = float(cfg["login_window_minutes"]) * 60
+        self.login_lock = threading.Lock()  # one password check at a time: parallel guesses cannot all pass the throttle
         self.throttle = Throttle(int(cfg["login_max_failures"]), int(cfg["login_ip_max_failures"]), w,
                                  float(cfg["login_lockout_minutes"]) * 60, clock)
         self.instances = instances or InstanceManager(home, cfg, self.audit)
@@ -200,7 +201,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_small_body(self, limit: int = 16 * 1024) -> bytes | None:
         n = self.headers.get("Content-Length")
-        if self.headers.get("Transfer-Encoding") or not (n or "0").isdigit() or int(n or 0) > limit:
+        if self.headers.get("Transfer-Encoding") or not ((n or "0").isascii() and (n or "0").isdigit()) or int(n or 0) > limit:
             return None
         return self.rfile.read(int(n or 0))
 
@@ -323,6 +324,10 @@ class Handler(BaseHTTPRequestHandler):
         name = str(d.get("username", "")).strip().lower()[:64]
         password = str(d.get("password", ""))
         nxt = safe_next(d.get("next"))
+        with self.gw.login_lock:
+            return self._login_checked(d, name, password, nxt, as_json)
+
+    def _login_checked(self, d, name, password, nxt, as_json) -> None:
         wait = self.gw.throttle.blocked_for(name, self.ip)
         if wait > 0:
             self.gw.audit.log("login throttled", user=name, ip=self.ip)
@@ -370,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
         if (self.headers.get("Transfer-Encoding") or "").strip():
             return self.send(411, b"a Content-Length is required", "text/plain")
         n_raw = self.headers.get("Content-Length") or "0"
-        if not n_raw.strip().isdigit():
+        if not (n_raw.strip().isascii() and n_raw.strip().isdigit()):
             return self.send(400, b"bad Content-Length", "text/plain")
         n = int(n_raw)
         if n > self.gw.max_body:
