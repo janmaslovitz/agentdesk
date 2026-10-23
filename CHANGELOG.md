@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- Closing the window ended the whole program again: the tray hookup had been lost in a merge. Closing the window hides it
+  to the tray icon (Open / Quit) once more.
 
 ## 1.4.0 - 2026-10-23
 

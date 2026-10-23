@@ -177,3 +177,11 @@ def test_installer_name_is_what_the_updater_picks():
     others = [{"name": f"AgentDesk-{__version__}-macos-arm64.zip", "browser_download_url": "https://github.com/x/z.zip"},
               {"name": f"AgentDesk-{__version__}-linux-x86_64.tar.gz", "browser_download_url": "https://github.com/x/z.tgz"}]
     assert core.pick_installer_asset(others + [a]) is a
+
+
+def test_open_window_wires_the_tray():
+    """A merge once dropped this: closing the window must hide it to the tray, not end the process."""
+    import inspect
+    from agentdesk import server
+    src = inspect.getsource(server.open_window)
+    assert "start_tray(win" in src and "events.closing += closing" in src

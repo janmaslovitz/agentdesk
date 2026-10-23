@@ -2412,6 +2412,21 @@ def open_window(url: str, tray: bool = False) -> bool:
             def quit_app():
                 state["quitting"] = True
                 QUIT.set()
+                try:
+                    if icon is not None:
+                        icon.stop()
+                finally:
+                    win.destroy()
+
+            def closing():
+                if state["quitting"]:
+                    return True
+                threading.Thread(target=win.hide, daemon=True).start()  # not from inside the close event
+                return False  # cancel the close
+
+            icon = start_tray(win, show, quit_app)
+            if icon is not None:
+                win.events.closing += closing
         try:
             ico = WEB / "agentdesk.ico"
             webview.start(icon=str(ico)) if ico.exists() else webview.start()
