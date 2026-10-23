@@ -108,7 +108,7 @@ jobs:
         run: |
           version="${TAG#v}"
           shopt -s nullglob
-          files=(dist/AgentDesk-"$version"-linux-*.tar.gz dist/AgentDesk-"$version"-macos-*.zip dist/installer/AgentDesk-Setup-"$version".exe)
+          files=(dist/AgentDesk-"$version"-linux-*.tar.gz dist/AgentDesk-"$version"-macos-*.zip dist/installer/AgentDesk-Setup-"$version"*.exe)
           [ ${#files[@]} -gt 0 ] || { echo "::error::no build output in dist/"; exit 1; }
           gh release upload "$TAG" "${files[@]}" --clobber
 
