@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.5.0 - 2026-10-23
+
 ### Added
 - Two products, one core: the desktop **App** and the headless **Server** are built independently (README, "Two products").
   `pyproject.toml` dependencies are the core only, with extras `app` (pywebview, tray) and `server`; new
