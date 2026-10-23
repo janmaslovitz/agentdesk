@@ -9,6 +9,15 @@ them under the new version number, tags it and builds the installer (see README,
 - In-app updater: an "Update available" button checks GitHub Releases (once at start, cached 1 h; `[updates] check = false`
   in settings.toml disables it), downloads and verifies the installer and runs it silently. Installed build only.
 - Per-task tool-call stats (`tool_stats` in state.json: total, per tool, MCP calls per server; `runs_stats` per run with turns, cost, duration) and a "Tools:" line in `reports/<id>.md`, to measure how useful optional MCP servers are.
+- Build panel builds versions: pick the next version (proposed from the tags, CHANGELOG and `__version__`) or a release
+  tag, tick the finished tasks to include (merged / unmerged / already-in badges, finished-since-last-tag ticked by
+  default) and **Build** makes `build/<version>` from the base plus those task branches, then builds it. A conflict
+  stops with a clear message; the base branch and task branches are never changed, nothing is pushed. The choice is
+  remembered per project. API: `GET .../build` returns `versions` and `tasks`, `POST .../build` takes `version` and `tasks`.
+
+### Changed
+- Project page: the Git and Build sections share one row (half the width each, stacked under 900 px); the Build log
+  is folded, and the plain ref build, Clean + rebuild and Custom build moved into a small **More** menu.
 
 
 ## 1.2.1 - 2026-10-22

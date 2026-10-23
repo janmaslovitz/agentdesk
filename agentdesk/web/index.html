@@ -122,6 +122,26 @@ code { font: 12px var(--mono); }
 .gitp details > summary { cursor: pointer; padding: 4px 0; }
 .gitp td button { padding: 1px 8px; font-size: 12px; }
 .gitnew { display: flex; flex-direction: column; gap: 6px; padding: 8px 0 2px; } .gitnew textarea { height: 70px; resize: vertical; }
+.gitp details { overflow-x: auto; }
+.duo { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+@media (max-width: 900px) { .duo { grid-template-columns: 1fr; } }
+button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
+#bSec { overflow: visible; }
+.bp { padding: 8px 14px; display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.bp .gitrow > .k { min-width: 60px; }
+.bp a { color: var(--accent); }
+.blist { max-height: 140px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; padding: 2px 0; }
+.blist label { display: flex; gap: 6px; align-items: center; padding: 1px 8px; }
+.blist label .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.blist label.in { color: var(--muted); }
+.tag { font-size: 11px; padding: 0 6px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
+.tag.ok { color: var(--ok); } .tag.warn { color: var(--warn); }
+.menu { position: relative; } .menu > summary { list-style: none; cursor: pointer; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.menu > summary::-webkit-details-marker { display: none; }
+.menubox { position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; width: 300px; display: flex; flex-direction: column; gap: 6px; padding: 8px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 4px 14px rgb(0 0 0 / .18); font-weight: 400; }
+.menubox button { padding: 2px 8px; font-size: 12px; }
+#bLog { max-height: 150px; overflow: auto; white-space: pre-wrap; }
 </style>
 </head>
 <body>
@@ -361,6 +381,7 @@ function shell() {
       <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
+  <div class="duo">
   <section><h3>Git <span class="muted" id="gitHead"></span><span class="spacer"></span>
       <button onclick="gitRefresh()" title="Fetch from the remote and reload the GitHub accounts and pull requests">Refresh</button>
       <select id="gitBranch"></select><button id="gitMerge" onclick="gitDo('merge')">Merge into base</button>
@@ -384,12 +405,25 @@ function shell() {
           <input id="prTitle" placeholder="Title"><textarea id="prBody" placeholder="Description (optional)"></textarea>
           <div><button class="primary" onclick="gitPrCreate()" title="gh pr create (asks first). Push the branch first.">Create pull request…</button></div></div></details>
       <pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
-  <section><h3>Build <span class="muted" id="bHead"></span><span class="spacer"></span>
-      <input id="bRef" placeholder="branch or commit (default: base)" size="26">
-      <button id="bBuild" onclick="buildGo('build')">Build</button><button id="bClean" onclick="buildGo('clean')">Clean + rebuild</button>
-      <button id="bCustom" onclick="buildGo('custom')" hidden>Custom build</button>
-      <button id="bStop" onclick="buildStop()" disabled>Stop</button><button onclick="buildOpen()">Open folder</button></h3>
-    <div style="padding:8px 14px"><div id="bInfo" class="muted"></div><pre id="bLog" style="white-space:pre-wrap;max-height:260px;overflow:auto"></pre></div></section>
+  <section id="bSec"><h3>Build <span class="muted" id="bHead"></span><span class="spacer"></span>
+      <button class="sm primary" id="bBuild" onclick="buildVersion()" title="build/&lt;version&gt; = the version's base + the checked tasks, then the build command. The base branch and task branches are not changed; nothing is pushed.">Build</button>
+      <button class="sm" id="bStop" onclick="buildStop()" disabled>Stop</button><button class="sm" onclick="buildOpen()">Open folder</button>
+      <details class="menu" id="bMenu"><summary title="Build a branch or commit as it is, clean rebuild, custom build">More ▾</summary><div class="menubox">
+        <span class="muted">A branch or commit as it is (no tasks merged):</span>
+        <input id="bRef" placeholder="branch or commit (default: base)">
+        <div><button id="bPlain" onclick="buildGo('build')">Build it</button> <button id="bClean" onclick="buildGo('clean')">Clean + rebuild</button>
+          <button id="bCustom" onclick="buildGo('custom')" hidden>Custom build</button></div></div></details></h3>
+    <div class="bp">
+      <div class="gitrow"><span class="k">Version</span><select id="bVer" onchange="buildVerPick()"></select>
+        <input id="bVerNext" size="9" title="The next version: edit it if you like" oninput="bNextVal = this.value.trim()"></div>
+      <div class="gitrow"><span class="muted" id="bTaskHead"></span><span class="spacer"></span>
+        <a href="#" onclick="buildCheckAll(true);return false">Select all</a><span class="muted">/</span><a href="#" onclick="buildCheckAll(false);return false">none</a></div>
+      <div class="blist" id="bTasks"></div>
+      <div id="bResult"></div>
+      <div id="bInfo" class="muted" style="font-size:12px"></div>
+      <details id="bLogBox"><summary class="muted">Log</summary><pre id="bLog"></pre></details>
+    </div></section>
+  </div>
   <section><h3>Disk <span class="muted" id="dHead"></span><span class="spacer"></span>
       <button onclick="diskLoad(true)">Measure again</button><button id="dClean" onclick="diskPreview()" title="Shows what would be deleted first (dry run)">Clean up</button></h3>
     <div style="padding:8px 14px"><div id="dWarn"></div><div id="dInfo"></div><div id="dPlan"></div><pre id="dMsg" style="white-space:pre-wrap"></pre></div></section>
@@ -467,20 +501,75 @@ function gitShow(g, msg) {
   if (!$("prBase").value) $("prBase").value = g.base;
   if (msg !== undefined) $("gitMsg").textContent = msg;
 }
-let buildFor = null, buildTimer = null;
-function buildShow(b) {
+// Build: pick a version (the next one or a release tag) and the finished tasks to put into build/<version>.
+// The version/task list is fetched on a project switch, when a task finishes and after a build ends; while a
+// build runs only its status and log are followed (?lite=1), once a second.
+let buildFor = null, buildTimer = null, buildPlan = null, buildDoneKey = null, buildWasRunning = false;
+let bPick = null, bNextVal = null, bUser = {};  // the version picked ("next" or a tag's version), the edited next version, ticks the user changed
+function buildShow(b, lite) {
   const d = b.duration != null ? ` · ${Math.round(b.duration)}s` : "";
-  $("bHead").textContent = b.status + (b.kind ? ` (${b.kind} ${b.ref || ""})` : "") + d;
+  $("bHead").textContent = b.status + (b.version ? ` (${b.version})` : b.kind ? ` (${b.kind} ${b.ref || ""})` : "") + d;
   $("bInfo").textContent = (b.started ? "started " + new Date(b.started * 1000).toLocaleString() + " · " : "") + "result: " + b.result + (b.result_exists ? "" : " (not built yet)");
   const L = $("bLog"), atEnd = L.scrollTop + L.clientHeight >= L.scrollHeight - 20;
   L.textContent = b.log; if (atEnd) L.scrollTop = L.scrollHeight;
-  for (const id of ["bBuild", "bClean", "bCustom"]) $(id).disabled = b.running;
+  for (const id of ["bBuild", "bPlain", "bClean", "bCustom"]) $(id).disabled = b.running;
   $("bStop").disabled = !b.running; $("bCustom").hidden = !b.has_custom;
   $("bRef").placeholder = `branch or commit (default: ${b.base})`;
+  $("bResult").innerHTML = buildResult(b);
+  if (!lite && b.versions) { buildPlan = b; buildPlanShow(); }
   clearTimeout(buildTimer);
-  if (b.running) buildTimer = setTimeout(buildLoad, 1000);  // follows the log only while a build runs, not on the poll
+  if (b.running) buildTimer = setTimeout(() => buildLoad(true), 1000);  // follows the log only while a build runs, not on the poll
+  else if (buildWasRunning && lite) buildLoad();  // just ended: the tasks' merged / already-in marks may have changed
+  buildWasRunning = b.running;
 }
-async function buildLoad() { buildFor = cur; const b = await api(`/api/p/${cur}/build`); if (!b.error) buildShow(b); }
+function buildResult(b) {
+  if (!b.version) return "";
+  const tasks = b.tasks || [], inc = b.included || [];
+  const col = b.status === "ok" ? "var(--ok)" : b.status === "running" ? "var(--accent)" : "var(--bad)";
+  const what = b.status === "ok" ? "built" : b.status === "running" ? "building…" : b.conflict ? "merge conflict" : b.status;
+  const list = tasks.length ? `${tasks.length} task${tasks.length === 1 ? "" : "s"} (${esc(tasks.join(", "))})` : "no extra tasks";
+  return `<b>${esc(b.version)}</b> <code>${esc(b.branch || "")}</code> · ${list} · <b style="color:${col}">${esc(what)}</b>` +
+    (b.status === "running" && tasks.length ? ` · ${inc.length} merged so far` : "") +
+    (b.status === "ok" ? ` · <a href="#" onclick="buildOpen();return false">open folder</a>` : "") +
+    (b.conflict ? `<div style="color:var(--bad)">auto/${esc(b.conflict.task)} does not merge cleanly${b.conflict.files?.length ? " (" + esc(b.conflict.files.join(", ")) + ")" : ""}: nothing was built; the base branch and the task branches are unchanged.</div>` : "");
+}
+function buildPlanShow() {
+  const b = buildPlan; if (!b) return;
+  const next = b.versions[0], isTag = v => b.versions.some(x => x.kind === "tag" && x.version === v);
+  if (bPick === null) bPick = isTag(b.version) ? b.version : "next";
+  if (bNextVal === null) bNextVal = isTag(b.version) ? next.version : b.version;
+  $("bVer").innerHTML = b.versions.map(v => v.kind === "next" ? `<option value="next">New build (next)</option>` : `<option value="${esc(v.version)}">v${esc(v.version)}</option>`).join("");
+  $("bVer").value = bPick;
+  const nx = $("bVerNext"); nx.hidden = bPick !== "next";
+  if (document.activeElement !== nx) nx.value = bNextVal;
+  nx.placeholder = next.proposed;
+  const html = b.tasks.map(t => {
+    const on = t.in_base || (t.id in bUser ? bUser[t.id] : t.checked);
+    const badge = t.in_base ? `<span class="tag">already in</span>` : t.merged ? `<span class="tag ok">merged</span>` : `<span class="tag warn">unmerged</span>`;
+    return `<label class="${t.in_base ? "in" : ""}" title="${esc(t.branch)}${t.finished ? " · finished " + esc(t.finished) : ""}"><input type="checkbox" value="${esc(t.id)}" ${on ? "checked" : ""} ${t.in_base ? "disabled" : ""}
+      onchange="bUser[this.value] = this.checked; buildCount()"> <b class="num">${esc(t.id)}</b> <span class="t">${esc(t.title)}</span> ${badge}</label>`;
+  }).join("") || `<div class="muted" style="padding:4px 8px">No finished tasks with a branch auto/&lt;id&gt;.</div>`;
+  const box = $("bTasks");
+  if (box.dataset.h !== html) { box.innerHTML = html; box.dataset.h = html; }
+  buildCount();
+}
+function buildCount() {
+  const b = buildPlan; if (!b) return;
+  const n = document.querySelectorAll("#bTasks input:checked:not(:disabled)").length, inb = b.tasks.filter(t => t.in_base).length;
+  $("bTaskHead").textContent = `from ${b.ref} · ${n} to merge${inb ? ` · ${inb} already in` : ""}`;
+}
+function buildCheckAll(on) { for (const x of document.querySelectorAll("#bTasks input:not(:disabled)")) { x.checked = on; bUser[x.value] = on; } buildCount(); }
+function buildVerPick() { bPick = $("bVer").value; bUser = {}; buildLoad(); }
+const buildVer = () => bPick === "next" || bPick === null ? (bNextVal || buildPlan?.versions[0].version || "") : bPick;
+async function buildLoad(lite) {
+  const want = cur;
+  if (buildFor !== cur) { bPick = bNextVal = null; bUser = {}; buildPlan = null; $("bTasks").dataset.h = ""; }
+  buildFor = cur;
+  const q = lite ? "?lite=1" : bPick !== null ? "?version=" + encodeURIComponent(buildVer()) : "";
+  const b = await api(`/api/p/${want}/build${q}`);
+  if (want !== cur || b.error) return;
+  buildShow(b, lite);
+}
 async function buildPost(sub, body) {
   const r = await api(`/api/p/${cur}/build${sub}`, {...body, confirm: true});
   if (r.ok === false || r.error) alert(r.message || r.error);
@@ -488,7 +577,17 @@ async function buildPost(sub, body) {
 }
 async function buildGo(kind) {
   if (kind === "clean" && !confirm("Delete the build worktree and recompile from scratch?")) return;
+  $("bMenu").open = false;
   await buildPost("", {kind, ref: $("bRef").value.trim()});
+}
+async function buildVersion() {
+  const b = buildPlan; if (!b) return;
+  const version = buildVer().replace(/^v/i, ""), tasks = [...document.querySelectorAll("#bTasks input:checked:not(:disabled)")].map(x => x.value);
+  if (!/^\d+(\.\d+){1,3}$/.test(version)) return alert("The version must look like 1.2.3");
+  const from = bPick === "next" ? b.base : b.ref;
+  if (!confirm(`Build ${version}?\n\nbuild/${version} is (re)made from ${from}` + (tasks.length ? ` and gets ${tasks.length} task branch${tasks.length === 1 ? "" : "es"} merged in: ${tasks.join(", ")}` : " with no extra tasks") +
+    `.\nThen the build command runs on it. The base branch and the task branches are not changed; nothing is pushed.`)) return;
+  await buildPost("", {kind: b.has_custom ? "custom" : "build", version, tasks});
 }
 async function buildStop() { await buildPost("/stop", {}); }
 async function buildOpen() { const r = await api(`/api/p/${cur}/build/open`, {}); if (r.error) alert(r.error); }
@@ -590,6 +689,7 @@ async function gitAct(act, body = {}) {
   const r = await api(`/api/p/${cur}/git/${act}`, body);
   if (r.status) gitShow(r.status, (r.ok ? "" : "Not done: ") + (r.message || ""));
   else $("gitMsg").textContent = r.error || r.message || "failed";
+  if (act === "merge" && r.ok) buildLoad();  // the Build list's merged marks
 }
 async function gitDo(act) {
   const g = gitSt; if (!g) return;
@@ -632,7 +732,8 @@ async function refreshOnce() {
   showMode(st.project);
   showLive(st);
   if (gitFor !== cur) gitLoad();
-  if (buildFor !== cur) buildLoad();
+  const doneKey = st.tasks.filter(t => t.status === "done").map(t => t.id).join(",");
+  if (buildFor !== cur || doneKey !== buildDoneKey) { buildDoneKey = doneKey; buildLoad(); }  // a task finished: its tick box appears
   if (diskFor !== cur) { $("dPlan").innerHTML = ""; $("dMsg").textContent = ""; diskLoad(); }
   else if (Date.now() - diskAt > 60000) diskLoad();
   showPlan(st.plan, st.runner.running);

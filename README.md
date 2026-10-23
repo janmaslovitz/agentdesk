@@ -133,6 +133,30 @@ Needs the [GitHub CLI](https://cli.github.com/) for the account and pull-request
 `gh auth login` again to add another account). Without it, or when it isn't logged in, the window says what to
 run; fetch, pull, push and merge keep working. gh answers are reused for 5 seconds; **Refresh** asks again.
 
+## The Build panel
+
+Next to the Git section (half the width each; stacked on narrow windows). It builds a version made of the base
+branch plus the finished tasks you choose, without touching the base branch:
+
+- **Version**: *New build (next)* proposes the next patch version after the newest of the release tags `vX.Y.Z`,
+  the top version in `CHANGELOG.md` and `__version__` (editable), or pick an existing release tag to build that
+  release plus tasks.
+- The list holds the finished tasks (`done` in state.json) whose branch `auto/<id>` still exists, with a
+  *merged*/*unmerged* badge. Tasks already in the version's base (the base branch, or the tag) are ticked and
+  greyed out (*already in*); tasks finished since the last tag are ticked by default. **Select all / none**.
+- **Build** (re)creates the branch `build/<version>` from that base in the build worktree (`<project>/build/src`),
+  merges the ticked `auto/<id>` branches into it one by one and then runs the build command (`[build] command` of
+  project.toml when set, else `build_exe.ps1`). A merge conflict stops it: the merge is aborted, nothing is built,
+  and the result line names the task and files. The base branch and the task branches never change and nothing is
+  pushed. The result line shows the version, the tasks, success or failure and a link to the output folder; the
+  last choice is remembered in `<project>/build/selection.json`.
+- **More ▾** keeps the plain builds: a branch or commit as it is, **Clean + rebuild** (fresh worktree) and
+  **Custom build**. **Stop** ends a running build and its child processes; the log is under **Log**.
+
+The list refreshes when a task finishes; the log is polled only while a build runs. API: `GET /api/p/<slug>/build`
+(adds `versions` and `tasks`; `?version=` picks one, `?lite=1` skips them) and `POST /api/p/<slug>/build` with
+`version` and `tasks` (ids of finished tasks; anything else is refused with 400).
+
 ## Disk hygiene
 
 Each project's **Disk** section shows what it uses on disk, measured in the background (never while a dashboard
