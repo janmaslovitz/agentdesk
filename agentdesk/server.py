@@ -2053,7 +2053,11 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 5 and parts[3] == "git":
                 return self.json(git_get(p, parts[4], {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}), 200)
             if len(parts) == 4 and parts[3] == "build":
-                return self.json(core.build_job(p).info())
+                q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+                info = core.build_job(p).info()
+                if q.get("lite") != "1":  # the log poll during a build skips the git calls of the version/task list
+                    info.update(core.build_plan(p, q.get("version") or None))
+                return self.json(info)
             if len(parts) == 4 and parts[3] == "disk":
                 return self.json(disk_view(p, "refresh=1" in (urllib.parse.urlparse(self.path).query or "")))
             if len(parts) == 4 and parts[3] == "chat":
@@ -2167,8 +2171,15 @@ class Handler(BaseHTTPRequestHandler):
                     if sub == "stop":
                         err = job.stop()
                     else:
+                        sel = None
+                        if "version" in d or "tasks" in d:  # a versioned build: build/<version> = base + chosen tasks
+                            sel, why = core.check_build_selection(p, d.get("version"), d.get("tasks", []))
+                            if why:
+                                return self.json({"ok": False, "error": why, "message": why}, 400)
                         blocked = "a task run is in progress for this project; stop it first" if runner(p).running() else None
-                        err = job.start(str(d.get("kind") or "build"), str(d.get("ref") or ""), blocked)
+                        err = job.start(str(d.get("kind") or "build"), str(d.get("ref") or ""), blocked, sel)
+                        if sel and not err:
+                            core.save_build_selection(p, sel["version"], sel["tasks"], sel["seen"])
                     return self.json({"ok": False, "message": err} if err else {"ok": True})
                 if act == "disk" and parts[4:] == ["clean"]:
                     return self.json(disk_clean(p, d))

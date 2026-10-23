@@ -3065,6 +3065,152 @@ def import_project(src: Path | str, repo: str, new_name: str | None = None, acco
 BUILD_KINDS = ("build", "clean", "custom")
 BUILD_SCRIPT = "build_exe.ps1"
 BUILD_RESULT = "dist/AgentDesk/AgentDesk.exe"
+BUILD_VERSION = re.compile(r"\d{1,6}(?:\.\d{1,6}){1,3}")  # what a build version may be (also names build/<version>)
+BUILD_MAX_TAGS = 30
+BUILD_MAX_TASKS = 500
+
+
+# Versioned builds: an integration branch build/<version>, made from the base branch (or the release tag when an
+# existing version is picked) plus the chosen finished task branches (auto/<id>), checked out in the build worktree.
+# The base branch and the task branches are never changed; nothing is pushed.
+
+def release_tags(p: "Project") -> list[dict]:
+    """The repo's release tags vX.Y.Z, newest version first: {version, tag, date (unix, None if unknown)}."""
+    code, out = _g(p, "for-each-ref", "--format=%(refname:short) %(creatordate:unix)", "refs/tags")
+    rows = []
+    for line in out.splitlines() if code == 0 else []:
+        name, _, ts = line.strip().partition(" ")
+        m = re.fullmatch(r"v(\d+\.\d+\.\d+)", name)
+        if m:
+            rows.append({"version": m.group(1), "tag": name, "date": int(ts) if ts.isdigit() else None})
+    rows.sort(key=lambda r: parse_version(r["version"]), reverse=True)
+    return rows
+
+
+def source_versions(p: "Project", ref: str) -> list[tuple]:
+    """Versions the sources at `ref` claim: the newest numbered heading of CHANGELOG.md and `__version__` of a
+    top-level package's __init__.py."""
+    out = []
+    code, text = _g(p, "show", f"{ref}:CHANGELOG.md")
+    m = re.search(r"^##\s*\[?v?(\d+(?:\.\d+){1,3})\b", text, re.M) if code == 0 else None
+    if m:
+        out.append(parse_version(m.group(1)))
+    code, text = _g(p, "grep", "-h", "-e", "__version__", ref, "--", ":(glob)*/__init__.py")
+    for m in re.finditer(r"^__version__\s*[:=][^\"'\n]*[\"'](\d+(?:\.\d+){1,3})[\"']", text if code == 0 else "", re.M):
+        out.append(parse_version(m.group(1)))
+    return [v for v in out if v]
+
+
+def next_version(p: "Project", tags: list[dict] | None = None) -> str:
+    """The next patch version after the newest of the release tags, CHANGELOG.md and __version__ (0.1.0 if none)."""
+    tags = release_tags(p) if tags is None else tags
+    known = [parse_version(t["version"]) for t in tags] + source_versions(p, p.cfg["repo"]["base"])
+    if not known:
+        return "0.1.0"
+    top = list(max(known, key=lambda v: v + (0,) * (4 - len(v))))
+    top = (top + [0, 0, 0])[:max(3, len(top))]
+    top[-1] += 1
+    return ".".join(str(x) for x in top)
+
+
+def _selection_file(p: "Project") -> Path:
+    return p.dir / "build" / "selection.json"
+
+
+def build_selection(p: "Project") -> dict:
+    """The last versioned build's choice: {version, tasks (checked ids), seen (ids that were offered)}."""
+    try:
+        d = json.loads(_selection_file(p).read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_build_selection(p: "Project", version: str, tasks: list[str], seen: list[str]) -> None:
+    f = _selection_file(p)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(f, json.dumps({"version": version, "tasks": tasks, "seen": seen}))
+
+
+def _auto_merged(p: "Project", ref: str) -> set[str]:
+    code, out = _g(p, "for-each-ref", f"--merged={ref}", "--format=%(refname:short)", "refs/heads/auto/")
+    return set(out.split()) if code == 0 else set()
+
+
+def _ts(iso) -> float | None:
+    try:
+        return dt.datetime.fromisoformat(str(iso)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def build_plan(p: "Project", version: str | None = None) -> dict:
+    """What the Build panel offers: `versions` (the next one first, then the release tags), the chosen `version`
+    and the `ref` it starts from (its tag, or the base branch for a new version), and `tasks`: the finished tasks
+    whose branch auto/<id> still exists, newest first, each {id, title, merged (into the base branch), in_base (already
+    in `ref`), default_checked (finished since the last tag), checked (the remembered choice, else the default)}."""
+    base = p.cfg["repo"]["base"]
+    tags = release_tags(p)
+    proposed = next_version(p, tags)
+    sel = build_selection(p)
+    by_version = {t["version"]: t for t in tags}
+    nxt = proposed
+    saved = str(sel.get("version") or "")
+    if BUILD_VERSION.fullmatch(saved) and saved not in by_version and (
+            not tags or _vcmp(parse_version(saved), parse_version(tags[0]["version"])) > 0):
+        nxt = saved  # an edited next version is kept until it is released
+    versions = [{"version": nxt, "kind": "next", "ref": base, "proposed": proposed}] + \
+        [{"version": t["version"], "kind": "tag", "ref": t["tag"]} for t in tags[:BUILD_MAX_TAGS]]
+    chosen = (version or "").strip().lstrip("vV") or (saved if saved in by_version else nxt)
+    if not BUILD_VERSION.fullmatch(chosen):
+        chosen = nxt
+    ref = by_version[chosen]["tag"] if chosen in by_version else base
+    state = Store(p).load().get("tasks", {})
+    titles = {t.id: t.title for t in load_tasks(p)}
+    code, heads = _g(p, "for-each-ref", "--format=%(refname:short)", "refs/heads/auto/")
+    heads_set = set(heads.split()) if code == 0 else set()
+    merged = _auto_merged(p, base)
+    in_ref = merged if ref == base else _auto_merged(p, ref)
+    last_tag = tags[0]["date"] if tags else None
+    seen = set(sel.get("seen") or [])
+    checked = set(sel.get("tasks") or [])
+    rows = []
+    for tid, e in state.items():
+        br = f"auto/{tid}"
+        if not isinstance(e, dict) or e.get("status") != "done" or br not in heads_set:
+            continue
+        fin = _ts(e.get("finished"))
+        in_base = br in in_ref
+        dflt = not in_base and (last_tag is None or fin is None or fin > last_tag)
+        rows.append({"id": tid, "title": titles.get(tid, ""), "branch": br, "merged": br in merged, "in_base": in_base,
+                     "default_checked": dflt, "checked": in_base or ((tid in checked) if tid in seen else dflt),
+                     "finished": e.get("finished")})
+    rows.sort(key=lambda r: (len(r["id"]), r["id"]), reverse=True)
+    return {"versions": versions, "version": chosen, "ref": ref, "base": base, "proposed": proposed, "tasks": rows}
+
+
+def check_build_selection(p: "Project", version, tasks) -> tuple[dict | None, str | None]:
+    """Validates a Build request: (selection, None) or (None, why). The selection: version, ref, branch, tasks (ids,
+    oldest first), merge (those not already in ref), seen (every id offered)."""
+    v = str(version if version is not None else "").strip().lstrip("vV")
+    if not BUILD_VERSION.fullmatch(v):
+        return None, "the version must look like 1.2.3"
+    if not isinstance(tasks, list) or not all(isinstance(x, str) for x in tasks):
+        return None, "tasks must be a list of task ids"
+    if len(tasks) > BUILD_MAX_TASKS:
+        return None, "too many tasks"
+    plan = build_plan(p, v)
+    known = {t["id"]: t for t in plan["tasks"]}
+    bad = [x for x in tasks if x not in known]
+    if bad:
+        return None, "not a finished task with a branch auto/<id>: " + ", ".join(bad[:10])
+    ids = sorted(set(tasks), key=lambda x: (len(x), x))
+    return {"version": v, "ref": plan["ref"], "branch": f"build/{v}", "tasks": ids,
+            "merge": [x for x in ids if not known[x]["in_base"]], "seen": list(known)}, None
+
+
+class BuildConflict(RuntimeError):
+    pass
 
 
 class BuildJob:
@@ -3115,10 +3261,13 @@ class BuildJob:
     def result_path(self) -> Path:
         return self.wt / self.p.cfg.get("build", {}).get("result", BUILD_RESULT)
 
-    def start(self, kind: str, ref: str, blocked: str | None = None) -> str | None:
-        """Returns an error message, or None when the build was started."""
+    def start(self, kind: str, ref: str, blocked: str | None = None, sel: dict | None = None) -> str | None:
+        """Returns an error message, or None when the build was started. `sel` (from check_build_selection): build
+        the integration branch build/<version> = its ref + the chosen task branches, instead of `ref` as it is."""
         if kind not in BUILD_KINDS:
             return "unknown build kind"
+        if sel:
+            ref = sel["ref"]
         ref = (ref or "").strip() or self.p.cfg["repo"]["base"]
         if ref.startswith("-"):
             return "bad branch or commit"
@@ -3137,8 +3286,10 @@ class BuildJob:
             self.dir.mkdir(parents=True, exist_ok=True)
             self.logf.write_text("", encoding="utf-8")
             self.stopped = False
-            self._set(status="running", kind=kind, ref=ref, commit=sha[:12], started=time.time(), ended=None, exit=None)
-            self.thread = threading.Thread(target=self._work, args=(kind, sha, cmd, shell), daemon=True)
+            self._set(status="running", kind=kind, ref=ref, commit=sha[:12], started=time.time(), ended=None, exit=None,
+                      version=sel["version"] if sel else None, branch=sel["branch"] if sel else None,
+                      tasks=list(sel["tasks"]) if sel else [], included=[], conflict=None)
+            self.thread = threading.Thread(target=self._work, args=(kind, sha, cmd, shell, sel), daemon=True)
             self.thread.start()
         return None
 
@@ -3156,13 +3307,43 @@ class BuildJob:
         if code != 0:
             raise RuntimeError(f"could not prepare the build worktree: {out.strip()}")
 
-    def _work(self, kind: str, sha: str, cmd, shell: bool) -> None:
+    def _integrate(self, sel: dict, sha: str) -> None:
+        """(Re)creates build/<version> at `sha` in the build worktree and merges the chosen task branches into it.
+        Only that branch moves; a conflict is aborted and reported (BuildConflict)."""
+        br = sel["branch"]
+        code, out = git(["checkout", "--force", "-B", br, sha], self.wt)
+        if code != 0:
+            raise RuntimeError(f"could not create the branch {br}: {out.strip()}")
+        self._say(f"== {br} reset to {self.st.get('ref')} ({sha[:12]})")
+        ident = [] if git(["config", "user.email"], self.wt)[0] == 0 else ["-c", "user.name=AgentDesk", "-c", "user.email=agentdesk@localhost"]
+        for tid in sel["tasks"]:
+            if tid not in sel["merge"]:
+                self._say(f"== task {tid}: already in {self.st.get('ref')}")
+                continue
+            if self.stopped:
+                raise RuntimeError("stopped")
+            tb = f"auto/{tid}"
+            code, out = git([*ident, "merge", "--no-ff", "--no-edit", "-m", f"Build {sel['version']}: merge {tb}", tb], self.wt)
+            if code != 0:
+                _, files = git(["diff", "--name-only", "--diff-filter=U"], self.wt)
+                git(["merge", "--abort"], self.wt)
+                conflicts = files.split()
+                self._set(conflict={"task": tid, "files": conflicts[:50]})
+                self._say(out.strip())
+                raise BuildConflict(f"{tb} does not merge cleanly into {br}" + (f" (conflicts in {', '.join(conflicts[:10])})" if conflicts else "")
+                                    + ". The merge was aborted and nothing was built; the base branch and the task branches are unchanged.")
+            self._say(f"== merged {tb}")
+            self._set(included=[*self.st.get("included", []), tid])
+
+    def _work(self, kind: str, sha: str, cmd, shell: bool, sel: dict | None = None) -> None:
         code = 1
         try:
             self._say(f"== {kind} of {self.st.get('ref')} ({sha[:12]}) in {self.wt}")
             self._prepare(kind, sha)
             if self.stopped:
                 raise RuntimeError("stopped")
+            if sel:
+                self._integrate(sel, sha)
             if not shell and not (self.wt / BUILD_SCRIPT).exists():
                 raise RuntimeError(f"{BUILD_SCRIPT} does not exist in that revision")
             kw: dict = {}
@@ -3179,6 +3360,8 @@ class BuildJob:
                                                  stderr=subprocess.STDOUT, env=env, **kw)
                 code = self.proc.wait()
             self._say(f"== exit code {code}")
+        except BuildConflict as e:
+            self._say(f"== merge conflict: {e}")
         except Exception as e:  # noqa: BLE001
             self._say(f"== {'build stopped' if self.stopped else 'build could not run'}: {e}")
         self.proc = None
