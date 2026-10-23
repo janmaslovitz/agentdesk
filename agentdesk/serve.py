@@ -128,8 +128,7 @@ def main(argv: list[str] | None = None) -> None:
     done = threading.Event()
 
     def on_signal(signum, _frame):
-        print(f"AgentDesk server: signal {signum}, shutting down", flush=True)
-        done.set()
+        done.set()  # no print here: a signal landing inside the main thread's own print() would raise "reentrant call"
 
     signal.signal(signal.SIGINT, on_signal)  # before start(): a SIGTERM right after 'listening' must not kill us
     signal.signal(signal.SIGTERM, on_signal)
@@ -138,6 +137,7 @@ def main(argv: list[str] | None = None) -> None:
         while not done.wait(0.5) and srv.thread.is_alive():
             pass
     finally:
+        print("AgentDesk server: shutting down", flush=True)
         stop()
     print("AgentDesk server stopped", flush=True)
 
