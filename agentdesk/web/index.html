@@ -135,6 +135,8 @@ code { font: 12px var(--mono); }
   <h2>Accounts <button onclick="openDlg('dAccount')">+ Add</button></h2>
   <div id="accounts"></div>
   <div class="spacer"></div>
+  <div id="upd" style="display:none;margin:6px 0"><button id="updBtn" onclick="installUpdate()" title="Download the new installer from GitHub Releases and install it"></button>
+    <div class="m" id="updMsg" style="margin-top:4px"></div></div>
   <div class="m" id="ver" title="Version of this AgentDesk (commit and build time)"></div>
   <div class="muted" style="font-size:11px" id="datadir"></div>
 </aside>
@@ -937,6 +939,38 @@ async function answer(id, action) {
   if (r.error) note(r.error);
   pendingKey = null; pollPending(); setTimeout(refresh, 800);
 }
+
+let upd = null;
+async function checkUpdate() {
+  try { upd = await api("/api/update"); } catch (e) { return; }
+  renderUpdate();
+}
+function renderUpdate() {
+  const b = $("upd"); if (!b || !upd) return;
+  const j = upd.job || {};
+  const busy = j.state === "downloading" || j.state === "launching";
+  b.style.display = (upd.available || busy || j.state === "error") ? "" : "none";
+  $("updBtn").textContent = busy ? (j.state === "launching" ? "Installing…" : "Downloading…") : `Update available v${upd.latest}`;
+  $("updBtn").disabled = busy;
+  $("updMsg").textContent = j.state === "error" ? "Update failed: " + j.error
+    : busy && j.total ? `${Math.round(100 * j.done / j.total)}%`
+    : (upd.available && !upd.installable ? "Installed build only; running from source." : "");
+}
+async function installUpdate(confirmed) {
+  if (!upd) return;
+  const r = await api("/api/update/install", {confirm: confirmed === true});
+  if (r.needs_confirm) {
+    if (confirm("A worker run is active. Updating closes AgentDesk and stops it. Update anyway?")) return installUpdate(true);
+    return;
+  }
+  if (!r.ok) { upd.job = {state: "error", error: r.message}; renderUpdate(); return; }
+  upd.job = {state: "downloading", done: 0, total: 0}; renderUpdate();
+  const t = setInterval(async () => {
+    try { upd = await api("/api/update"); renderUpdate(); if (upd.job.state === "error") clearInterval(t); }
+    catch (e) { /* the app is closing for the installer */ }
+  }, 1000);
+}
+checkUpdate();
 
 refreshAll();
 // Poll only while the window is visible.

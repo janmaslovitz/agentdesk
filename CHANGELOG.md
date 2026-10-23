@@ -5,6 +5,10 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- In-app updater: an "Update available" button checks GitHub Releases (once at start, cached 1 h; `[updates] check = false`
+  in settings.toml disables it), downloads and verifies the installer and runs it silently. Installed build only.
+
 
 ## 1.2.1 - 2026-10-22
 

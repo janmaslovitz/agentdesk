@@ -1625,6 +1625,72 @@ def _overview() -> dict:
 
 # ----------------------------------------------------------------------------- auto-runner
 
+# ----------------------------------------------------------------------------- in-app updater
+
+UPDATE_JOB: dict = {"state": "idle", "done": 0, "total": 0, "error": ""}  # idle / downloading / launching / error
+_UPDATE_JOB_LOCK = threading.Lock()
+
+
+def any_run_active() -> bool:
+    try:
+        return any(run_alive(p)[0] or runner(p).running() for p in core.projects())
+    except Exception:
+        return False
+
+
+def update_status(force: bool = False) -> dict:
+    """GET /api/update. Dev mode (not installed) only reports; a disabled check answers "unknown" without a request."""
+    try:
+        enabled = bool(core.settings().get("updates", {}).get("check", True))
+    except Exception:
+        enabled = True
+    if not enabled and not force:
+        info = {"status": "disabled", "current": core.version_info()["version"], "latest": None, "available": False, "notes": ""}
+    else:
+        info = core.check_update(force)
+    out = {k: info.get(k) for k in ("status", "current", "latest", "available", "notes")}
+    out.update(installable=core.FROZEN and os.name == "nt", enabled=enabled, job=dict(UPDATE_JOB), run_active=any_run_active())
+    return out
+
+
+def launch_installer(path: Path) -> None:
+    """Run the installer silently, detached, then start the new AgentDesk (the installer's [Run] entry skips when silent)."""
+    exe = core.APP / "AgentDesk.exe"
+    cmd = f'"{path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS & start "" "{exe}"'
+    subprocess.Popen(["cmd.exe", "/c", cmd], close_fds=True, cwd=str(path.parent),
+                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def _update_worker(info: dict) -> None:
+    def prog(n, total):
+        UPDATE_JOB.update(done=n, total=total)
+    try:
+        path = core.download_update(info, prog)
+        UPDATE_JOB["state"] = "launching"
+        launch_installer(path)
+        time.sleep(1.0)
+        QUIT.set()  # main() stops the server and the process ends, so the installer can replace the files
+    except Exception as e:
+        UPDATE_JOB.update(state="error", error=f"{type(e).__name__}: {e}"[:300])
+
+
+def update_install(confirm: bool = False) -> dict:
+    """POST /api/update/install: download in the background, then launch the installer and exit."""
+    if not core.FROZEN or os.name != "nt":
+        return {"ok": False, "message": "updating in place only works in the installed program"}
+    info = core.check_update()
+    if not info.get("available"):
+        return {"ok": False, "message": "no update available"}
+    if any_run_active() and not confirm:
+        return {"ok": False, "needs_confirm": True, "message": "a worker run is active; updating stops AgentDesk (runs keep going only if you confirm)"}
+    with _UPDATE_JOB_LOCK:
+        if UPDATE_JOB["state"] in ("downloading", "launching"):
+            return {"ok": True, "message": "already updating"}
+        UPDATE_JOB.update(state="downloading", done=0, total=0, error="")
+    threading.Thread(target=_update_worker, args=(info,), daemon=True, name="updater").start()
+    return {"ok": True}
+
+
 QUIT = threading.Event()  # set when the dashboard shuts down; stops the auto-runner loop
 FLAGGED: dict[str, set[str]] = {}  # project -> flags already written to its log
 
@@ -1923,6 +1989,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(attention_all())
         if parts == ["api", "version"]:
             return self.json(core.version_info())
+        if parts == ["api", "update"]:
+            return self.json(update_status())
         if parts == ["api", "overview"]:
             return self.json(overview())
         if len(parts) >= 3 and parts[:2] == ["api", "p"]:
@@ -1960,6 +2028,8 @@ class Handler(BaseHTTPRequestHandler):
         upload = parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")
         d = {} if upload else self.body()
         try:
+            if parts == ["api", "update", "install"]:
+                return self.json(update_install(d.get("confirm") is True))
             if parts == ["api", "projects"]:
                 try:
                     p = core.add_project(str(d.get("name", "")).strip(), str(d.get("repo", "")).strip(), str(d.get("base", "")).strip() or "main",

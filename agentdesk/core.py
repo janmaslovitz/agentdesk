@@ -215,6 +215,10 @@ budget_usd = 2.0
 # Disk hygiene: the dashboard measures each project's cargo target dirs, worktrees and data folder in the background
 # and shows them (Disk section). auto = false: it only suggests; the user confirms each cleanup. A project can override
 # any key in its project.toml under [hygiene]. Sizes: max_target_gb per target dir, max_total_gb for the whole project.
+# In-app updater: checks GitHub Releases once at start (in the background) and shows an "Update" button.
+[updates]
+check = true
+
 [hygiene]
 enabled = true
 auto = false
@@ -276,6 +280,129 @@ def version_text() -> str:
     v = version_info()
     extra = ", ".join(x for x in (v["commit"], f"built {v['built']}" if v["built"] else "") if x)
     return f"AgentDesk {v['version']}" + (f" ({extra})" if extra else "")
+
+
+# ----------------------------------------------------------------------------- in-app updater
+
+UPDATE_API = "https://api.github.com/repos/janmaslovitz/agentdesk/releases/latest"
+UPDATE_HOSTS = ("github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+UPDATE_TTL = 3600.0
+_UPDATE: dict = {"at": 0.0, "info": None}
+_UPDATE_LOCK = threading.Lock()
+
+
+def parse_version(v) -> tuple | None:
+    """'v1.2.3' / '1.2.3' -> (1, 2, 3); None when it isn't numeric dotted."""
+    m = re.fullmatch(r"\s*[vV]?(\d+(?:\.\d+)*)\s*", str(v or ""))
+    return tuple(int(x) for x in m.group(1).split(".")) if m else None
+
+
+def _vcmp(a: tuple, b: tuple) -> int:
+    n = max(len(a), len(b))
+    a, b = a + (0,) * (n - len(a)), b + (0,) * (n - len(b))
+    return (a > b) - (a < b)
+
+
+def update_url_ok(url: str) -> bool:
+    import urllib.parse
+    try:
+        u = urllib.parse.urlsplit(str(url))
+        return u.scheme == "https" and (u.hostname or "").lower() in UPDATE_HOSTS and u.port in (None, 443)
+    except ValueError:
+        return False
+
+
+def pick_installer_asset(assets) -> dict | None:
+    """The AgentDesk-Setup*.exe asset (with a https download url), or None."""
+    for a in assets or []:
+        n = str(a.get("name", "")) if isinstance(a, dict) else ""
+        if re.fullmatch(r"AgentDesk-Setup.*\.exe", n, re.I) and update_url_ok(a.get("browser_download_url", "")):
+            return a
+    return None
+
+
+def update_from_release(rel: dict, current: str) -> dict:
+    """The check result for a GitHub release JSON. status: ok / unknown."""
+    latest = parse_version(rel.get("tag_name"))
+    cur = parse_version(current)
+    if latest is None or cur is None:
+        return {"status": "unknown", "current": current, "latest": None, "available": False, "notes": "", "asset": None}
+    asset = pick_installer_asset(rel.get("assets"))
+    sha = None
+    if asset:
+        d = str(asset.get("digest") or "")
+        if d.startswith("sha256:"):
+            sha = d[7:].lower()
+        else:
+            for a in rel.get("assets") or []:
+                if a.get("name") == asset["name"] + ".sha256" and update_url_ok(a.get("browser_download_url", "")):
+                    sha = {"url": a["browser_download_url"]}
+    return {"status": "ok", "current": current, "latest": ".".join(map(str, latest)),
+            "available": _vcmp(latest, cur) > 0 and asset is not None,
+            "notes": str(rel.get("body") or "")[:4000],
+            "asset": {"name": asset["name"], "url": asset["browser_download_url"], "size": int(asset.get("size") or 0), "sha256": sha} if asset else None}
+
+
+def check_update(force: bool = False) -> dict:
+    """Latest GitHub release vs this version. Cached ~1h; never raises (offline/any failure: status "unknown")."""
+    from . import __version__
+    with _UPDATE_LOCK:
+        if not force and _UPDATE["info"] is not None and time.time() - _UPDATE["at"] < UPDATE_TTL:
+            return dict(_UPDATE["info"])
+    try:
+        import urllib.request
+        req = urllib.request.Request(UPDATE_API, headers={"User-Agent": f"AgentDesk/{__version__}", "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            rel = json.loads(r.read(2_000_000).decode("utf-8"))
+        info = update_from_release(rel, __version__)
+    except Exception:
+        info = {"status": "unknown", "current": __version__, "latest": None, "available": False, "notes": "", "asset": None}
+    with _UPDATE_LOCK:
+        _UPDATE["at"], _UPDATE["info"] = time.time(), info
+    return dict(info)
+
+
+def download_update(info: dict | None = None, progress=None) -> Path:
+    """Stream the installer to a fresh temp dir; verify size and sha256 (when published). Raises on any problem."""
+    import hashlib, tempfile, urllib.request
+    from . import __version__
+    info = info or check_update()
+    a = info.get("asset")
+    if not a:
+        raise RuntimeError("no installer to download")
+    if not update_url_ok(a["url"]):
+        raise RuntimeError("download address is not allowed")
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", a["name"])
+    want = a.get("sha256")
+    if isinstance(want, dict):
+        if not update_url_ok(want["url"]):
+            raise RuntimeError("checksum address is not allowed")
+        with urllib.request.urlopen(urllib.request.Request(want["url"], headers={"User-Agent": f"AgentDesk/{__version__}"}), timeout=15) as r:
+            m = re.search(r"[0-9a-fA-F]{64}", r.read(4096).decode("utf-8", "replace"))
+        want = m.group(0).lower() if m else None
+
+    class _Guard(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if not update_url_ok(newurl):
+                raise RuntimeError("redirected to a disallowed address")
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    dest = Path(tempfile.mkdtemp(prefix="agentdesk-update-")) / name
+    h, n = hashlib.sha256(), 0
+    total = int(a.get("size") or 0)
+    opener = urllib.request.build_opener(_Guard)
+    with opener.open(urllib.request.Request(a["url"], headers={"User-Agent": f"AgentDesk/{__version__}"}), timeout=30) as r, dest.open("wb") as f:
+        while chunk := r.read(1 << 20):
+            f.write(chunk)
+            h.update(chunk)
+            n += len(chunk)
+            if progress:
+                progress(n, total)
+    if total and n != total:
+        raise RuntimeError(f"download incomplete ({n} of {total} bytes)")
+    if want and h.hexdigest() != want:
+        raise RuntimeError("checksum mismatch; the download was discarded")
+    return dest
 
 
 def record_version() -> tuple[str | None, str]:
