@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.3.1 - 2026-10-23
+
 ### Added
 - macOS and Linux downloads: a GitHub Actions workflow (`.github/workflows/release.yml`) builds every `v*` tag on
   Windows, macOS and Linux and attaches `AgentDesk-Setup-x.y.z.exe`, `AgentDesk-x.y.z-macos-<arch>.zip` (unsigned
