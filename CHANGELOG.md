@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.4.0 - 2026-10-23
+
 ### Added
 - Export a project to GitHub as its own branch (`agentdesk-export/<slug>`) of the project's repo, without touching the
   checkout; optional push (never forced). Import can clone that branch.
