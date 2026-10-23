@@ -80,6 +80,26 @@ def test_is_agentdesk_matches_only_agentdesk_command_lines(monkeypatch):
         assert cli.is_agentdesk(123) is want, cmd
 
 
+def test_is_agentdesk_knows_the_packaged_program_on_every_platform(monkeypatch):
+    monkeypatch.setattr(core, "FROZEN", True)
+    cases = {"win32": {r'"C:\Program Files\AgentDesk\AgentDesk.exe" stop': True, r"C:\Python\python.exe -m agentdesk": False},
+             "linux": {"/opt/AgentDesk/AgentDesk": True, "/home/u/AgentDesk/AgentDesk run proj": True,
+                       "/opt/AgentDesk/AgentDeskHelper": False, "python -m agentdesk": False},
+             "darwin": {"/Applications/AgentDesk.app/Contents/MacOS/AgentDesk dashboard": True, "/usr/bin/open -a AgentDesk.app": False}}
+    for platform, rows in cases.items():
+        monkeypatch.setattr(cli.sys, "platform", platform)
+        for cmd, want in rows.items():
+            monkeypatch.setattr(cli, "process_info", lambda pid, cmd=cmd: (1, cmd))
+            assert cli.is_agentdesk(123) is want, (platform, cmd)
+
+
+def test_packaged_data_folder_per_platform(tmp_path):
+    assert core.user_data_dir("win32", {"LOCALAPPDATA": str(tmp_path)}) == tmp_path / "AgentDesk"
+    assert core.user_data_dir("darwin", {}) == core.Path.home() / "Library" / "Application Support" / "AgentDesk"
+    assert core.user_data_dir("linux", {"XDG_DATA_HOME": str(tmp_path)}) == tmp_path / "AgentDesk"
+    assert core.user_data_dir("linux", {}) == core.Path.home() / ".local" / "share" / "AgentDesk"
+
+
 def test_account_rows_report_real_connection(monkeypatch):
     import json as _json
     calls = []

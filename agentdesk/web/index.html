@@ -1074,10 +1074,12 @@ function renderUpdate() {
   $("updBtn").disabled = busy;
   $("updMsg").textContent = j.state === "error" ? "Update failed: " + j.error
     : busy && j.total ? `${Math.round(100 * j.done / j.total)}%`
+    : upd.link_only ? "Opens the download page."
     : (upd.available && !upd.installable ? "Installed build only; running from source." : "");
 }
 async function installUpdate(confirmed) {
   if (!upd) return;
+  if (upd.link_only) { await api("/api/update/open", {}); return; }  // macOS / Linux: download from the release page
   const r = await api("/api/update/install", {confirm: confirmed === true});
   if (r.needs_confirm) {
     if (confirm("A worker run is active. Updating closes AgentDesk and stops it. Update anyway?")) return installUpdate(true);

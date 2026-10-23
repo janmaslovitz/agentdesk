@@ -4,6 +4,22 @@ Delegates coding tasks to Claude agents, choosing the cheapest model that can do
 across any number of projects and Claude accounts, with a dashboard to follow progress and spend
 and a chat to talk to.
 
+## Downloads
+
+Every release on the [Releases page](https://github.com/janmaslovitz/agentdesk/releases/latest) has ready-made builds
+(no Python needed):
+
+- **Windows:** `AgentDesk-Setup-x.y.z.exe`, the installer (see [Install](#install)). It updates itself from the app.
+- **macOS:** `AgentDesk-x.y.z-macos-arm64.zip` (Apple silicon). Unzip it and move `AgentDesk.app` to Applications.
+  The build is **not signed**: the first time, right-click the app → *Open* → *Open* (on recent macOS: try to open it
+  once, then System Settings → Privacy & Security → *Open Anyway*; or run `xattr -dr com.apple.quarantine AgentDesk.app`).
+- **Linux:** `AgentDesk-x.y.z-linux-x86_64.tar.gz` (built on Ubuntu 22.04). Unpack it anywhere and run `AgentDesk/AgentDesk`.
+  The window needs WebKitGTK (`sudo apt install gir1.2-webkit2-4.1`); without it the dashboard opens in the browser.
+
+On macOS and Linux the "Update available" button opens the release page; download the new build and replace the old one.
+The data stays where it is: `~/Library/Application Support/AgentDesk` (macOS), `~/.local/share/AgentDesk` (Linux,
+or `$XDG_DATA_HOME/AgentDesk`), unless a `data` folder sits next to the program.
+
 ## Install (any computer)
 
 Needs **Python 3.11+** and **git**. Copy this folder anywhere, then:
@@ -284,6 +300,11 @@ Data goes in `AGENTDESK_HOME` if set; otherwise the program uses a `data` folder
 The build never contains `data\`, accounts, logins or keys.
 The `.cmd`/`.sh` launchers still run the source version.
 
+On macOS / Linux, `bash build_unix.sh` does the same with the same spec and packs the result into `dist/`:
+`AgentDesk-x.y.z-macos-<arch>.zip` (an `AgentDesk.app`; icon from `agentdesk/web/agentdesk.icns` if you add one) or
+`AgentDesk-x.y.z-linux-<arch>.tar.gz` (the `AgentDesk` folder). On Linux it also needs the GTK / WebKitGTK development
+packages for the window (the list is in `.github/workflows/release.yml`). You can only build for the system you are on.
+
 ## Build the installer
 
 Make `AgentDesk-Setup.exe` (Windows) from a clean checkout. It needs Python 3.11+ and [Inno Setup 6](https://jrsoftware.org/isinfo.php) (`winget install JRSoftware.InnoSetup`):
@@ -326,6 +347,15 @@ It refuses to run if the tests fail, if tracked files have uncommitted changes, 
 the tag exists. It never pushes (`git push --follow-tags` when you want to). Every release installer stays in
 `dist\installer\` (`AgentDesk-Setup.exe` is always a copy of the newest), so going back is installing an older one.
 Installing a newer version over an older one keeps your data (`%LOCALAPPDATA%\AgentDesk`).
+
+**Release builds in CI.** Pushing the tag (with `--follow-tags`, as above) starts the GitHub Actions workflow
+`.github/workflows/release.yml`: it checks that the tag matches `__version__`, runs the tests once (Ubuntu), then builds on
+Windows (`build_installer.ps1`, Inno Setup from Chocolatey), macOS and Ubuntu 22.04 (`build_unix.sh`) and attaches
+`AgentDesk-Setup-x.y.z.exe`, `AgentDesk-x.y.z-macos-<arch>.zip` and `AgentDesk-x.y.z-linux-x86_64.tar.gz` to the
+GitHub Release of the tag. A missing release is created as a draft, with the notes of that version from `CHANGELOG.md`
+(`python tools/release.py notes x.y.z`), and published once all three builds are attached; if a build fails it stays a
+draft. To rebuild a tag, run the workflow by hand (Actions → Release → *Run workflow*, tag `vx.y.z`): existing assets
+are replaced. It uses only `GITHUB_TOKEN`; nothing is signed.
 
 ## Command line
 

@@ -123,16 +123,26 @@ def _is_scratch_path(p: str) -> bool:
         return False
 
 
+def user_data_dir(platform: str = sys.platform, environ=os.environ) -> Path:
+    """Where the packaged program keeps its data by default: %LOCALAPPDATA%\\AgentDesk on Windows,
+    ~/Library/Application Support/AgentDesk on macOS, $XDG_DATA_HOME/AgentDesk (~/.local/share/AgentDesk) elsewhere."""
+    if platform == "win32":
+        return Path(environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AgentDesk"
+    if platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "AgentDesk"
+    return Path(environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "AgentDesk"
+
+
 def _data_home() -> Path:
     """AGENTDESK_HOME, else `data` next to the app. The packaged program (often under Program Files, which
-    users can't write to) uses `data` next to the .exe only if it already exists there, else the AgentDesk folder in LOCALAPPDATA."""
+    users can't write to) uses `data` next to the .exe only if it already exists there, else user_data_dir()."""
     env = os.environ.get("AGENTDESK_HOME")
     # The installed program never uses the workers' scratch folder (see scratch_home) as its data: it is started from an
     # agent's shell now and then (an install, a restart) that carries that setting, and the app would show no projects.
     if env and not (FROZEN and _is_scratch_path(env)):
         return Path(env)
     if FROZEN and not (APP / "data").is_dir():
-        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "AgentDesk"
+        return user_data_dir()
     return APP / "data"
 
 
@@ -285,6 +295,7 @@ def version_text() -> str:
 # ----------------------------------------------------------------------------- in-app updater
 
 UPDATE_API = "https://api.github.com/repos/janmaslovitz/agentdesk/releases/latest"
+RELEASES_PAGE = "https://github.com/janmaslovitz/agentdesk/releases/latest"  # where macOS / Linux users download updates
 UPDATE_HOSTS = ("github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
 UPDATE_TTL = 3600.0
 _UPDATE: dict = {"at": 0.0, "info": None}
@@ -321,12 +332,17 @@ def pick_installer_asset(assets) -> dict | None:
     return None
 
 
-def update_from_release(rel: dict, current: str) -> dict:
-    """The check result for a GitHub release JSON. status: ok / unknown."""
+def update_from_release(rel: dict, current: str, installer: bool | None = None) -> dict:
+    """The check result for a GitHub release JSON. status: ok / unknown. installer (default: on Windows): an update
+    counts only when the release has the Setup .exe; otherwise (macOS / Linux) a newer version is enough, and the
+    dashboard links to `page`, the release's web page, for a manual download."""
+    if installer is None:
+        installer = os.name == "nt"
     latest = parse_version(rel.get("tag_name"))
     cur = parse_version(current)
+    page = rel.get("html_url") if update_url_ok(rel.get("html_url", "")) else RELEASES_PAGE
     if latest is None or cur is None:
-        return {"status": "unknown", "current": current, "latest": None, "available": False, "notes": "", "asset": None}
+        return {"status": "unknown", "current": current, "latest": None, "available": False, "notes": "", "asset": None, "page": RELEASES_PAGE}
     asset = pick_installer_asset(rel.get("assets"))
     sha = None
     if asset:
@@ -337,8 +353,8 @@ def update_from_release(rel: dict, current: str) -> dict:
             for a in rel.get("assets") or []:
                 if a.get("name") == asset["name"] + ".sha256" and update_url_ok(a.get("browser_download_url", "")):
                     sha = {"url": a["browser_download_url"]}
-    return {"status": "ok", "current": current, "latest": ".".join(map(str, latest)),
-            "available": _vcmp(latest, cur) > 0 and asset is not None,
+    return {"status": "ok", "current": current, "latest": ".".join(map(str, latest)), "page": page,
+            "available": _vcmp(latest, cur) > 0 and (asset is not None or not installer),
             "notes": str(rel.get("body") or "")[:4000],
             "asset": {"name": asset["name"], "url": asset["browser_download_url"], "size": int(asset.get("size") or 0), "sha256": sha} if asset else None}
 
@@ -356,7 +372,7 @@ def check_update(force: bool = False) -> dict:
             rel = json.loads(r.read(2_000_000).decode("utf-8"))
         info = update_from_release(rel, __version__)
     except Exception:
-        info = {"status": "unknown", "current": __version__, "latest": None, "available": False, "notes": "", "asset": None}
+        info = {"status": "unknown", "current": __version__, "latest": None, "available": False, "notes": "", "asset": None, "page": RELEASES_PAGE}
     with _UPDATE_LOCK:
         _UPDATE["at"], _UPDATE["info"] = time.time(), info
     return dict(info)
@@ -490,6 +506,11 @@ def account_env(acct: dict) -> dict[str, str]:
 def bundled_cli() -> str:
     import claude_agent_sdk
     p = Path(claude_agent_sdk.__file__).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
+    if os.name != "nt" and p.exists() and not os.access(p, os.X_OK):  # a packed build may lose the executable bit
+        try:
+            p.chmod(p.stat().st_mode | 0o111)
+        except OSError:
+            pass
     return str(p) if p.exists() else (shutil.which("claude") or "claude")
 
 
