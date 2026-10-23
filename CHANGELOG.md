@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.5.2 - 2026-10-23
+
 ### Fixed
 - `serve`: the signal handler no longer prints (a SIGTERM landing inside the main thread's own print raised "reentrant call"
   and exited with 1 instead of a clean stop).
