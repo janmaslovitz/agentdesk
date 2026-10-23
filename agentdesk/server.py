@@ -138,6 +138,7 @@ You may read these, and you may read the repository ({repo}) to write better tas
 Glob). You never edit the repository: you may only create or edit task files in tasks/ and append to
 notes.md. The workers do the coding. Your tools for them (the agentdesk server):
 - add_task: queue a task (title, body, optional tier and depends). queue_status: tasks and the run.
+- task_activity(id?): the agent timeline of a task; when asked what an agent is doing, read it and say in a sentence or two.
 - run_next, run_task(id), run_all, plan_task(id) (preview the router's plan), stop_run. The user
   approves each of these on the dashboard; only one run per project goes at a time.
 Shell commands (Bash/PowerShell) also wait for the user's approval, so prefer Read/Grep/Glob and use
@@ -207,7 +208,7 @@ The project's AgentDesk folder is {folder}:
   finished tasks. agentdesk.log: what happened. You may read all of it.
 - tasks/*.md: the queue; you may write task files there and append to notes.md (durable facts).
 Your tools for the workers (the agentdesk server), no approval needed: add_task, queue_status,
-run_next, run_task(id), run_all, plan_task(id), stop_run. Only one run per project goes at a time.
+task_activity(id) (the agent timeline: when asked what an agent is doing, read it and describe it in a sentence or two), run_next, run_task(id), run_all, plan_task(id), stop_run. Only one run per project goes at a time.
 Delegate bigger pieces of work to the workers as tasks; do small things yourself.
 
 Shell commands (Bash/PowerShell) run without asking, but a guard refuses pushing, changing remotes,
@@ -241,7 +242,7 @@ The project's AgentDesk folder is {folder}:
 - state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
   finished tasks. agentdesk.log: what happened. notes.md: durable facts (append what future you needs).
 - tasks/*.md: the queue. project.toml: repo, base branch, checks (you may edit it; keep it valid TOML).
-Your tools for the workers (the agentdesk server): add_task, queue_status, run_next, run_task(id),
+Your tools for the workers (the agentdesk server): add_task, queue_status, task_activity(id) (the agent timeline: when asked what an agent is doing, read it and describe it in a sentence or two), run_next, run_task(id),
 run_all, plan_task(id), stop_run. Only one run per project goes at a time.
 
 You have a budget per message (${budget:.2f}); finish with a short summary of what you did and what's
@@ -322,6 +323,35 @@ def live_agents() -> dict:
 
 MCP = "agentdesk"
 MCP_PREFIX = f"mcp__{MCP}__"
+
+
+def _event_line(ev: dict) -> str:
+    """One timeline event as a short line for the chat: '09:31 tool Edit core.py'."""
+    at = str(ev.get("at", ""))[11:16]
+    kind = ev.get("kind", "")
+    who = "router " if ev.get("role") == "router" else ""
+    if kind == "tool":
+        what = f"{ev.get('name', '')} {ev.get('input') or ev.get('file') or ''}"
+    elif kind == "result":
+        what = f"finished: {ev.get('turns', '?')} turns, ${ev.get('cost_usd') or 0:.2f}" + (" (error)" if ev.get("error") else "")
+    else:
+        what = ev.get("text") or ev.get("name") or ev.get("tier") or ""
+    return f"{at} {who}{kind} {str(what).strip()}"[:220]
+
+
+def activity_digest(p: "core.Project", tid: str, last: int = 12) -> str:
+    """What an agent is doing now, from the task's timeline (runs/<id>.jsonl): status, counts and the last events."""
+    e = core.Store(p).load()["tasks"].get(tid, {})
+    ev = core.read_activity(p, tid, limit=300)
+    head = f"{tid} {e.get('status', 'pending')}" + (f", started {e['started']}" if e.get("started") else "")
+    if not ev:
+        return head + ": no timeline yet"
+    tools = [x for x in ev if x.get("kind") == "tool"]
+    files = sorted({Path(str(x["file"])).name for x in tools if x.get("file")})[-8:]
+    errs = sum(1 for x in ev if x.get("kind") == "tool_error")
+    out = [head, f"tool calls: {len(tools)}, tool errors: {errs}" + (f", files touched: {', '.join(files)}" if files else "")]
+    out += ["last events:"] + ["  " + _event_line(x) for x in ev[-last:]]
+    return "\n".join(out)
 AUTONOMOUS = ("coworker", "planner")  # modes without approval cards: a budget per message and the usage pause
 PLANNER_TOOLS = ("propose_plan", "update_plan", "cancel_plan")
 # What the Planner may use. ToolSearch only loads tool schemas (the CLI may defer MCP tools behind it).
@@ -576,7 +606,26 @@ class Chat:
             for t in core.load_tasks(p):
                 e = state["tasks"].get(t.id, {})
                 lines.append(f"{t.id} {e.get('status', 'pending')} {e.get('tier') or t.tier or 'auto'} — {t.title}")
+                if e.get("status") in ("working", "routing"):
+                    last = core.read_activity(p, t.id, limit=5)
+                    if last:
+                        lines.append("    now: " + _event_line(last[-1]))
             return ok("\n".join(lines))
+
+        @tool("task_activity", "What a worker agent is doing: the task's timeline (last tool calls, files touched, errors, results). "
+                               "id optional: defaults to the task that is working now. Read it, then describe in a sentence or two what the agent is up to.",
+              {"type": "object", "properties": {"id": {"type": "string"}}})
+        async def task_activity(a):
+            tid = str(a.get("id") or "").strip()
+            tasks = core.Store(p).load()["tasks"]
+            if not tid:
+                busy = [k for k, v in tasks.items() if v.get("status") in ("working", "routing")]
+                if not busy:
+                    return ok("no agent is working right now")
+                tid = busy[-1]
+            if not any(t.id == tid for t in core.load_tasks(p)):
+                return err(f"no task {tid}")
+            return ok(activity_digest(p, tid))
 
         @tool("run_next", f"Start a run of the next ready task{needs}.", {})
         async def run_next(_a):
@@ -599,7 +648,7 @@ class Chat:
             e = runner(p).stop()
             return err(e) if e else ok("run stopped")
 
-        base = [add_task, queue_status, run_next, run_task, run_all, plan_task, stop_run]
+        base = [add_task, queue_status, task_activity, run_next, run_task, run_all, plan_task, stop_run]
         if approval:
             return base
 

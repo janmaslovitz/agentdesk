@@ -497,3 +497,16 @@ def test_page_makes_chat_text_copyable():
     assert ".msg, .msg * { user-select: text;" in html
     assert "async function copyText(" in html and 'document.execCommand("copy")' in html
     assert "navigator.clipboard.writeText" in html and "copyButton(() => pre.textContent" in html
+
+
+def test_task_activity_reads_the_timeline(chat):
+    call_tool(chat, "add_task", {"title": "Fix it", "body": "Do the thing."})
+    err, text = call_tool(chat, "task_activity", {})
+    assert not err and "no agent is working" in text
+    act = core.Activity(chat.p, "001", "worker")
+    act.add("tool", name="Edit", input="core.py", file="C:/x/core.py")
+    act.add("tool_error", name="Bash", text="boom")
+    err, text = call_tool(chat, "task_activity", {"id": "001"})
+    assert not err and "tool calls: 1" in text and "tool errors: 1" in text and "core.py" in text and "Edit" in text
+    err, text = call_tool(chat, "task_activity", {"id": "042"})
+    assert err and "no task" in text
