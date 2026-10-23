@@ -1,6 +1,6 @@
 """AgentDesk dashboard: projects, accounts, queues, runs, tokens, limits, logs and a chat per project.
 
-Listens on 127.0.0.1 only. Runs are separate processes (`python -m agentdesk run …`), one per
+Listens on 127.0.0.1 only (`python -m agentdesk serve` can bind elsewhere, see agentdesk/serve.py). Runs are separate processes (`python -m agentdesk run …`), one per
 project at a time, so closing the dashboard doesn't stop them (Stop does).
 """
 
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hmac
 import json
 import os
 import re
@@ -18,8 +19,8 @@ import threading
 import tomllib
 import time
 import urllib.parse
-import uuid
 import webbrowser
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1984,6 +1985,82 @@ def git_post(p: core.Project, what: str, d: dict) -> dict:
                               str(d.get("base") or ""), d.get("draft") is True)
 
 
+# ----------------------------------------------------------------------------- request guard
+
+GATEWAY_HEADER = "X-AgentDesk-Gateway-Token"
+LOOPBACK_NAMES = ("127.0.0.1", "localhost", "[::1]")
+
+
+class Guard:
+    """Which Host / Origin values a request may carry (DNS-rebinding / CSRF protection) and the optional shared
+    secret every request must send as X-AgentDesk-Gateway-Token (how the gateway talks to an instance).
+    allowed: entries "host" (any port) or "host:port"; None = loopback names on any port (the desktop default)."""
+
+    def __init__(self, allowed=None, token: str | None = None):
+        self.allowed = None if allowed is None else {a.strip().lower() for a in allowed if a.strip()}
+        self.token = token or None
+
+    @staticmethod
+    def split(hostport: str) -> tuple[str, str]:
+        hostport = hostport.strip().lower()
+        if hostport.startswith("["):
+            host, _, rest = hostport.partition("]")
+            return host + "]", rest.lstrip(":")
+        host, _, port = hostport.partition(":")
+        return host, port
+
+    def host_ok(self, hostport: str) -> bool:
+        host, port = self.split(hostport)
+        if not host:
+            return False
+        if host in LOOPBACK_NAMES:
+            return True
+        if self.allowed is None:
+            return False
+        return hostport.strip().lower() in self.allowed or host in self.allowed
+
+    def origin_ok(self, origin: str) -> bool:
+        m = re.fullmatch(r"https?://([^/\s]+)", origin.strip(), re.I)
+        return bool(m) and self.host_ok(m.group(1))
+
+    def token_ok(self, given: str | None) -> bool:
+        if self.token is None:
+            return True
+        return hmac.compare_digest((given or "").encode("utf-8"), self.token.encode("utf-8"))
+
+    def check(self, host: str | None, origin: str | None, token: str | None, post: bool) -> tuple[int, str] | None:
+        """None if the request may go on, else (status, reason)."""
+        if not self.token_ok(token):
+            return 401, "missing or wrong gateway token"
+        if not self.host_ok(host or ""):
+            return 403, "forbidden host"
+        if post and origin and not self.origin_ok(origin):
+            return 403, "forbidden"
+        return None
+
+
+GUARD = Guard()
+
+
+def default_allowed(host: str, port: int, extra=()) -> list[str]:
+    """Allowed Host/Origin names for a bind address: loopback always; the bind address itself (with its port);
+    plus anything given with --allowed-host."""
+    out = [f"{n}:{port}" if port else n for n in LOOPBACK_NAMES]
+    if host not in ("0.0.0.0", "::", ""):
+        out.append(f"[{host}]:{port}" if ":" in host else f"{host}:{port}")
+    return [*out, *extra]
+
+
+def is_loopback(host: str) -> bool:
+    import ipaddress
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
 # ----------------------------------------------------------------------------- http
 
 class Handler(BaseHTTPRequestHandler):
@@ -2055,7 +2132,15 @@ class Handler(BaseHTTPRequestHandler):
             if upload:
                 upload.unlink(missing_ok=True)
 
+    def guard(self, post: bool) -> bool:
+        bad = GUARD.check(self.headers.get("Host"), self.headers.get("Origin"), self.headers.get(GATEWAY_HEADER), post)
+        if bad:
+            self.json({"error": bad[1]}, bad[0])
+        return bad is None
+
     def do_GET(self):
+        if not self.guard(False):
+            return None
         parts = [x for x in self.path.split("?")[0].split("/") if x]
         if not parts or parts == ["index.html"]:
             return self.send(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
@@ -2098,9 +2183,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, b"not found", "text/plain")
 
     def do_POST(self):
-        origin = self.headers.get("Origin")
-        if origin and not re.fullmatch(r"http://(127\.0\.0\.1|localhost):\d+", origin):
-            return self.json({"error": "forbidden"}, 403)
+        if not self.guard(True):
+            return None
         parts = [x for x in self.path.split("?")[0].split("/") if x]
         query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
         upload = parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")
@@ -2263,9 +2347,13 @@ def pid_file() -> Path:
     return core.DATA / "dashboard.pid"
 
 
-def answers(port: int) -> bool:
+def answers(port: int, host: str = "127.0.0.1") -> bool:
+    if host in ("0.0.0.0", ""):
+        host = "127.0.0.1"
+    elif host == "::":
+        host = "::1"
     try:
-        with socket.create_connection(("127.0.0.1", port), timeout=1):
+        with socket.create_connection((host, port), timeout=1):
             return True
     except OSError:
         return False

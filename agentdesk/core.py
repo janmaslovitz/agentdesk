@@ -3562,7 +3562,10 @@ class BuildJob:
         if sys.platform == "win32":
             os.startfile(str(folder))  # type: ignore[attr-defined]
         else:
-            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+            try:
+                subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(folder)])
+            except OSError:  # a headless server has no file manager
+                return f"no file manager here; the output is in {folder}"
         return None
 
 

@@ -5,6 +5,18 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- Headless server mode: `python -m agentdesk serve` (also `agentdesk-server`) runs the dashboard with no window, tray or
+  browser, on Linux without a display. Options: `--host`, `--port` (0 = free port), `--data` (sets AGENTDESK_HOME),
+  `--allowed-host`, `--pid-file`; logs to stdout; SIGTERM / SIGINT shut it down cleanly.
+- Binding a non-loopback address needs `--auth-token-file`: every request must then carry the secret in the
+  `X-AgentDesk-Gateway-Token` header (checked in constant time), otherwise the server refuses to start.
+
+### Changed
+- The dashboard checks the Host header of every request and the Origin of every POST against a configurable list
+  (loopback by default), so the UI also works from `http://192.168.x.x:8765` when allowed, and foreign origins stay rejected.
+- "Open build folder" no longer fails when the machine has no file manager.
+
 
 ## 1.4.1 - 2026-10-23
 
