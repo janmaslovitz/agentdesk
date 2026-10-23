@@ -254,7 +254,8 @@ class UserStore:
         """Everything about a user except the password hash."""
         return {"username": name, "role": u.get("role", "user"), "disabled": bool(u.get("disabled")),
                 "created": u.get("created", ""), "home": u.get("home", ""), "projects": list(u.get("projects", [])),
-                "accounts": list(u.get("accounts", [])), "sessions_after": float(u.get("sessions_after") or 0)}
+                "accounts": list(u.get("accounts", [])), "sessions_after": float(u.get("sessions_after") or 0),
+                "quota_gb": u.get("quota_gb")}
 
     def get(self, name: str) -> dict | None:
         u = self._load()["users"].get(name)
@@ -324,6 +325,20 @@ class UserStore:
     def set_disabled(self, name: str, disabled: bool, by: str = "") -> dict:
         return self._change(name, lambda u, _d: u.__setitem__("disabled", bool(disabled)),
                             "user disabled" if disabled else "user enabled", by)
+
+    def set_quota(self, name: str, quota_gb: float | None, by: str = "") -> dict:
+        """The user's own disk quota in GB (0 = unlimited), or None for the server default (quota_gb)."""
+        if quota_gb is not None:
+            if isinstance(quota_gb, bool) or not isinstance(quota_gb, (int, float)) or not 0 <= float(quota_gb) <= 1e6:
+                raise ValueError("the quota is a number of GB from 0 (no limit) up")
+            quota_gb = float(quota_gb)
+
+        def fn(u, _d):
+            if quota_gb is None:
+                u.pop("quota_gb", None)
+            else:
+                u["quota_gb"] = quota_gb
+        return self._change(name, fn, "user quota", by, quota_gb="default" if quota_gb is None else quota_gb)
 
     def set_role(self, name: str, role: str, by: str = "") -> dict:
         if role not in ROLES:

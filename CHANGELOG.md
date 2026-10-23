@@ -6,6 +6,23 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- Server disk budget (docs/SERVER.md, "Disk budget"): `disk_total_gb` (512), `disk_reserve_gb` (40), soft limit
+  (80 %: warn + automatic cleanup) and hard limit (92 %: new runs, clones, imports and uploads are refused with the
+  reason; running work goes on), measured by a background, cached walker plus the real file-system usage.
+  Per-user quotas (`quota_gb`, overridden per user in the admin cabinet or `agentdesk-server user quota NAME GB`):
+  over quota, that user's new runs / clones are refused and their data is cleaned first. Usage bars in the dashboard
+  bar and the cabinet; a new **Storage** tab (totals, sortable per-user table with top consumers, per project, per
+  cache, the dry-run list of the next cleanup, "Clean now"); `agentdesk-server storage`, `clean [--dry-run]`;
+  `doctor` warns above the soft limit. Every automatic deletion is in `audit.log`.
+- Disk hygiene: a registry of build kinds (cargo, node_modules with a lockfile, Python venvs and caches, dist / build,
+  gradle, maven) cleaned by age and per-project size cap, only when git-ignored and untracked; worktrees of done tasks
+  removed after `worktree_ttl_hours` (branch kept); `max_worktrees` per project (the next task waits); half-created
+  worktrees removed; scheduled off-peak `git gc --auto`; a report warning for large committed files. On the server
+  these are on by default (desktop unchanged).
+- Shared package caches on the server: npm, pip, uv, go modules, cargo registry / git and gradle modules in
+  `<server-home>/cache/<tool>`, each with a size cap and LRU / age pruning, optional hard-link dedupe; optional per-user
+  shared `CARGO_TARGET_DIR` per project. Clones from a URL can be shallow (`clone_depth`) or partial (`partial_clone`);
+  `max_upload_mb`; import / upload temp files are removed after use and swept after 24 h.
 - Server reliability (docs/SERVER.md): systemd `Type=notify` with `WatchdogSec=60`, `Restart=always`, unlimited start
   retries, enabled at install; the gateway and instances send `READY=1` and `WATCHDOG=1` (pure Python, no-op outside
   systemd) and ping only while a self-check passes (loopback `/gateway/health`, user store readable, disk not full), so

@@ -158,6 +158,29 @@ def redact(text: str, *secrets_: str) -> str:
     return SECRET.sub("***", text)
 
 
+def call_projtool(cfg: dict, u: dict, *args: str, timeout: float = PROJECT_TIMEOUT) -> dict:
+    """Run agentdesk.gateway.projtool for user `u` (their AGENTDESK_HOME, their OS account with run_as_users) and
+    return its JSON answer; AdminError when it fails."""
+    argv = [cfg.get("python") or sys.executable, "-m", "agentdesk.gateway.projtool", *args]
+    if cfg.get("run_as_users"):
+        argv = ["sudo", "-n", "-u", f"agentdesk-{u['username']}", "--", *argv]
+    env = {k: v for k, v in os.environ.items() if k != "AGENTDESK_SERVER_HOME"}
+    env.update(AGENTDESK_HOME=u["home"], PYTHONUTF8="1", GIT_TERMINAL_PROMPT="0")
+    Path(u["home"]).mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(argv, cwd=APP, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise AdminError(f"the project tool failed: {e}", 502)
+    try:
+        res = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise AdminError("the project tool failed: " + redact((r.stderr or r.stdout or "no answer").strip()[-300:]), 502)
+    if not res.get("ok"):
+        raise AdminError(redact(str(res.get("error", "failed"))))
+    return res
+
+
 class Admin:
     def __init__(self, gw):
         self.gw = gw
@@ -167,7 +190,8 @@ class Admin:
     def user_rows(self) -> list[dict]:
         running = {i["username"] for i in self.gw.instances.status()}
         return [{"username": u["username"], "role": u["role"], "disabled": u["disabled"], "created": u["created"],
-                 "accounts": u["accounts"], "running": u["username"] in running} for u in self.gw.users.list()]
+                 "accounts": u["accounts"], "running": u["username"] in running, "quota_gb": u.get("quota_gb"),
+                 "usage": self.gw.storage.usage(u["username"])} for u in self.gw.users.list()]
 
     def need_user(self, name: str) -> dict:
         u = self.gw.users.get(name) if USERNAME.fullmatch(name or "") else None
@@ -261,24 +285,26 @@ class Admin:
 
     # -- projects (done by a child process with the user's AGENTDESK_HOME)
     def projtool(self, u: dict, *args: str) -> dict:
-        argv = [self.gw.cfg.get("python") or sys.executable, "-m", "agentdesk.gateway.projtool", *args]
-        if self.gw.cfg.get("run_as_users"):
-            argv = ["sudo", "-n", "-u", f"agentdesk-{u['username']}", "--", *argv]
-        env = {k: v for k, v in os.environ.items() if k != "AGENTDESK_SERVER_HOME"}
-        env.update(AGENTDESK_HOME=u["home"], PYTHONUTF8="1", GIT_TERMINAL_PROMPT="0")
-        Path(u["home"]).mkdir(parents=True, exist_ok=True)
+        try:  # the user's server policy first: clone options, shared caches, the [hygiene] defaults of the server
+            self.gw.storage.write_policy(u["username"], Path(u["home"]))
+        except OSError:
+            pass
+        return call_projtool(self.gw.cfg, u, *args)
+
+    def set_quota(self, name: str, d: dict, by: str) -> dict:
+        self.need_user(name)
+        raw = str(d.get("quota_gb", "")).strip().lower()
         try:
-            r = subprocess.run(argv, cwd=APP, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=PROJECT_TIMEOUT, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            raise AdminError(f"the project tool failed: {e}", 502)
+            q = None if raw in ("", "default") else float(raw)
+            self.gw.users.set_quota(name, q, by)
+        except ValueError as e:
+            raise AdminError(human_error(e) if "quota" in str(e) else "the quota is a number of GB, or default")
+        u = self.gw.users.get(name)
         try:
-            res = json.loads(r.stdout.strip().splitlines()[-1])
-        except (ValueError, IndexError):
-            raise AdminError("the project tool failed: " + redact((r.stderr or r.stdout or "no answer").strip()[-300:]), 502)
-        if not res.get("ok"):
-            raise AdminError(redact(str(res.get("error", "failed"))))
-        return res
+            self.gw.storage.write_policy(name, Path(u["home"]))  # the gate follows the new quota at once
+        except OSError:
+            pass
+        return {"ok": True, "quota_gb": u.get("quota_gb")}
 
     # -- instances / health
     def instance_rows(self) -> list[dict]:
@@ -304,6 +330,7 @@ class Admin:
         from .. import __version__
         du = shutil.disk_usage(self.gw.home)
         return {"version": __version__, "disk_free": du.free, "disk_total": du.total, "home": str(self.gw.home),
+                "budget": self.gw.storage.fs_now(),
                 "users": self.gw.users.count(), "instances": len(self.gw.instances.status()),
                 "tls": self.gw.ssl_ctx is not None, "python": sys.version.split()[0]}
 
@@ -371,12 +398,19 @@ def route_api(h, ad: Admin, user: dict, parts: list[str]) -> None:
             return h.json({"users": ad.user_rows(), "accounts": ad.accounts.public(), "me": by})
         if n == 1 and post:
             return h.json({"ok": True, "user": ad.create_user(body(), by)["username"]}, 201)
+        if n == 3 and post and parts[2] == "quota":
+            return h.json(ad.set_quota(parts[1], body(), by))
         if n == 3 and post and parts[2] != "projects":
             return h.json(ad.user_action(parts[1], parts[2], body(), by))
         if n >= 3 and parts[2] == "projects":
             u = ad.need_user(parts[1])
             if n == 3 and get:
                 return h.json(ad.projtool(u, "list"))
+            if n == 4 and parts[3] in ("git", "zip") and post:
+                why = ad.gw.storage.gate_for(u["username"])
+                if why:  # hard limit / over quota: no clone, no upload (the body is not read)
+                    h.close_connection = True
+                    raise AdminError(f"refused: {why}", 507)
             if n == 4 and parts[3] == "git" and post:
                 d = body()
                 url = str(d.get("url", "")).strip()
@@ -426,6 +460,24 @@ def route_api(h, ad: Admin, user: dict, parts: list[str]) -> None:
             return h.json({"ok": True})
     elif head == "health" and n == 1 and get:
         return h.json(ad.health())
+    elif head == "storage":
+        st = ad.gw.storage
+        if n == 1 and get:  # cached numbers only: the walker runs in the background
+            return h.json(st.view())
+        if n == 2 and parts[1] in ("plan", "clean", "scan") and post:
+            d = body()
+            if parts[1] == "clean" and d.get("confirm") not in ("1", "true", "yes"):
+                raise AdminError("this needs confirmation")
+            if parts[1] == "scan":
+                st.state["ts"] = 0  # due now; tick() starts it in the background
+                st.tick()
+                return h.json({"ok": True})
+            only = [x for x in str(d.get("users", "")).split(",") if x.strip()] or None
+            res = st.start_job("plan" if parts[1] == "plan" else "clean", by, only)
+            if not res.get("ok"):
+                raise AdminError(res["message"], 409)
+            ad.gw.audit.log("storage " + parts[1] + " started", by=by)
+            return h.json(res)
     elif head == "audit" and n == 1 and get:
         return h.json({"events": ad.audit_rows(positive_int(q.get("n", [""])[0], 200, 2000))})
     raise AdminError("not found", 404)
@@ -436,9 +488,9 @@ def upload_zip(h, ad: Admin, u: dict, by: str, name: str) -> dict:
     if h.headers.get("Transfer-Encoding") or not n_raw.isdigit() or int(n_raw) == 0:
         raise AdminError("a Content-Length and a .zip body are required", 411)
     n = int(n_raw)
-    if n > h.gw.max_body:
+    if n > min(h.gw.max_body, int(float(h.gw.cfg.get("max_upload_mb", 200)) * 1024 * 1024)):
         h.close_connection = True
-        raise AdminError("the file is too large", 413)
+        raise AdminError(f"the file is too large (limit {h.gw.cfg.get('max_upload_mb', 200):g} MB)", 413)
     up = h.gw.home / "uploads"
     up.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix="import-", suffix=".zip", dir=up)

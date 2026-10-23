@@ -28,161 +28,91 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import core
+from .fsutil import (GB, MB, REPARSE, Size, _chmod_w, _entry_dir, _key, _links_between, _lp, _plain, _st_link,  # noqa: F401
+                     safe_delete,
+                     _subdirs, delete_path, fmt, inside, is_link, walk_size)
 
-GB = 1024 ** 3
-MB = 1024 ** 2
 CACHE_TTL_S = 300                  # a dashboard request older than this starts a new measurement in the background
 TRIM_ZONES = ("deps", "build", ".fingerprint", "incremental")  # per profile: the parts cargo-sweep trims by age
 TARGET_MARKERS = ("CACHEDIR.TAG", ".rustc_info.json")
 SOURCE_MARKERS = (".git", "Cargo.toml")  # a folder holding these is never a build cache
 CARGO_NAMES = {"cargo", "rustc", "rustup", "rustdoc", "clippy-driver", "cargo-clippy", "cargo-fmt", "rustfmt"}
 TOOLS_WITH_PATHS = {"rustc", "rustdoc", "clippy-driver"}  # their command line names every folder they write to
-REPARSE = 0x400                    # FILE_ATTRIBUTE_REPARSE_POINT: symlink, junction, mount point ...
 ACTIVE = ("working", "routing")
-ORDER = ("logs", "worktree", "branch", "orphan", "trim", "profile")  # the order actions are applied in
+ORDER = ("logs", "halfwt", "worktree", "branch", "orphan", "artifact", "trim", "profile")  # the order actions are applied in
+HALF_CREATED_S = 3600              # a worktree folder with no .git that is older than this is a failed `worktree add`
+ARTIFACT_DEPTH = 4                 # how deep below a checkout build folders are looked for
 
 
-def fmt(n: float) -> str:
-    n = float(n or 0)
-    for unit, size in (("GB", GB), ("MB", MB), ("KB", 1024)):
-        if n >= size:
-            return f"{n / size:.1f} {unit}"
-    return f"{int(n)} B"
+# ----------------------------------------------------------------------------- build kinds
+
+@dataclass(frozen=True)
+class BuildKind:
+    """What a build output folder of one tool looks like and when it may go.
+
+    dirs: folder names; needs: one of these files must sit next to the folder (what makes it this kind);
+    inside: one of these must be inside it (empty = no marker needed); reproducible: one of these (a lockfile) must
+    sit next to it, otherwise it is never deleted; finished_only: only in worktrees of done tasks; nested: may sit
+    anywhere below a checkout, not only next to a manifest. Every folder must also be git-ignored and untracked."""
+    name: str
+    dirs: tuple[str, ...]
+    needs: tuple[str, ...] = ()
+    inside: tuple[str, ...] = ()
+    reproducible: tuple[str, ...] = ()
+    finished_only: bool = False
+    nested: bool = False
 
 
-# ----------------------------------------------------------------------------- paths
-
-def _lp(path) -> str:
-    """Absolute path; on Windows in the \\\\?\\ form so paths longer than 260 characters work."""
-    s = os.path.abspath(str(path))
-    if os.name != "nt" or s.startswith("\\\\?\\"):
-        return s
-    if s.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + s[2:]
-    return "\\\\?\\" + s
-
-
-def _plain(path) -> str:
-    s = str(path)
-    if s.startswith("\\\\?\\UNC\\"):
-        return "\\\\" + s[8:]
-    return s[4:] if s.startswith("\\\\?\\") else s
+BUILD_KINDS: tuple[BuildKind, ...] = (
+    # cargo target dirs keep their own, finer handling (per-profile trimming, see discover / plan)
+    BuildKind("cargo", ("target",), needs=("Cargo.toml",), inside=TARGET_MARKERS),
+    BuildKind("node_modules", ("node_modules",), needs=("package.json",), finished_only=True,
+              reproducible=("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb")),
+    BuildKind("python-venv", (".venv", "venv"), inside=("pyvenv.cfg",), finished_only=True),
+    BuildKind("python-cache", (".pytest_cache", ".mypy_cache", ".ruff_cache"), nested=True),
+    BuildKind("pycache", ("__pycache__",), nested=True),
+    BuildKind("python-dist", ("dist", "build"), needs=("pyproject.toml", "setup.py", "setup.cfg")),
+    BuildKind("node-dist", ("dist", "build", ".next", ".nuxt", ".parcel-cache", ".turbo"), needs=("package.json",)),
+    BuildKind("gradle", ("build", ".gradle"), needs=("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")),
+    BuildKind("maven", ("target",), needs=("pom.xml",)),
+)
 
 
-def _key(path) -> str:
-    """Comparable form of a path (case and separators normalized on Windows, no long-path prefix)."""
-    return os.path.normcase(os.path.normpath(os.path.abspath(_plain(path))))
-
-
-def inside(path, root) -> bool:
-    """`path` is `root` or below it (by name only: links are checked separately)."""
-    p, r = _key(path), _key(root)
-    return p == r or p.startswith(r.rstrip(os.sep) + os.sep)
-
-
-def _st_link(st: os.stat_result) -> bool:
-    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & REPARSE)
-
-
-def is_link(path) -> bool:
-    """A symlink, junction or other reparse point (unreadable counts as one: never walked)."""
-    try:
-        return _st_link(os.lstat(_lp(path)))
-    except OSError:
-        return True
-
-
-def _entry_dir(e: os.DirEntry) -> bool:
-    """A real directory to descend into: not a symlink, junction or other reparse point."""
-    try:
-        if not e.is_dir(follow_symlinks=False) or e.is_symlink() or (hasattr(e, "is_junction") and e.is_junction()):
-            return False
-        return not _st_link(e.stat(follow_symlinks=False))
-    except OSError:
-        return False
-
-
-def _subdirs(path) -> list[Path]:
-    try:
-        with os.scandir(_lp(path)) as it:
-            return [Path(_plain(e.path)) for e in it if _entry_dir(e)]
-    except OSError:
-        return []
-
-
-def _links_between(root, path) -> bool:
-    """Is any folder from `root` down to `path` (both included) a link? Then deleting there could leave the folder."""
-    cur = Path(_plain(os.path.abspath(_plain(path))))
-    stop = _key(root)
-    while True:
-        if is_link(cur):
-            return True
-        if _key(cur) == stop or cur.parent == cur:
-            return False
-        cur = cur.parent
-
-
-# ----------------------------------------------------------------------------- measuring
-
-@dataclass
-class Size:
-    bytes: int = 0
-    files: int = 0
-    newest: float = 0.0   # newest mtime of anything inside (files and folders), 0 = nothing seen
-    errors: int = 0
-
-    def add(self, o: "Size") -> "Size":
-        self.bytes += o.bytes
-        self.files += o.files
-        self.newest = max(self.newest, o.newest)
-        self.errors += o.errors
-        return self
-
-
-def walk_size(path, skip=()) -> Size:
-    """Total size of the files under `path` with os.scandir, never following links/junctions; folders in `skip`
-    (measured elsewhere) are left out. A plain file gives its own size."""
-    out = Size()
-    skip_k = {_key(s) for s in skip}
-    try:
-        st = os.lstat(_lp(path))
-    except OSError:
-        out.errors += 1
-        return out
-    if _st_link(st):
-        return out
-    out.newest = st.st_mtime
-    if not stat.S_ISDIR(st.st_mode):
-        out.bytes, out.files = st.st_size, 1
-        return out
-    stack = [_lp(path)]
-    while stack:
-        d = stack.pop()
-        try:
-            it = os.scandir(d)
-        except OSError:
-            out.errors += 1
+def kind_of(d) -> BuildKind | None:
+    """The (non-cargo) build kind of folder `d` by its name, the files next to it and its markers, or None."""
+    d = Path(d)
+    parent = d.parent
+    for k in BUILD_KINDS:
+        if k.name == "cargo" or d.name not in k.dirs:
             continue
-        with it:
-            for e in it:
-                try:
-                    if e.is_symlink():
-                        continue
-                    if e.is_dir(follow_symlinks=False):
-                        if not _entry_dir(e) or (skip_k and _key(e.path) in skip_k):
-                            continue
-                        out.newest = max(out.newest, e.stat(follow_symlinks=False).st_mtime)
-                        stack.append(e.path)
-                    else:
-                        s = e.stat(follow_symlinks=False)
-                        if _st_link(s):
-                            continue
-                        out.bytes += s.st_size
-                        out.files += 1
-                        out.newest = max(out.newest, s.st_mtime)
-                except OSError:
-                    out.errors += 1
+        if k.needs and not any(os.path.isfile(_lp(parent / n)) for n in k.needs):
+            continue
+        if k.inside and not any(os.path.exists(_lp(d / m)) for m in k.inside):
+            continue
+        if k.name == "maven" and os.path.isfile(_lp(parent / "Cargo.toml")):
+            continue
+        return k
+    return None
+
+
+def find_artifacts(root, depth: int = ARTIFACT_DEPTH) -> list[tuple[Path, BuildKind]]:
+    """Build output folders of the non-cargo kinds below a checkout `root` (not entering .git, links or a found
+    folder)."""
+    out: list[tuple[Path, BuildKind]] = []
+    stack = [(Path(root), 0)]
+    while stack:
+        d, lvl = stack.pop()
+        for c in _subdirs(d):
+            if c.name == ".git":
+                continue
+            k = kind_of(c)
+            if k is not None:
+                out.append((c, k))
+                continue
+            if lvl + 1 < depth and c.name not in ("target", "node_modules"):
+                stack.append((c, lvl + 1))
     return out
+
 
 
 def is_profile(d) -> bool:
@@ -261,7 +191,7 @@ def worktrees_dir(p: core.Project) -> Path | None:
 def configured_targets(p: core.Project, cfg: dict) -> list[Path]:
     """CARGO_TARGET_DIR from [gates.env] and [hygiene] target_dirs (relative ones are taken from the repository)."""
     out = []
-    env = gate_env(p).get("CARGO_TARGET_DIR", "").strip()
+    env = gate_env(p).get("CARGO_TARGET_DIR", "").strip() or core.policy_env(p).get("CARGO_TARGET_DIR", "")
     if env:
         out.append(_abs(env, p.repo))
     out += [_abs(t, p.repo) for t in cfg.get("target_dirs", [])]
@@ -385,6 +315,51 @@ def refuse_target(p: core.Project, cfg: dict, target, path=None) -> str | None:
     return None
 
 
+def checkout_of(p: core.Project, path) -> Path | None:
+    """The checkout (the repository, or one folder of the worktrees folder) that holds `path`, or None."""
+    w = worktrees_dir(p)
+    if w and inside(path, w) and _key(path) != _key(w):
+        rel = Path(os.path.relpath(_plain(path), _plain(w)))
+        return w / rel.parts[0]
+    if inside(path, p.repo):
+        return p.repo
+    return None
+
+
+def refuse_artifact(p: core.Project, path) -> str | None:
+    """Why the build folder `path` (a non-cargo build kind) must not be deleted, or None when it may be. Checked again
+    right before the deletion: inside the repository or a worktree, never a checkout itself, of a known build kind
+    (its markers), no links on the way, no .git inside, a lockfile when the kind needs one, and git says it is
+    ignored and holds no tracked file (git failing = refused)."""
+    path = Path(_plain(path))
+    root = checkout_of(p, path)
+    if root is None:
+        return f"{path} is outside the project's repository and worktrees"
+    if _key(path) == _key(root):
+        return f"{path} is a checkout, not a build folder"
+    k = kind_of(path)
+    if k is None:
+        return f"{path} is not clearly a build output folder (no known build kind matches)"
+    if not os.path.isdir(_lp(path)):
+        return f"{path} does not exist"
+    if _links_between(root, path):
+        return f"{path} is or goes through a symlink/junction"
+    if os.path.exists(_lp(path / ".git")):
+        return f"{path} holds a .git"
+    if k.reproducible and not any(os.path.isfile(_lp(path.parent / n)) for n in k.reproducible):
+        return f"{path} can't be rebuilt exactly (no {' / '.join(k.reproducible)} next to it)"
+    rel = os.path.relpath(path, root).replace("\\", "/")
+    code, _out = core.git(["check-ignore", "-q", "--no-index", rel + "/"], root)
+    if code != 0:
+        return f"{rel} is not ignored by git" if code == 1 else "git check-ignore failed"
+    code, out = core.git(["ls-files", "--", rel], root)
+    if code != 0:
+        return "git ls-files failed"
+    if out.strip():
+        return f"{rel} holds files tracked by git"
+    return None
+
+
 # ----------------------------------------------------------------------------- processes
 
 def list_processes() -> list[dict] | None:
@@ -499,70 +474,6 @@ def procs_using(paths, procs: list[dict] | None) -> list[str] | None:
 
 
 # ----------------------------------------------------------------------------- deleting
-
-def _chmod_w(lp: str) -> None:
-    try:
-        os.chmod(lp, stat.S_IWRITE | stat.S_IREAD | (stat.S_IEXEC if os.path.isdir(lp) else 0))
-    except OSError:
-        pass
-
-
-def delete_path(path) -> tuple[int, int]:
-    """Delete a file or folder tree; returns (bytes freed, errors). Read-only files are made writable, long paths
-    work, and a link/junction inside is removed itself, never followed."""
-    lp = _lp(path)
-    try:
-        st = os.lstat(lp)
-    except FileNotFoundError:
-        return 0, 0
-    except OSError:
-        return 0, 1
-    attrs = getattr(st, "st_file_attributes", 0)
-    if _st_link(st):
-        try:
-            if os.name == "nt" and attrs & 0x10:  # a junction or directory symlink: remove the link only
-                os.rmdir(lp)
-            else:
-                os.unlink(lp)
-            return 0, 0
-        except OSError:
-            return 0, 1
-    if stat.S_ISDIR(st.st_mode):
-        freed = errs = 0
-        try:
-            with os.scandir(lp) as it:
-                entries = [e.path for e in it]
-        except OSError:
-            _chmod_w(lp)
-            try:
-                with os.scandir(lp) as it:
-                    entries = [e.path for e in it]
-            except OSError:
-                return 0, 1
-        for e in entries:
-            f, er = delete_path(e)
-            freed, errs = freed + f, errs + er
-        for attempt in (0, 1):
-            try:
-                os.rmdir(lp)
-                break
-            except OSError:
-                if attempt:
-                    errs += 1
-                else:
-                    _chmod_w(lp)
-        return freed, errs
-    for attempt in (0, 1):
-        try:
-            os.unlink(lp)
-            return st.st_size, 0
-        except FileNotFoundError:
-            return 0, 0
-        except OSError:
-            if attempt:
-                return 0, 1
-            _chmod_w(lp)
-    return 0, 1
 
 
 def trim_stale(target, cutoff: float, check=None) -> tuple[int, int, int]:
@@ -694,6 +605,14 @@ def measure(p: core.Project, cfg: dict | None = None, now: float | None = None) 
                        for t in targets if t["over"]]
     if rep["over_total"]:
         rep["warnings"].append(f"The project uses {fmt(total)} in all (limit {cfg['max_total_gb']:g} GB)")
+    rep["artifacts"] = []
+    if cfg.get("artifacts"):  # other build kinds (node_modules, venvs, dist ...) in the repository and the worktrees
+        for root in [p.repo] + [Path(i["path"]) for i in wts["items"]]:
+            for d, k in find_artifacts(root):
+                if any(inside(d, t["path"]) or inside(t["path"], d) for t in targets):
+                    continue
+                s = walk_size(d)
+                rep["artifacts"].append({"path": str(d), "kind": k.name, "bytes": s.bytes, "newest": s.newest, "checkout": str(root)})
     rep["actions"] = plan(p, cfg, rep, state, registered, cutoff)
     rep["reclaimable"] = sum(a["bytes"] for a in rep["actions"])
     rep["took_s"] = round(time.time() - t0, 2)
@@ -749,6 +668,7 @@ def plan(p: core.Project, cfg: dict, rep: dict, state: dict, registered: list[di
     removed_wt_branches = set()
     deps_open = _dependents_open(p, state)
     w = worktrees_dir(p)
+    ttl, now = float(cfg.get("worktree_ttl_hours") or 0), float(rep.get("ts") or time.time())
     for it in rep["worktrees"]["items"]:
         if not it["registered"] or it["locked"] or it["name"] == core.COWORK or it["name"] in active or heads is None:
             continue
@@ -759,11 +679,16 @@ def plan(p: core.Project, cfg: dict, rep: dict, state: dict, registered: list[di
             why = f"task {it['name']} is done and {br} is merged into {base}"
         elif it["detached"] or (br and br not in heads):
             why = f"its branch is gone ({'detached HEAD' if it['detached'] else br + ' no longer exists'})"
+        elif ttl > 0 and e.get("status") == "done" and it["newest"] and now - it["newest"] >= ttl * 3600:
+            why = f"task {it['name']} is done and its worktree was idle for {ttl:g}+ hours (branch {br or '-'} is kept)"
         if why and w and inside(it["path"], w):
             acts.append({"id": f"worktree:{_key(it['path'])}", "kind": "worktree", "path": it["path"],
                          "bytes": it["bytes"] + it["target_bytes"], "why": why + "; git worktree remove --force, then prune"})
             if br:
                 removed_wt_branches.add(br)
+    acts += _cap_actions(p, cfg, rep, state, acts, active, heads)
+    acts += _halfwt_actions(rep, registered, active, now)
+    acts += _artifact_actions(p, cfg, rep, state, acts, active, cutoff)
     if heads is not None:
         for br in sorted(heads):
             if not br.startswith("auto/") or br == f"auto/{core.COWORK}" or br == base:
@@ -776,6 +701,83 @@ def plan(p: core.Project, cfg: dict, rep: dict, state: dict, registered: list[di
     acts += _log_actions(p, cfg, state, cutoff)
     acts.sort(key=lambda a: ORDER.index(a["kind"]))
     return acts
+
+
+def _wt_action(it: dict, why: str) -> dict:
+    return {"id": f"worktree:{_key(it['path'])}", "kind": "worktree", "path": it["path"],
+            "bytes": it["bytes"] + it["target_bytes"], "why": why + "; git worktree remove --force, then prune"}
+
+
+def _cap_actions(p: core.Project, cfg: dict, rep: dict, state: dict, acts: list[dict], active: set[str], heads) -> list[dict]:
+    """[hygiene] max_worktrees: at the limit, worktrees of done tasks go (oldest first) so a new task can start."""
+    cap = int(cfg.get("max_worktrees") or 0)
+    if cap <= 0 or heads is None:
+        return []
+    planned = {_key(a["path"]) for a in acts if a["kind"] == "worktree"}
+    items = [it for it in rep["worktrees"]["items"] if it["name"] != core.COWORK]
+    left = len([it for it in items if _key(it["path"]) not in planned])
+    out = []
+    done = [it for it in items if _key(it["path"]) not in planned and it["registered"] and not it["locked"]
+            and it["name"] not in active and state.get("tasks", {}).get(it["name"], {}).get("status") == "done"]
+    for it in sorted(done, key=lambda i: i["newest"] or 0):
+        if left < cap:
+            break
+        out.append(_wt_action(it, f"the project is at its worktree limit (max_worktrees = {cap}) and task {it['name']} is done "
+                                  f"(branch {it['branch'] or '-'} is kept)"))
+        left -= 1
+    return out
+
+
+def _halfwt_actions(rep: dict, registered: list[dict] | None, active: set[str], now: float) -> list[dict]:
+    """Folders of the worktrees folder that git doesn't know and that have no .git: a `git worktree add` that died."""
+    if registered is None or not rep["worktrees"]["path"]:
+        return []
+    reg = {_key(r["path"]) for r in registered}
+    out = []
+    for it in rep["worktrees"]["items"]:
+        if it["name"] in active or it["name"] == core.COWORK or _key(it["path"]) in reg:
+            continue
+        if os.path.lexists(_lp(Path(it["path"]) / ".git")) or (it["newest"] and now - it["newest"] < HALF_CREATED_S):
+            continue
+        out.append({"id": f"halfwt:{_key(it['path'])}", "kind": "halfwt", "path": it["path"], "bytes": it["bytes"],
+                    "why": "a half-created worktree (no .git, unknown to git): a `git worktree add` that died half way"})
+    return out
+
+
+def _artifact_actions(p: core.Project, cfg: dict, rep: dict, state: dict, acts: list[dict], active: set[str],
+                      cutoff: float) -> list[dict]:
+    """Build folders of the other build kinds: stale ones, those of done tasks' worktrees, and when the project is
+    over max_total_gb more of them (oldest first) until it would be under. Never in a worktree of an active task."""
+    if not cfg.get("artifacts"):
+        return []
+    gone = [a["path"] for a in acts if a["kind"] in ("worktree", "halfwt")]
+    kinds = {k.name: k for k in BUILD_KINDS}
+    excess = rep["total"] - cfg["max_total_gb"] * GB
+    out = []
+    for a in sorted(rep.get("artifacts", []), key=lambda x: x["newest"] or 0):
+        if any(inside(a["path"], g) for g in gone):
+            continue
+        ck = Path(a["checkout"]).name if _key(a["checkout"]) != _key(p.repo) else None
+        if ck in active:
+            continue
+        k = kinds[a["kind"]]
+        finished = ck is not None and ck != core.COWORK and state.get("tasks", {}).get(ck, {}).get("status") == "done"
+        stale = bool(a["newest"]) and a["newest"] < cutoff
+        if finished:
+            why = f"task {ck} is done: its {k.name} folder is rebuilt when needed"
+        elif k.finished_only:
+            continue
+        elif stale:
+            why = f"{k.name} build output not touched for {cfg['stale_days']:g}+ days"
+        elif excess > 0:
+            why = f"the project is over {cfg['max_total_gb']:g} GB: oldest {k.name} build output goes first"
+        else:
+            continue
+        if refuse_artifact(p, a["path"]):
+            continue
+        out.append({"id": f"artifact:{_key(a['path'])}", "kind": "artifact", "path": a["path"], "bytes": a["bytes"], "why": why})
+        excess -= a["bytes"]
+    return out
 
 
 def _log_actions(p: core.Project, cfg: dict, state: dict, cutoff: float) -> list[dict]:
@@ -835,6 +837,7 @@ def apply(p: core.Project, ids: list[str] | None = None, cfg: dict | None = None
         res["freed"] += freed
         res["done"].append({**a, "freed": freed})
         log(f"disk hygiene: {text} (freed {fmt(freed)})")
+        audit_deletion(p, a, freed)
 
     if not cfg["enabled"]:
         res["skipped"].append({"kind": "all", "path": str(p.dir), "reason": "disk hygiene is turned off ([hygiene] enabled = false)"})
@@ -843,6 +846,16 @@ def apply(p: core.Project, ids: list[str] | None = None, cfg: dict | None = None
         res["skipped"].append({"kind": "all", "path": str(p.dir), "reason": "a run is active for this project"})
         log("disk hygiene: nothing done, a run is active for this project")
         return res
+    if not _take_lock(p):
+        res["skipped"].append({"kind": "all", "path": str(p.dir), "reason": "another cleanup of this project is running"})
+        return res
+    try:
+        return _apply(p, ids, cfg, run_active, procs, log, now, cutoff, res, skip, did)
+    finally:
+        _drop_lock(p)
+
+
+def _apply(p, ids, cfg, run_active, procs, log, now, cutoff, res, skip, did) -> dict:
     rep = measure(p, cfg, now)
     wanted = None if ids is None else set(ids)
     for missing in sorted((wanted or set()) - {a["id"] for a in rep["actions"]}):
@@ -886,7 +899,7 @@ def apply(p: core.Project, ids: list[str] | None = None, cfg: dict | None = None
                     did(a, f, f"removed build cache {a['path']} ({Path(target).name} was {fmt(left)})"
                               + (f", {err} entries could not be deleted" if err else ""))
             elif k == "worktree":
-                why = busy(a["path"]) or _worktree_refusal(p, a["path"])
+                why = busy(a["path"]) or _checkout_busy(p, a["path"], procs) or _worktree_refusal(p, a["path"])
                 if why:
                     skip(a, why)
                     continue
@@ -901,6 +914,23 @@ def apply(p: core.Project, ids: list[str] | None = None, cfg: dict | None = None
                     skip(a, f"git worktree remove failed: {out.strip()[:300]}")
                     continue
                 did(a, f, f"removed worktree {a['path']} ({a['why']})")
+            elif k == "halfwt":
+                why = busy(a["path"]) or _halfwt_refusal(p, a["path"])
+                if why:
+                    skip(a, why)
+                    continue
+                f, err, why = safe_delete(worktrees_dir(p), a["path"])
+                if why:
+                    skip(a, why)
+                    continue
+                did(a, f, f"removed half-created worktree {a['path']}" + (f", {err} entries could not be deleted" if err else ""))
+            elif k == "artifact":
+                why = refuse_artifact(p, a["path"]) or busy(a["path"]) or _checkout_busy(p, a["path"], procs)
+                if why:
+                    skip(a, why)
+                    continue
+                f, err = delete_path(a["path"])
+                did(a, f, f"removed build output {a['path']} ({a['why']})" + (f", {err} entries could not be deleted" if err else ""))
             elif k == "branch":
                 if a["path"] in {r["branch"] for r in git_worktrees(p) or [] if r["branch"]}:
                     skip(a, "it is checked out in a worktree")
@@ -923,6 +953,88 @@ def apply(p: core.Project, ids: list[str] | None = None, cfg: dict | None = None
     return res
 
 
+def _checkout_busy(p: core.Project, path, procs) -> str | None:
+    """Any process (npm, python, a test binary ...) working inside the checkout that holds `path`."""
+    root = checkout_of(p, path)
+    rows = procs()
+    if rows is None:
+        return "can't tell which processes use it (process list unavailable)"
+    for pr in rows:
+        for f in ("cwd", "exe"):
+            v = pr.get(f)
+            if v and root is not None and inside(v, root):
+                return f"{pr.get('name') or '?'} (pid {pr.get('pid')}) works in {root}"
+    return None
+
+
+def _halfwt_refusal(p: core.Project, path: str) -> str | None:
+    w = worktrees_dir(p)
+    if not w or _key(Path(path).parent) != _key(w):
+        return "not a folder of the project's worktrees folder"
+    if Path(path).name == core.COWORK:
+        return "the Coworker's worktree is kept"
+    if os.path.lexists(_lp(Path(path) / ".git")):
+        return "it has a .git now"
+    reg = git_worktrees(p)
+    if reg is None:
+        return "git worktree list failed"
+    if any(_key(r["path"]) == _key(path) for r in reg):
+        return "it is a registered git worktree"
+    return None
+
+
+_LOCK_NAME = "hygiene.lock"
+
+
+def _take_lock(p: core.Project) -> bool:
+    """A cleanup lock file in the project's data folder (the gateway's cleanup runs in another process)."""
+    f = p.dir / _LOCK_NAME
+    try:
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            pid = int(f.read_text(encoding="utf-8").split()[0])
+        except (OSError, ValueError, IndexError):
+            pid = 0
+        if pid and pid != os.getpid() and core.pid_alive(pid):
+            return False
+        f.unlink(missing_ok=True)  # stale (its process is gone)
+        return _take_lock(p)
+    except OSError:
+        return True  # can't write a lock file: the in-process job record still guards this process
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+    return True
+
+
+def _drop_lock(p: core.Project) -> None:
+    try:
+        f = p.dir / _LOCK_NAME
+        if f.read_text(encoding="utf-8").split()[0] == str(os.getpid()):
+            f.unlink()
+    except (OSError, IndexError):
+        pass
+
+
+def audit_deletion(p: core.Project, a: dict, freed: int) -> None:
+    """On a server: every deletion also goes to `<data>/storage-audit.jsonl`, which the gateway moves into its
+    audit.log (what, which project, how many bytes)."""
+    if not core.server_policy():
+        return
+    rec = {"time": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "project": p.slug, "kind": a.get("kind"),
+           "path": str(a.get("path")), "bytes": int(freed), "why": str(a.get("why") or "")[:300]}
+    try:
+        with (core.DATA / "storage-audit.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+# ignored folders a worktree may lose with `worktree remove --force`: build outputs of the known build kinds
+_REBUILDABLE = re.compile(r"(?:target[^/]*|\.code-graph|" + "|".join(sorted({re.escape(d) for k in BUILD_KINDS for d in k.dirs}))
+                          + r")/?($|/)|(?:.*/)?(?:__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|node_modules)/?$")
+
+
 def _worktree_refusal(p: core.Project, path: str) -> str | None:
     w = worktrees_dir(p)
     if not w or not inside(path, w) or _key(Path(path).parent) != _key(w):
@@ -941,7 +1053,7 @@ def _worktree_refusal(p: core.Project, path: str) -> str | None:
     if code != 0:
         return f"git status failed: {out.strip()[:200]}"
     for line in out.splitlines():
-        if line.startswith("!! ") and not re.match(r"(?:target[^/]*|node_modules|__pycache__|\.pytest_cache|\.code-graph)/?($|/)", line[3:].strip().strip('"')):
+        if line.startswith("!! ") and not _REBUILDABLE.match(line[3:].strip().strip('"')):
             return f"it holds ignored files ({line[3:].strip()}) that would be lost"
     # commits that no branch contains (detached HEAD after a rebase / checkout <sha>) would become unreachable
     code, out = core.git(["for-each-ref", "--contains", "HEAD", "refs/heads", "refs/remotes"], Path(path))
@@ -983,9 +1095,77 @@ _LOGGED: set[str] = set()
 
 
 def cleaning(slug: str) -> bool:
-    """A cleanup is running for this project (the auto-runner waits meanwhile)."""
+    """A cleanup is running for this project (the auto-runner waits meanwhile), here or in another process (the
+    server's cleanup: its lock file names a live process)."""
     with _LOCK:
-        return bool(_JOBS.get(slug, {}).get("running"))
+        if _JOBS.get(slug, {}).get("running"):
+            return True
+    try:
+        pid = int((core.DATA / "projects" / slug / _LOCK_NAME).read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    return pid != os.getpid() and core.pid_alive(pid)
+
+
+# ----------------------------------------------------------------------------- git gc, temp folders
+
+def offpeak(spec: str, hour: int) -> bool:
+    """Is `hour` (0-23) inside "HH-HH" (wraps past midnight: "22-05")? An empty spec is any time."""
+    m = re.fullmatch(r"\s*(\d{1,2})\s*-\s*(\d{1,2})\s*", spec or "")
+    if not m:
+        return True
+    a, b = int(m.group(1)) % 24, int(m.group(2)) % 24
+    return a <= hour < b if a < b else (hour >= a or hour < b) if a > b else True
+
+
+def gc_due(p: core.Project, cfg: dict, now: float) -> bool:
+    every = float(cfg.get("git_gc_hours") or 0)
+    if every <= 0 or not offpeak(str(cfg.get("offpeak_hours") or ""), dt.datetime.fromtimestamp(now).hour):
+        return False
+    try:
+        return now - (p.dir / "git-gc.stamp").stat().st_mtime >= every * 3600
+    except OSError:
+        return True
+
+
+def git_gc(p: core.Project, log=None) -> tuple[int, str]:
+    """`git gc --auto --quiet` (it packs loose objects and prunes unreachable old ones only when git thinks it's due)
+    at the lowest CPU / IO priority; records the time in git-gc.stamp."""
+    cmd = ["git", "gc", "--auto", "--quiet"]
+    if os.name == "posix":
+        import shutil
+        cmd = (["ionice", "-c3"] if shutil.which("ionice") else []) + (["nice", "-n", "19"] if shutil.which("nice") else []) + cmd
+    code, out = core.run(cmd, p.repo, timeout=3600)
+    try:
+        (p.dir / "git-gc.stamp").write_text(dt.datetime.now().isoformat(timespec="seconds"), encoding="utf-8")
+    except OSError:
+        pass
+    (log or core.Store(p).log)(f"disk hygiene: git gc --auto in {p.repo}: " + ("done" if code == 0 else f"failed: {out.strip()[:200]}"))
+    return code, out
+
+
+def sweep_temp(root: Path, max_age_h: float = 24.0, now: float | None = None, log=None) -> int:
+    """Delete what is older than max_age_h directly inside `root` (import spool, upload temp files); never follows
+    a link, never anything outside `root`. Returns bytes freed."""
+    now = now or time.time()
+    freed = 0
+    if not os.path.isdir(_lp(root)) or is_link(root):
+        return 0
+    try:
+        entries = list(os.scandir(_lp(root)))
+    except OSError:
+        return 0
+    for e in entries:
+        path = Path(_plain(e.path))
+        s = walk_size(path)
+        if not s.newest or now - s.newest < max_age_h * 3600:
+            continue
+        f, _err, why = safe_delete(root, path)
+        if why is None:
+            freed += f
+            if log:
+                log(f"disk hygiene: removed old temp {path} ({fmt(f)})")
+    return freed
 
 
 def _measure_now(p: core.Project, log=None) -> dict | None:
@@ -1093,6 +1273,13 @@ def loop_pass(run_active=None, log=None, now: float | None = None) -> None:
                 with _LOCK:
                     _JOBS[p.slug] = {"running": False, "finished": time.time(), "result": res, "error": err, "auto": True}
                 _measure_now(p, log)
+            if gc_due(p, cfg, now) and not (run_active or default_run_active)(p) and not cleaning(p.slug):
+                git_gc(p)
         except Exception as e:  # one broken project must not stop the others
             if log:
                 log(f"disk hygiene: {p.slug}: {type(e).__name__}: {e}")
+    try:  # import spool: clones and uploads left over by an import that died
+        sweep_temp(core.DATA / "imports", 24.0, now, log)
+    except Exception as e:
+        if log:
+            log(f"disk hygiene: imports: {type(e).__name__}: {e}")

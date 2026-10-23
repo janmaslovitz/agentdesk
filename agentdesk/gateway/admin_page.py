@@ -46,6 +46,9 @@ dialog{border:1px solid var(--line);border-radius:10px;background:var(--panel);c
 dialog::backdrop{background:rgba(0,0,0,.4)}
 .stats{display:flex;flex-wrap:wrap;gap:8px 22px}
 .stats div span{display:block;color:var(--muted);font-size:12px}
+.ubar{display:inline-block;width:70px;height:7px;border-radius:4px;background:var(--chip);overflow:hidden;vertical-align:middle;margin-right:6px}
+.ubar i{display:block;height:100%;background:var(--ok)}.ubar i.warn{background:var(--warn)}.ubar i.bad{background:var(--bad)}
+th.sort{cursor:pointer}th.sort:hover{color:var(--text)}
 """
 
 COMMON_JS = """
@@ -87,7 +90,7 @@ ADMIN_PAGE = """<!doctype html>
   <label>Role<select id="nr"><option>user</option><option>admin</option></select></label>
   <label>Initial password<input id="np" type="password" autocomplete="new-password"></label>
   <button class="b p" id="ncreate">Create</button></div></section>
- <section><h2>Users</h2><div class="tw"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Claude accounts</th><th>Actions</th></tr></thead>
+ <section><h2>Users</h2><div class="tw"><table><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Claude accounts</th><th>Disk</th><th>Actions</th></tr></thead>
  <tbody id="ut"></tbody></table></div></section>
 </div>
 <div id="p-projects" class="hide">
@@ -118,6 +121,17 @@ ADMIN_PAGE = """<!doctype html>
  <div class="tw"><table><thead><tr><th>User</th><th>State</th><th class="num">Port</th><th class="num">Uptime</th><th class="num">Runs</th><th>Actions</th></tr></thead>
  <tbody id="it"></tbody></table></div><pre id="ilog" class="hide"></pre></section>
 </div>
+<div id="p-storage" class="hide">
+ <section><h2>Disk budget</h2><div class="stats" id="sttot"></div><p id="stmsg" class="muted"></p>
+  <div class="row"><button class="b" id="stscan">Measure now</button><button class="b" id="stplan">Preview next clean (dry run)</button>
+  <button class="b d" id="stclean">Clean now</button><span id="stjob" class="muted"></span></div></section>
+ <section><h2>Per user</h2><div class="tw"><table><thead><tr id="stuh"></tr></thead><tbody id="stu"></tbody></table></div></section>
+ <section><h2>Per project</h2><div class="tw"><table><thead><tr><th>User</th><th>Project</th><th class="num">Size</th></tr></thead><tbody id="stp"></tbody></table></div></section>
+ <section><h2>Shared package caches</h2><div class="tw"><table><thead><tr><th>Tool</th><th class="num">Size</th><th class="num">Cap</th><th></th></tr></thead><tbody id="stc"></tbody></table></div>
+  <p class="muted">Spool: <span id="stsp"></span></p></section>
+ <section><h2>What the next clean would delete</h2><p class="muted" id="stpat"></p><div class="tw"><table><thead><tr><th>Where</th><th>Kind</th><th class="num">Size</th><th>Path</th><th>Why</th></tr></thead>
+  <tbody id="stpl"></tbody></table></div><p class="muted" id="stlast"></p></section>
+</div>
 <div id="p-audit" class="hide">
  <section><h2>Audit log</h2><div class="row"><label style="flex:0 0 110px">Last<select id="an2"><option>100</option><option selected>200</option><option>500</option><option>2000</option></select></label>
  <button class="b" id="auref">Refresh</button></div>
@@ -128,13 +142,13 @@ ADMIN_PAGE = """<!doctype html>
 <div class="row"><button class="b" value="no">Cancel</button><button class="b p" id="dok" value="ok">OK</button></div></form></dialog>
 <div id="msg" role="status"></div>
 <script>""" + COMMON_JS + """
-const TABS = [["users", "Users"], ["projects", "Projects"], ["accounts", "Claude accounts"], ["instances", "Instances"], ["audit", "Audit log"]];
+const TABS = [["users", "Users"], ["projects", "Projects"], ["accounts", "Claude accounts"], ["instances", "Instances"], ["storage", "Storage"], ["audit", "Audit log"]];
 let state = { users: [], accounts: [], me: "" };
 function show(t) {
   for (const [k] of TABS) { $("p-" + k).classList.toggle("hide", k !== t); }
   for (const b of $("tabs").children) b.classList.toggle("on", b.dataset.t === t);
   history.replaceState(null, "", "#" + t);
-  ({ users: loadUsers, projects: loadProjects, accounts: loadAccounts, instances: loadInstances, audit: loadAudit })[t]();
+  ({ users: loadUsers, projects: loadProjects, accounts: loadAccounts, instances: loadInstances, storage: loadStorage, audit: loadAudit })[t]();
 }
 for (const [k, n] of TABS) $("tabs").append(el("button", { "data-t": k, onclick: () => show(k) }, n));
 
@@ -153,8 +167,8 @@ async function loadUsers() {
     const b = (text, fn, cls) => el("button", { class: "b " + (cls || ""), onclick: fn }, text);
     tb.append(el("tr", {}, el("td", {}, u.username, u.username === state.me ? el("span", { class: "muted" }, " (you)") : ""),
       el("td", {}, u.role), el("td", {}, el("span", { class: "chip " + (u.disabled ? "bad" : "ok") }, u.disabled ? "disabled" : "active"), u.running ? el("span", { class: "chip" }, "instance up") : ""),
-      acc, el("td", { class: "act" },
-        b("Reset password", () => resetPw(u)), b(u.disabled ? "Enable" : "Disable", () => toggle(u)),
+      acc, el("td", {}, usageCell(u.usage)), el("td", { class: "act" },
+        b("Quota", () => quota(u)), b("Reset password", () => resetPw(u)), b(u.disabled ? "Enable" : "Disable", () => toggle(u)),
         b("Accounts", () => assign(u)), b(u.role === "admin" ? "Make user" : "Make admin", () => role(u)), b("Delete", () => del(u), "d"))));
   }
 }
@@ -179,6 +193,73 @@ async function del(u) {
   if (await ask("Delete user", body, "Delete", true))
     act(async () => { await api("POST", "/admin/api/users/" + u.username + "/delete", { confirm: t.value, delete_data: c.checked ? "1" : "" }); loadUsers(); }, "User deleted");
 }
+
+function usageCell(us) {
+  if (!us || !us.measured) return el("span", { class: "muted" }, "not measured yet");
+  const pct = us.quota ? Math.min(100, Math.round(100 * us.used / us.quota)) : 0;
+  return el("span", {}, us.quota ? el("span", { class: "ubar" }, el("i", { class: us.level === "over" ? "bad" : us.level === "warn" ? "warn" : "", style: "width:" + pct + "%" })) : "",
+    bytes(us.used) + (us.quota ? " / " + bytes(us.quota) : " (no quota)"));
+}
+async function quota(u) {
+  const i = el("input", { placeholder: "GB, 0 = no limit, empty = server default", value: u.quota_gb == null ? "" : String(u.quota_gb) });
+  if (await ask("Disk quota of " + u.username, [i, el("p", { class: "muted" }, "Over quota, the user's new runs, clones and imports are refused and their data is cleaned first.")], "Save"))
+    act(async () => { await api("POST", "/admin/api/users/" + u.username + "/quota", { quota_gb: i.value.trim() || "default" }); loadUsers(); }, "Quota saved");
+}
+
+let stSort = ["bytes", -1], stTimer;
+const CATS = ["repos", "worktrees", "builds", "caches", "chats", "logs", "other"];
+const short = (p) => p.split(/[\\\\/]/).slice(-3).join("/");
+async function loadStorage() {
+  const s = await act(() => api("GET", "/admin/api/storage")); if (!s) return;
+  const b = s.budget_now || {};
+  $("sttot").replaceChildren(...[["Disk used", bytes(b.used) + " of " + bytes(b.total) + " (" + b.pct + "%)"], ["Free", bytes(b.free) + " (reserve " + bytes(b.reserve) + ")"],
+    ["Limits", "soft " + b.soft_pct + "% / hard " + b.hard_pct + "%"], ["State", b.level], ["AgentDesk data", bytes(s.agentdesk)],
+    ["Measured", (s.at || "not yet").replace("T", " ") + (s.scanning ? " (measuring...)" : "")]]
+    .map(([k, v]) => el("div", {}, el("span", {}, k), k === "State" ? el("span", { class: "chip " + (v === "ok" ? "ok" : v === "soft" ? "warn" : "bad") }, v) : String(v))));
+  $("stmsg").textContent = b.message || "";
+  const j = s.job || {};
+  $("stjob").textContent = j.running ? "running: " + j.kind + "..." : j.error ? "last job failed: " + j.error : "";
+  clearTimeout(stTimer);
+  if (j.running || s.scanning) stTimer = setTimeout(() => { if (!$("p-storage").classList.contains("hide")) loadStorage(); }, 3000);
+  const users = Object.entries(s.users || {}).map(([name, u]) => ({ name, ...u, pct: u.quota ? u.bytes / u.quota : 0, ...u.categories }));
+  const cols = [["name", "User"], ["bytes", "Used"], ["quota", "Quota"], ["pct", "%"], ...CATS.map((c) => [c, c[0].toUpperCase() + c.slice(1)]), ["top", "Top consumers"]];
+  $("stuh").replaceChildren(...cols.map(([k, n]) => el("th", {
+    class: (k === "top" ? "" : "sort ") + (k === "name" || k === "top" ? "" : "num"),
+    onclick: k === "top" ? null : () => { stSort = [k, stSort[0] === k ? -stSort[1] : -1]; loadStorage(); },
+  }, n + (stSort[0] === k ? (stSort[1] < 0 ? " ▾" : " ▴") : ""))));
+  const [sk, sd] = stSort;
+  users.sort((a, c) => (a[sk] > c[sk] ? 1 : a[sk] < c[sk] ? -1 : 0) * sd);
+  $("stu").replaceChildren(...users.map((u) => el("tr", {},
+    el("td", {}, u.name, u.level !== "ok" ? el("span", { class: "chip " + (u.level === "over" ? "bad" : "warn") }, u.level) : ""),
+    el("td", { class: "num" }, usageCell({ measured: true, used: u.bytes, quota: u.quota, level: u.level })),
+    el("td", { class: "num" }, u.quota ? bytes(u.quota) : "-"),
+    el("td", { class: "num" }, u.quota ? Math.round(100 * u.pct) + "%" : ""),
+    ...CATS.map((c) => el("td", { class: "num" }, bytes(u[c]))),
+    el("td", { class: "wrap muted" }, (u.top || []).slice(0, 3).map((t) => bytes(t.bytes) + " " + t.category + " " + short(t.path)).join("; ")))));
+  const projs = [];
+  for (const [n, u] of Object.entries(s.users || {})) for (const [p, v] of Object.entries(u.projects || {})) projs.push([n, p, v]);
+  projs.sort((a, c) => c[2] - a[2]);
+  $("stp").replaceChildren(...projs.slice(0, 50).map(([n, p, v]) => el("tr", {}, el("td", {}, n), el("td", {}, p), el("td", { class: "num" }, bytes(v)))));
+  $("stc").replaceChildren(...Object.entries(s.caches || {}).map(([k, c]) => el("tr", {}, el("td", {}, k), el("td", { class: "num" }, bytes(c.bytes)), el("td", { class: "num" }, bytes(c.cap)),
+    el("td", {}, el("span", { class: "ubar" }, el("i", { class: c.bytes > c.cap ? "bad" : "", style: "width:" + Math.min(100, c.cap ? Math.round(100 * c.bytes / c.cap) : 0) + "%" }))))));
+  $("stsp").textContent = Object.entries(s.spool || {}).map(([k, v]) => k + " " + bytes(v)).join(", ");
+  const pl = s.plan, rows = [];
+  if (pl) {
+    for (const [n, ps] of Object.entries(pl.users || {})) for (const p of ps) for (const a of p.actions || []) rows.push([n + "/" + p.slug, a.kind, a.bytes, a.path, a.why]);
+    for (const [k, c] of Object.entries(pl.caches || {})) for (const it of c.items || []) rows.push(["cache", k, it.bytes, it.path, it.why]);
+    for (const it of pl.spool || []) rows.push(["spool", "temp", it.bytes, it.path, it.why]);
+  }
+  $("stpat").textContent = pl ? "Dry run of " + pl.at.replace("T", " ") + ": " + rows.length + " item(s), " + bytes(pl.bytes) + " in all." : "No dry run yet: press “Preview next clean”.";
+  $("stpl").replaceChildren(...rows.map((r) => el("tr", {}, el("td", {}, r[0]), el("td", {}, r[1]), el("td", { class: "num" }, bytes(r[2])), el("td", { class: "wrap" }, r[3]), el("td", { class: "wrap muted" }, r[4]))));
+  const lc = s.last_clean;
+  $("stlast").textContent = lc ? "Last clean " + lc.at.replace("T", " ") + " by " + lc.by + ": freed " + bytes(lc.bytes) + (lc.errors && lc.errors.length ? "; errors: " + lc.errors.join("; ") : "") : "";
+}
+$("stscan").onclick = () => act(async () => { await api("POST", "/admin/api/storage/scan", {}); setTimeout(loadStorage, 800); }, "Measuring in the background");
+$("stplan").onclick = () => act(async () => { await api("POST", "/admin/api/storage/plan", {}); setTimeout(loadStorage, 800); }, "Dry run started");
+$("stclean").onclick = async () => {
+  if (await ask("Clean now", [el("p", {}, "Deletes stale build output, finished worktrees (branches are kept), old cache entries and upload left-overs, as listed by the dry run. Nothing is deleted while a run uses it. Every deletion goes to the audit log.")], "Clean", true))
+    act(async () => { await api("POST", "/admin/api/storage/clean", { confirm: "1" }); setTimeout(loadStorage, 800); }, "Cleanup started");
+};
 
 async function loadProjects() {
   await act(loadState); const sel = $("pu"), cur = sel.value; sel.replaceChildren();
@@ -219,7 +300,7 @@ $("asave").onclick = () => act(async () => { await api("POST", "/admin/api/accou
 
 async function loadInstances() {
   const h = await act(() => api("GET", "/admin/api/health"));
-  if (h) $("health").replaceChildren(...[["Version", h.version], ["Disk free", bytes(h.disk_free) + " of " + bytes(h.disk_total)], ["Users", h.users], ["Instances up", h.instances], ["HTTPS", h.tls ? "yes" : "no"], ["Server home", h.home]]
+  if (h) $("health").replaceChildren(...[["Version", h.version], ["Disk free", bytes(h.disk_free) + " of " + bytes(h.disk_total)], ["Disk budget", h.budget ? h.budget.pct + "% (" + h.budget.level + ")" : "-"], ["Users", h.users], ["Instances up", h.instances], ["HTTPS", h.tls ? "yes" : "no"], ["Server home", h.home]]
     .map(([k, v]) => el("div", {}, el("span", {}, k), String(v))));
   const r = await act(() => api("GET", "/admin/api/instances")); if (!r) return; const tb = $("it"); tb.replaceChildren();
   for (const i of r.instances) {

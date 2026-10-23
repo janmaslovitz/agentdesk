@@ -68,6 +68,10 @@ class Runner:
     def start(self, args: list[str]) -> str | None:
         if self.running():
             return "a run is already going for this project"
+        gate = core.disk_gate()
+        if gate:  # the server's disk budget / this user's quota (running work is never stopped by it)
+            core.Store(self.p).log(f"DISK BUDGET: not starting a run for {self.p.slug}: {gate}")
+            return f"not starting: {gate}"
         cfg = core.autorunner_cfg(self.p)
         for where in {str(core.DATA), str(self.p.cfg.get("repo", {}).get("worktrees") or core.DATA)}:
             ok, why = reliability.disk_ok(where, cfg["min_free_gb"])
@@ -78,7 +82,7 @@ class Runner:
                 return f"not enough free disk space ({why}); free some space and try again"
         reliability.rotate(self.p.path("runner.log"))
         out = self.p.path("runner.log").open("a", encoding="utf-8")
-        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "AGENTDESK_HOME": str(core.DATA)}
+        env = {**os.environ, **core.policy_env(self.p), "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "AGENTDESK_HOME": str(core.DATA)}
         # Detach from the dashboard's console/session so the run outlives the dashboard and its window.
         if sys.platform == "win32":
             kw: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW}
@@ -1857,6 +1861,19 @@ def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
     t = core.next_startable(tasks, state, running, cfg["retry_crashed"])
     if t is None:
         return did
+    cap = core.worktree_cap_reason(p, t.id)
+    if cap:  # [hygiene] max_worktrees: wait until disk hygiene has removed a finished worktree
+        if f"cap|{cap}" not in seen:
+            seen.add(f"cap|{cap}")
+            store.log(f"auto-runner: {t.id} waits: {cap}")
+        return did
+    gate = core.disk_gate()
+    if gate:  # the server's disk budget / quota: logged once, retried every pass
+        if f"gate|{gate}" not in seen:
+            seen.add(f"gate|{gate}")
+            store.log(f"auto-runner: {t.id} waits: {gate}")
+        return did
+    seen.difference_update({k for k in seen if k.startswith(("cap|", "gate|"))})
     again = int(state["tasks"].get(t.id, {}).get("crashes", 0)) > 0
     err = starter(p, run_args(p, "task", t.id) or [])
     if err:
@@ -2282,15 +2299,31 @@ class Handler(BaseHTTPRequestHandler):
         """Import a project: an uploaded .zip (raw body, options in the query), or JSON naming a zip/folder/repo
         (`source`) or a git URL to clone (`source_url`). Never overwrites: a taken name asks for a new one."""
         upload = None
+        cloned = None
+        gate = core.disk_gate()
+        if gate:  # the server's disk budget / this user's quota: no new clones, imports or uploads
+            if "zip" in (self.headers.get("Content-Type") or ""):
+                self.close_connection = True  # the upload body is not read
+            return {"ok": False, "disk_budget": True, "message": f"not importing: {gate}"}
         try:
             if not d and "zip" in (self.headers.get("Content-Type") or ""):
                 import tempfile
                 n = int(self.headers.get("Content-Length") or 0)
-                if n <= 0 or n > core.MAX_TOTAL_BYTES:
-                    return {"ok": False, "message": "the file is empty or too large"}
-                fd, tmp = tempfile.mkstemp(suffix=".zip")
+                limit = min(core.MAX_TOTAL_BYTES, int(float(core.server_policy().get("max_upload_mb") or 1e9) * 1024 * 1024))
+                if n <= 0 or n > limit:
+                    self.close_connection = True
+                    return {"ok": False, "message": f"the file is empty or too large (limit {limit // (1024 * 1024)} MB)"}
+                spool = core.DATA / "imports"  # swept by disk hygiene after 24 h if an import dies half way
+                spool.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix="upload-", suffix=".zip", dir=spool)
                 with os.fdopen(fd, "wb") as f:
-                    f.write(self.rfile.read(n))
+                    left = n
+                    while left > 0:
+                        chunk = self.rfile.read(min(1 << 20, left))
+                        if not chunk:
+                            raise ValueError("the upload broke off")
+                        f.write(chunk)
+                        left -= len(chunk)
                 upload = Path(tmp)
                 d = query
             repo = str(d.get("repo") or "").strip()
@@ -2300,7 +2333,9 @@ class Handler(BaseHTTPRequestHandler):
                 if core.repo_state(repo) != "plain" or (Path(repo).exists() and any(Path(repo).iterdir())):
                     return {"ok": False, "message": f"{repo} already exists and is not empty; choose a new folder to clone into"}
                 core.clone_for_import(str(d["repo_url"]), Path(repo))
-            src = upload or (core.clone_for_import(str(d["source_url"]), None, str(d.get("source_branch") or "").strip() or None) if d.get("source_url") else Path(str(d.get("source") or "")))
+            if d.get("source_url") and not upload:
+                cloned = core.clone_for_import(str(d["source_url"]), None, str(d.get("source_branch") or "").strip() or None)
+            src = upload or cloned or Path(str(d.get("source") or ""))
             if not str(src):
                 return {"ok": False, "message": "choose an export file, folder or repository"}
             p = core.import_project(src, repo, str(d.get("new_name") or ""), str(d.get("account") or "") or None,
@@ -2313,6 +2348,8 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if upload:
                 upload.unlink(missing_ok=True)
+            if cloned is not None and hygiene.inside(cloned, core.DATA / "imports"):  # the temporary config-repo clone
+                hygiene.safe_delete(core.DATA / "imports", cloned)
 
     def guard(self, post: bool) -> bool:
         bad = GUARD.check(self.headers.get("Host"), self.headers.get("Origin"), self.headers.get(GATEWAY_HEADER), post)

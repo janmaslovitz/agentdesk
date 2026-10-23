@@ -73,6 +73,7 @@ def start(argv: list[str]):
     core = server.core
     core.settings()  # creates the data folder and default settings on first start
     reliability.configure_logs(os.environ.get("AGENTDESK_LOG_MAX_MB"), os.environ.get("AGENTDESK_LOG_KEEP"))
+    os.environ.update(server.core.policy_env())  # AgentDesk Server: shared package caches for builds and chats too
     server.recover_all()  # stale pid files, tasks left `working`, orphan worktrees, chats cut off mid-turn
     quit_ev = server.QUIT
     quit_ev.clear()

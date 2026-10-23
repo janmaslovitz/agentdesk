@@ -116,6 +116,7 @@ class InstanceManager:
     command: Callable | None = None   # (username, user_home, port, token_arg) -> argv; default: agentdesk serve
     clock: Callable = time.time
     prepare: Callable | None = None   # (username, user_home) -> env var names to keep out of the instance's environment
+    extra_env: Callable | None = None  # (username, user_home) -> extra environment (shared package caches)
     instances: dict = field(default_factory=dict)
     restarts: dict = field(default_factory=dict)  # username -> [restart times]
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -185,6 +186,11 @@ class InstanceManager:
             env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home),
                        AGENTDESK_LOG_MAX_MB=str(self.cfg.get("log_max_mb", 10)), AGENTDESK_LOG_KEEP=str(self.cfg.get("log_keep", 5)),
                        AGENTDESK_SHUTDOWN_GRACE=str(self.cfg.get("shutdown_grace_seconds", 25)))
+            if self.extra_env is not None:
+                try:
+                    env.update(self.extra_env(username, user_home) or {})
+                except OSError:
+                    pass
             kw: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
                         if sys.platform == "win32" else {"start_new_session": True})
             reliability.rotate(logf, self._log_max(), int(self.cfg.get("log_keep", 5)))

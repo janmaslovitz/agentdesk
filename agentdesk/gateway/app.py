@@ -21,7 +21,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .. import __version__, reliability
+from .. import __version__, reliability, storage as storage_mod
 from . import admin as admin_mod
 from .instances import GATEWAY_HEADER, InstanceError, InstanceManager
 from .sessions import SessionTable, Throttle
@@ -92,7 +92,7 @@ def message_page(title: str, text: str) -> bytes:
 BAR_ID = "agentdesk-gateway-bar"
 
 
-def inject_bar(page: bytes, username: str, is_admin: bool) -> bytes:
+def inject_bar(page: bytes, username: str, is_admin: bool, usage: dict | None = None) -> bytes:
     """The gateway's small floating bar (user name, Account, Admin for admins) inside the dashboard page; the
     dashboard's own index.html is not touched. Pages without a <body> are left as they are."""
     m = re.search(rb"<body[^>]*>", page, re.I)
@@ -102,7 +102,7 @@ def inject_bar(page: bytes, username: str, is_admin: bool) -> bytes:
     bar = (f'<div id="{BAR_ID}" style="position:fixed;top:6px;right:8px;z-index:2147483000;display:flex;gap:10px;align-items:center;'
            'padding:3px 10px;border-radius:14px;font:12px/1.4 system-ui,sans-serif;background:rgba(127,127,127,.18);'
            'backdrop-filter:blur(4px)">'
-           f'<span style="opacity:.7">{html.escape(username)}</span>{links}'
+           f'<span style="opacity:.7">{html.escape(username)}</span>{storage_mod.bar_html(usage or {})}{links}'
            '<a href="/logout">Sign out</a></div>'
            f'<style>#{BAR_ID} a{{color:inherit;text-decoration:none;font-weight:600}}#{BAR_ID} a:hover{{text-decoration:underline}}</style>')
     return page[:m.end()] + bar.encode("utf-8") + page[m.end():]
@@ -128,8 +128,11 @@ class Gateway:
         self.max_body = int(cfg["max_body_mb"]) * 1024 * 1024
         self.proxy_timeout = 600.0
         self.admin = admin_mod.Admin(self)
+        self.storage = storage_mod.Storage(home, cfg, self.users, self.audit, tool=self.storage_tool, busy=self.user_busy, clock=clock)
         if self.instances.prepare is None:
             self.instances.prepare = self.prepare_instance
+        if getattr(self.instances, "extra_env", False) is None:
+            self.instances.extra_env = lambda name, user_home: storage_mod.instance_env(home, cfg, user_home)
         harden_home(home, not cfg.get("run_as_users"))
         reliability.configure_logs(cfg.get("log_max_mb"), cfg.get("log_keep"))
 
@@ -190,6 +193,10 @@ class Gateway:
         variables of every account not assigned to it (and the gateway's own Claude credentials) stay out of its
         environment. Assigned projects that no longer exist in the user's home are dropped."""
         self.users.prune_projects(username, "gateway")
+        try:  # the server's disk policy for this instance: gate, [hygiene] defaults, cache env, clone options
+            self.storage.write_policy(username, user_home)
+        except OSError:
+            pass
         u = self.users.get(username)
         defs = self.admin.accounts.list()
         assigned = set(u["accounts"]) if u else set()
@@ -197,6 +204,23 @@ class Gateway:
         allowed = {d["key_env"] for d in defs if d["name"] in assigned and d.get("kind") == "api_key" and d.get("key_env")}
         candidates = {d["key_env"] for d in defs if d.get("kind") == "api_key" and d.get("key_env")} | CREDENTIAL_ENV
         return sorted(candidates - allowed)
+
+    def storage_tool(self, u: dict, *args: str) -> dict:
+        """The project tool for the storage cleanup (hygiene in the user's own process / OS account)."""
+        return admin_mod.call_projtool(self.cfg, u, *args, timeout=3600)
+
+    def user_busy(self, username: str) -> bool:
+        with self.instances._lock:
+            inst = self.instances.instances.get(username)
+        return bool(inst and inst.alive() and self.instances.busy(inst))
+
+    def bar_usage(self, username: str) -> dict:
+        """The user's disk usage for the dashboard bar ({} when it can't be told: the bar is left out)."""
+        try:
+            u = self.storage.usage(username)
+            return {**u, "gate": self.storage.gate_for(username) or ""}
+        except Exception:
+            return {}
 
     @property
     def scheme(self) -> str:
@@ -220,6 +244,7 @@ class Gateway:
             try:
                 self.instances.tick()
                 self.sessions.sweep()
+                self.storage.tick()  # starts the background disk walker / auto-clean when due; never blocks
             except Exception as e:  # never let supervision die
                 self.audit.log("supervisor error", error=repr(e)[:300])
 
@@ -477,6 +502,14 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return self.send(413, b"request body too large", "text/plain")
         mgr, name, home = self.gw.instances, user["username"], Path(user["home"])
+        path = urllib.parse.urlsplit(self.path).path
+        if self.command == "POST" and path == "/api/projects/import":
+            why = self.gw.storage.gate_for(name)  # refuse before the upload / clone, not after
+            if why:
+                self.close_connection = True
+                self.gw.audit.log("storage refused", user=name, path=path, why=why[:200])
+                return self.send(507, json.dumps({"ok": False, "disk_budget": True, "error": why, "message": f"not importing: {why}"}).encode("utf-8"),
+                                 "application/json; charset=utf-8")
         try:
             inst = mgr.acquire(name, home)
         except InstanceError as e:
@@ -540,7 +573,7 @@ class Handler(BaseHTTPRequestHandler):
             if (self.command == "GET" and resp.status == 200 and ctype.startswith("text/html")
                     and not resp.getheader("Content-Encoding") and (resp.getheader("Content-Length") or "0").isdigit()
                     and int(resp.getheader("Content-Length") or 0) <= 4 * 1024 * 1024):
-                page = inject_bar(resp.read(), username, getattr(self, "role", "user") == "admin")
+                page = inject_bar(resp.read(), username, getattr(self, "role", "user") == "admin", self.gw.bar_usage(username))
                 self.send_response(resp.status, resp.reason)
                 for k, v in resp.getheaders():
                     if k.lower() not in DROP_RESPONSE and k.lower() != "content-length":

@@ -1,6 +1,6 @@
 """Project operations inside one user's data folder, run as a child process by the admin cabinet:
 
-    AGENTDESK_HOME=<user home> python -m agentdesk.gateway.projtool list|remove|git|zip ...
+    AGENTDESK_HOME=<user home> python -m agentdesk.gateway.projtool list|remove|git|zip|clean ...
 
 core binds its data folder when it is imported, and the gateway itself never imports core, so the work is done in a
 process of its own with the user's AGENTDESK_HOME. The answer is one JSON object on stdout: {"ok": true, ...} or
@@ -104,6 +104,33 @@ def remove(core, slug_: str, delete_repo: bool) -> dict:
     return {}
 
 
+def clean(core, dry_run: bool) -> dict:
+    """Disk hygiene for every project of this user (the storage cleanup of the server): the plan (dry run) or the
+    cleanup itself, with all of hygiene's checks (never outside the project's folders, never while a run uses them;
+    a project with a run going is skipped). Old import / upload left-overs go too. Deletions are audited by hygiene
+    (storage-audit.jsonl, moved into the server's audit.log by the gateway)."""
+    from .. import hygiene
+    out = []
+    for p in core.projects():
+        try:
+            cfg = core.hygiene_cfg(p)
+            if not cfg["enabled"]:
+                continue
+            if dry_run:
+                rep = hygiene.measure(p, cfg)
+                out.append({"slug": p.slug, "total": rep["total"], "reclaimable": rep["reclaimable"],
+                            "actions": [{k: a.get(k) for k in ("kind", "path", "bytes", "why")} for a in rep["actions"]]})
+            else:
+                res = hygiene.apply(p, None, cfg)
+                out.append({"slug": p.slug, "freed": res["freed"], "done": len(res["done"]),
+                            "skipped": [{"kind": s.get("kind"), "path": s.get("path"), "reason": s.get("reason")} for s in res["skipped"]][:50]})
+        except Exception as e:  # one broken project must not stop the others
+            out.append({"slug": p.slug, "error": f"{type(e).__name__}: {e}"[:300]})
+    if not dry_run:
+        hygiene.sweep_temp(core.DATA / "imports", 24.0)
+    return {"projects": out}
+
+
 def main(argv: list[str]) -> int:
     from .. import core
     try:
@@ -117,6 +144,8 @@ def main(argv: list[str]) -> int:
             res = create_from_git(core, argv[1], argv[2], repos)
         elif op == "zip":
             res = create_from_zip(core, argv[1], argv[2], repos)
+        elif op == "clean":
+            res = clean(core, dry_run=(argv[1:2] or ["--dry-run"])[0] != "--apply")
         else:
             raise ValueError("unknown operation")
         print(json.dumps({"ok": True, **res}))

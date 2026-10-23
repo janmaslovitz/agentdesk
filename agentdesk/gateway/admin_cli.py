@@ -6,6 +6,9 @@
     agentdesk-server [--home DIR] status
     agentdesk-server [--home DIR] config get [KEY] | set KEY VALUE...      (host, port, tls, idle_timeout, run_as_users, ...)
     agentdesk-server [--home DIR] doctor
+    agentdesk-server [--home DIR] user quota NAME GB|default
+    agentdesk-server [--home DIR] storage [--scan]                            (disk budget, per user, per cache)
+    agentdesk-server [--home DIR] clean [--dry-run] [--user NAME]...          (what the auto-clean deletes)
 
 The server home is --home, else AGENTDESK_SERVER_HOME, else ~/agentdesk-server. The settings file is
 AGENTDESK_SERVER_CONFIG, else <home>/server.toml. Passwords are asked on the terminal (twice) or read from a file
@@ -39,6 +42,14 @@ SETTINGS = {
     "session_hours": ("session_hours", "float"),
     "session_idle_minutes": ("session_idle_minutes", "float"),
     "allowed_hosts": ("allowed_hosts", "list"),
+    # disk budget (docs/SERVER.md "Disk budget")
+    **{k: (k, "float") for k in ("disk_total_gb", "disk_reserve_gb", "soft_limit_pct", "hard_limit_pct", "quota_gb",
+                                 "build_stale_days", "build_max_target_gb", "build_max_project_gb", "worktree_ttl_hours",
+                                 "git_gc_hours", "large_file_mb", "max_upload_mb", "shared_target_max_gb",
+                                 "cache_max_age_days", "storage_scan_minutes")},
+    **{k: (k, "int") for k in ("max_worktrees", "clone_depth")},
+    **{k: (k, "bool") for k in ("auto_clean", "partial_clone", "shared_caches", "shared_target", "cache_dedupe")},
+    "offpeak_hours": ("offpeak_hours", "str"),
 }
 
 
@@ -65,6 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
     d = u.add_parser("delete")
     d.add_argument("name")
     d.add_argument("--purge", action="store_true", help="also delete the user's data folder (default: keep it)")
+    q = u.add_parser("quota", help="a user's disk quota in GB (0 = no limit), or default (server quota_gb)")
+    q.add_argument("name")
+    q.add_argument("gb")
+    st = sub.add_parser("storage", help="disk budget, usage per user / project / cache (from the last measurement)")
+    st.add_argument("--scan", action="store_true", help="measure now (walks every user's folder: can take a while)")
+    cl = sub.add_parser("clean", help="clean build output, finished worktrees, caches, old uploads (like the auto-clean)")
+    cl.add_argument("--dry-run", action="store_true", help="only list what would be deleted")
+    cl.add_argument("--user", action="append", help="only this user (repeatable)")
     sub.add_parser("status")
     c = sub.add_parser("config", help="show or change server.toml").add_subparsers(dest="action", required=True)
     g = c.add_parser("get")
@@ -244,6 +263,14 @@ def cmd_user(home: Path, args) -> None:
         elif args.action in ("disable", "enable"):
             st.set_disabled(args.name, args.action == "disable", by)
             print(f"{args.name} {args.action}d")
+        elif args.action == "quota":
+            raw = args.gb.strip().lower()
+            try:
+                gb = None if raw == "default" else float(raw)
+            except ValueError:
+                raise die("the quota is a number of GB (0 = no limit) or default")
+            st.set_quota(args.name, gb, by)
+            print(f"quota of {args.name}: " + ("server default" if gb is None else "no limit" if gb == 0 else f"{gb:g} GB"))
         elif args.action == "delete":
             st.remove(args.name, by, delete_data=args.purge)
             print(f"deleted {args.name} ({'data folder deleted' if args.purge else 'data folder kept: ' + str(st.user_home(args.name))})")
@@ -327,6 +354,74 @@ def claude_login_hint() -> tuple[bool, str]:
     return False, f"no login found for {getpass.getuser()} (HOME={Path.home()})"
 
 
+def storage_mgr(home: Path):
+    from .. import storage
+    from .admin import call_projtool
+    from .users import Audit
+    cfg = config.load(home)
+    return storage.Storage(home, cfg, store(home), Audit(home / "audit.log"),
+                           tool=lambda u, *a: call_projtool(cfg, u, *a, timeout=3600))
+
+
+def gib(n) -> str:
+    from ..fsutil import fmt
+    return fmt(n or 0)
+
+
+def cmd_storage(home: Path, args) -> None:
+    sm = storage_mgr(home)
+    st = sm.scan() if args.scan else sm.state
+    b = sm.fs_now()
+    print(f"disk:      {gib(b.get('used'))} used of {gib(b.get('total'))} ({b.get('pct')}%), {gib(b.get('free'))} free; "
+          f"level {b.get('level')} (soft {b.get('soft_pct'):g}%, hard {b.get('hard_pct'):g}%, reserve {gib(b.get('reserve'))})")
+    if b.get("message"):
+        print(f"           {b['message']}")
+    if not st.get("users"):
+        print("no measurement yet (the gateway measures every storage_scan_minutes; or run with --scan)")
+        return
+    print(f"measured:  {st.get('at')} ({st.get('took_s')} s); AgentDesk data {gib(st.get('agentdesk'))}")
+    print("users:")
+    for name, u in sorted(st["users"].items(), key=lambda kv: -kv[1]["bytes"]):
+        cats = ", ".join(f"{k} {gib(v)}" for k, v in u["categories"].items() if v)
+        print(f"  {name:<20} {gib(u['bytes']):>10} / {gib(u['quota']) if u['quota'] else 'no quota':<10} {u['level']:<5} {cats}")
+        for t in u.get("top", [])[:3]:
+            print(f"      {gib(t['bytes']):>10}  {t['category']:<9} {t['path']}")
+    print("caches:")
+    for tool, c in st.get("caches", {}).items():
+        print(f"  {tool:<8} {gib(c['bytes']):>10} (cap {gib(c['cap'])})")
+    print("spool:   " + ", ".join(f"{k} {gib(v)}" for k, v in st.get("spool", {}).items()))
+
+
+def cmd_clean(home: Path, args) -> None:
+    sm = storage_mgr(home)
+    if not sm.state.get("users"):
+        sm.scan()
+    res = sm.clean(dry_run=args.dry_run, only=args.user, by=f"cli:{getpass.getuser()}")
+    verb = "would free" if args.dry_run else "freed"
+    for name, projects in res["users"].items():
+        for p in projects:
+            if p.get("error"):
+                print(f"{name}/{p['slug']}: error: {p['error']}")
+                continue
+            if args.dry_run:
+                for a in p.get("actions", []):
+                    print(f"{name}/{p['slug']}: {a['kind']:<8} {gib(a['bytes']):>10}  {a['path']}  ({a['why']})")
+            elif p.get("done") or p.get("freed"):
+                print(f"{name}/{p['slug']}: {p.get('done', 0)} item(s), freed {gib(p.get('freed'))}")
+    for tool, c in res["caches"].items():
+        for it in c.get("items", []) if args.dry_run else []:
+            print(f"cache/{tool}: {gib(it['bytes']):>10}  {it['path']}  ({it['why']})")
+        if not args.dry_run and c.get("freed"):
+            print(f"cache/{tool}: freed {gib(c['freed'])}")
+    for it in res["spool"]:
+        print(f"spool: {gib(it.get('freed', it['bytes'])):>10}  {it['path']}")
+    for e in res["errors"]:
+        print(f"error: {e}")
+    print(f"{'dry run: ' if args.dry_run else ''}{verb} {gib(res['bytes'])} in all")
+    if not args.dry_run:
+        sm.scan()
+
+
 def cmd_doctor(home: Path, _args) -> int:
     bad = 0
 
@@ -386,6 +481,19 @@ def cmd_doctor(home: Path, _args) -> int:
             line("WARN", "no systemd watchdog on agentdesk-server.service (WatchdogSec=60 in the packaged unit)")
     free = shutil.disk_usage(home if home.exists() else Path.home()).free / 2**30
     line("ok" if free >= 5 else ("WARN" if free >= 1 else "FAIL"), f"disk free: {free:.1f} GiB")
+    if home.is_dir():
+        from .. import storage
+        sm = storage.Storage(home, cfg, None, None)
+        b = sm.fs_now()
+        if b.get("level") == "hard":
+            line("FAIL", f"disk budget: {b['message']}")
+        elif b.get("level") == "soft":
+            line("WARN", f"disk budget: {b['message']} (see `agentdesk-server storage`, `clean --dry-run`)")
+        else:
+            line("ok", f"disk budget: {b.get('pct')}% of {b.get('total', 0) / 2**30:.0f} GiB used (soft limit {b.get('soft_pct'):g}%)")
+        over = [n for n, u in (sm.state.get("users") or {}).items() if u.get("level") == "over"]
+        if over:
+            line("WARN", f"over their disk quota: {', '.join(sorted(over))}")
     if cfg["run_as_users"] and cfg["run_as"] == "sudo" and not shutil.which("sudo"):
         line("FAIL", "run_as_users with run_as=sudo, but sudo is not installed")
     print("all good" if not bad else f"{bad} problem(s) found")
@@ -406,6 +514,10 @@ def main(argv: list[str] | None = None) -> None:
         cmd_config(home, args)
     elif args.cmd == "doctor":
         rc = cmd_doctor(home, args)
+    elif args.cmd == "storage":
+        cmd_storage(home, args)
+    elif args.cmd == "clean":
+        cmd_clean(home, args)
     if rc:
         raise SystemExit(rc)
 

@@ -6,6 +6,8 @@ import os
 import tomllib
 from pathlib import Path
 
+from .. import storage
+
 DEFAULTS: dict = {
     "host": "0.0.0.0",
     "port": 8080,
@@ -29,6 +31,7 @@ DEFAULTS: dict = {
     "log_max_mb": 10.0,            # rotate audit.log and the instance logs at this size ...
     "log_keep": 5,                 # ... keeping this many old files
     "min_free_gb": 1.0,            # the watchdog stops pinging (systemd restarts the service) below this much free disk
+    **storage.DEFAULTS,            # disk budget, quotas, build cleanup, shared caches (docs/SERVER.md, "Disk budget")
 }
 
 EXAMPLE = """# AgentDesk Server gateway settings. Restart the gateway after a change.
@@ -44,6 +47,16 @@ autostart_instances = true  # after a reboot, start the instances of users who w
 # shutdown_grace_seconds = 25   log_max_mb = 10   log_keep = 5   min_free_gb = 1
 run_as_users = false        # true: each instance runs as OS user agentdesk-<username> (see README)
 # run_as = "sudo"           # or "systemd-run"
+
+# Disk budget (docs/SERVER.md "Disk budget"): the whole disk, what must stay free, soft / hard limits, per-user quota
+disk_total_gb = 512
+disk_reserve_gb = 40
+soft_limit_pct = 80         # warn and clean automatically
+hard_limit_pct = 92         # refuse new runs, clones, imports and uploads (running work goes on)
+quota_gb = 50               # per user; `agentdesk-server user quota NAME GB` sets one user's
+# build_stale_days = 2   build_max_target_gb = 20   build_max_project_gb = 60   worktree_ttl_hours = 24   max_worktrees = 6
+# clone_depth = 0   partial_clone = false   max_upload_mb = 200   shared_target = false   cache_dedupe = false
+# [cache_caps_gb] is a table: cache_caps_gb = { cargo = 30, npm = 15, pip = 10, uv = 15, go = 10, gradle = 20 }
 """
 
 
@@ -80,6 +93,9 @@ def load(home: Path) -> dict:
         cfg[k] = v
     if bool(cfg["tls_cert"]) != bool(cfg["tls_key"]):
         raise SystemExit(f"agentdesk gateway: {f}: set both tls_cert and tls_key (or neither)")
+    bad = storage.validate(cfg)
+    if bad:
+        raise SystemExit(f"agentdesk gateway: {f}: {bad}")
     if cfg["run_as"] not in ("sudo", "systemd-run"):
         raise SystemExit(f"agentdesk gateway: {f}: run_as must be \"sudo\" or \"systemd-run\"")
     return cfg
