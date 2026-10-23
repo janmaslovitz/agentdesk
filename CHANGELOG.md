@@ -5,6 +5,10 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- Linux: `serve` installs its SIGTERM handler before announcing "listening" (a quick SIGTERM no longer kills it uncleanly);
+  the gateway reads a small unread body before a 403 so the refusal is not lost to a connection reset.
+
 
 ## 1.5.0 - 2026-10-23
 

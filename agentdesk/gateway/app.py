@@ -426,6 +426,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, b"not found", "text/plain")
         if self.command in UNSAFE and not self.csrf_ok(sess):
             self.gw.audit.log("csrf refused", user=sess.username, ip=self.ip, path=path[:200])
+            self.read_small_body()  # drain a small unread body: closing with it unread resets the connection and the 403 is lost
             return self.json({"error": "cross-site request refused"}, 403)
         if admin_mod.dispatch(self, user, sess, path):
             return None

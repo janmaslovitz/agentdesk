@@ -125,15 +125,15 @@ def start(argv: list[str]):
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     prescan_data(argv)
-    srv, stop = start(argv)
     done = threading.Event()
 
     def on_signal(signum, _frame):
         print(f"AgentDesk server: signal {signum}, shutting down", flush=True)
         done.set()
 
-    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGINT, on_signal)  # before start(): a SIGTERM right after 'listening' must not kill us
     signal.signal(signal.SIGTERM, on_signal)
+    srv, stop = start(argv)
     try:
         while not done.wait(0.5) and srv.thread.is_alive():
             pass
