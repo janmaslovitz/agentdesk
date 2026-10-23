@@ -54,7 +54,10 @@ tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel {
 .st { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
 .st.done { color: var(--ok); } .st.blocked { color: var(--bad); } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; } .muted { color: var(--muted); }
-.detail { padding: 12px 14px; border-top: 1px solid var(--line); max-height: 560px; overflow: auto; }
+.detail { padding: 0 14px 12px; margin: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.18); max-height: 560px; overflow: auto; }
+.detail.empty { padding: 10px 14px; border: 1px dashed var(--line); background: transparent; box-shadow: none; }
+.detail .dhead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 0; margin-bottom: 4px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.detail .dhead b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .detail h4 { font-size: 13px; margin: 10px 0 4px; }
 .detail .sec { border-top: 1px solid var(--line); padding: 6px 0; } .detail .sec:first-of-type { margin-top: 8px; }
@@ -348,7 +351,7 @@ function shell() {
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 0"></div>
-      <div class="detail" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
+      <div class="detail empty" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
     <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button><button data-mode="planner" onclick="setMode('planner')" title="Reads only and writes a plan of tasks; nothing runs until you approve it">Planner</button></span>
         <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
@@ -699,6 +702,7 @@ async function openAttention(id, what) {
   if (what === "log") { $("log").scrollIntoView({block: "center"}); }
   await pickTask(id);
 }
+function closeTask() { selTask = null; detailCache = null; const b = $("detail"); b.className = "detail empty"; b.dataset.h = ""; b.dataset.t = ""; b.innerHTML = '<span class="muted">Click a task for its brief, runs and result.</span>'; refresh(); }
 async function pickTask(id) { selTask = id; await showDetail(true); refresh(); }
 // The task detail: Prompt → Orchestrator handoff → Agent work → Agent report, as <details> sections. The text is
 // fetched again only when the task's status or run count changes, and the panel is rebuilt only when its HTML
@@ -750,7 +754,7 @@ async function showDetail(fetchText) {
       : `<div class="muted">${pending ? "Not started yet." : "No activity recorded for this task."}</div>`);
   const report = d.report ? `<div class="report box">${mdBlock(d.report)}</div>` : `<div class="muted">${t.status === "done" ? "No report file." : pending ? "Not started yet." : "No report yet: it is written when the task is done."}</div>`;
   const sec = (k, title, sub, body) => `<details class="sec" data-k="${k}"><summary onclick="detailToggle(this)"><b>${title}</b> <span class="muted">${sub}</span></summary>${body}</details>`;
-  const html = `<b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span>
+  const html = `<div class="dhead"><b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span><button onclick="closeTask()" title="Close this task view (stop following it)">✕ Close</button></div>
     ${sec("prompt", "Prompt", "", `<pre class="box">${esc(d.body || "(empty task)")}</pre>`)}
     ${sec("handoff", "Orchestrator handoff", esc(routed ? [h.tier, h.model && h.model + (h.effort ? ` (${h.effort})` : "")].filter(Boolean).join(" · ") : "not started yet"), handoff)}
     ${sec("work", "Agent work", esc(act.length ? `${act.filter(e => e.kind === "tool").length} tool calls` : pending ? "not started yet" : ""), work)}
@@ -758,6 +762,7 @@ async function showDetail(fetchText) {
     <div style="margin-top:8px"><button onclick="runMode('plan','${esc(t.id)}')">Preview plan</button> ${t.status==="done"?`<button onclick="runMode('final','${esc(t.id)}')">Run final checks</button>`:""}</div>`;
   const box = $("detail");
   if (box.dataset.h === html) return;
+  box.className = "detail";
   const top = box.dataset.t === t.id ? box.scrollTop : 0;
   box.innerHTML = html; box.dataset.h = html; box.dataset.t = t.id;
   const auto = t.status === "done" ? "report" : pending ? "prompt" : "work";
