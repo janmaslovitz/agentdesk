@@ -55,7 +55,7 @@ tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel {
 .st.done { color: var(--ok); } .st.blocked { color: var(--bad); } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; } .muted { color: var(--muted); }
 .detail { padding: 0 14px 12px; margin: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.18); max-height: 560px; overflow: auto; }
-.detail.empty { padding: 10px 14px; border: 1px dashed var(--line); background: transparent; box-shadow: none; }
+.detail.empty { display: none; }
 .detail .dhead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 0; margin-bottom: 4px; background: var(--bg); border-bottom: 1px solid var(--line); }
 .detail .dhead b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
@@ -102,6 +102,8 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .approve .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .approve .always { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
 .approve input { font: 12px var(--mono); padding: 4px 6px; width: 120px; }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.quick button { font-size: 12px; padding: 3px 9px; border-radius: 12px; }
 .compose { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--line); }
 textarea, input, select { font: inherit; padding: 7px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); }
 .compose textarea { flex: 1; resize: none; height: 54px; }
@@ -158,9 +160,9 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
   <h2>Accounts <button onclick="openDlg('dAccount')">+ Add</button></h2>
   <div id="accounts"></div>
   <div class="spacer"></div>
-  <div id="upd" style="display:none;margin:6px 0"><button id="updBtn" onclick="installUpdate()" title="Download the new installer from GitHub Releases and install it"></button>
+  <div id="upd" style="display:none;margin:6px 0"><button id="updBtn" onclick="installUpdate()"></button>
     <div class="m" id="updMsg" style="margin-top:4px"></div></div>
-  <div class="m" id="ver" title="Version of this AgentDesk (commit and build time)"></div>
+  <div class="m" id="ver"></div>
   <div class="muted" style="font-size:11px" id="datadir"></div>
 </aside>
 
@@ -177,7 +179,6 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
 
 <dialog id="dExport"><h3>Export project</h3>
   <label><input type="checkbox" id="xLogs"> Include the activity log (agentdesk.log)</label>
-  <div class="muted" style="font-size:12px;margin:6px 0">Accounts, logins, API keys and worktrees are never exported.</div>
   <div class="row"><button class="primary" onclick="exportZip()">Save as .zip…</button></div>
   <label style="margin-top:10px">Or commit into git: config repo folder (empty: <code>.agentdesk/</code> in the project's repo)</label>
   <input id="xRepo" placeholder="C:\path	o\config-repo">
@@ -205,7 +206,6 @@ epo">
   <label>Kind</label><select id="aKind" onchange="$('aValueL').textContent = this.value === 'api_key' ? 'Environment variable holding the API key' : 'Login folder (empty: a new folder in AgentDesk data)'">
     <option value="subscription">Claude subscription (separate login)</option><option value="api_key">API key</option></select>
   <label id="aValueL">Login folder (empty: a new folder in AgentDesk data)</label><input id="aValue">
-  <div class="muted" style="font-size:12px;margin-top:8px">Subscription accounts: after adding, press "Log in", sign in in the browser (paste the code into the window that opens if it asks). The account shows "Connected as ..." when it worked. API keys are never stored by AgentDesk: set the environment variable before starting it.</div>
   <div class="row"><button onclick="closeDlg('dAccount')">Cancel</button><button class="primary" onclick="addAccount()">Add</button></div>
 </dialog>
 
@@ -371,34 +371,41 @@ function shell() {
     <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 0"></div>
-      <div class="detail empty" id="detail"><span class="muted">Click a task for its brief, runs and result.</span></div></section>
-    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')" title="Reads, writes tasks, asks before running anything">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')" title="Curates the whole project: works in the project checkout (main included) with every tool and command, no approvals, within a budget per message">Coworker</button><button data-mode="planner" onclick="setMode('planner')" title="Reads only and writes a plan of tasks; nothing runs until you approve it">Planner</button></span>
+      <div class="detail empty" id="detail"></div></section>
+    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')">Coworker</button><button data-mode="planner" onclick="setMode('planner')">Planner</button></span>
         <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
       <div class="modenote" id="modeNote" hidden></div>
+      <div class="quick" id="quick">
+        <button onclick="ask('agent')">What is the agent doing?</button>
+        <button onclick="ask('queue')">Queue status</button>
+        <button onclick="ask('attention')">What needs attention?</button>
+        <button onclick="ask('spend')">Spending</button>
+        <button onclick="ask('tools')">Tool stats</button>
+      </div>
       <div class="msgs" id="msgs"></div>
       <div class="livebar" id="liveBar" hidden><span class="working"><i></i><i></i><i></i></span> <span id="liveTxt">working…</span>
         <button onclick="interruptChat()" title="Interrupt the Coworker's current work">Stop</button></div>
       <div id="plan"></div>
       <div id="pending"></div>
-      <div class="compose"><textarea id="input" placeholder="What's blocked and why? / Queue a task: …" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+      <div class="compose"><textarea id="input" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
       <button class="primary" id="sendb" onclick="send()">Send</button></div></section>
   </div>
   <div class="duo">
   <section><h3>Git <span class="muted" id="gitHead"></span><span class="spacer"></span>
-      <button onclick="gitRefresh()" title="Fetch from the remote and reload the GitHub accounts and pull requests">Refresh</button>
+      <button onclick="gitRefresh()">Refresh</button>
       <select id="gitBranch"></select><button id="gitMerge" onclick="gitDo('merge')">Merge into base</button>
       <button id="gitPull" onclick="gitDo('pull')">Pull</button>
-      <select id="gitPushBranch" title="Branch to push (sets its upstream when it has none)"></select><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
+      <select id="gitPushBranch"></select><button id="gitPush" onclick="gitDo('push')">Push</button></h3>
     <div class="gitp"><div id="gitInfo" class="muted"></div>
       <div class="gitrow"><span class="k">Repository</span><code id="gitRemote"></code></div>
       <div class="gitrow"><span class="k">Connect to</span><input id="gitUrl" class="wide" placeholder="https://github.com/owner/name, git@github.com:owner/name.git or owner/name">
-        <button onclick="gitConnect()" title="Set origin to this repository (asks first)">Connect…</button></div>
+        <button onclick="gitConnect()">Connect…</button></div>
       <div class="gitrow"><span class="k">Repositories of</span><input id="gitOwner" size="16" placeholder="account or org">
         <button onclick="gitRepos(true)">List</button><select id="gitRepoSel" class="wide" onchange="if (this.value) $('gitUrl').value = this.value"><option value="">(press List)</option></select></div>
       <div class="gitrow"><span class="k">GitHub account</span><select id="gitAcct"></select>
-        <button onclick="gitUseAcct()" title="Pull, push, fetch and pull requests of this project run as this account (saved in project.toml)">Use for this project</button>
-        <button onclick="gitSwitch()" title="gh auth switch: changes gh's active account on this computer">Make active in gh</button></div>
+        <button onclick="gitUseAcct()">Use for this project</button>
+        <button onclick="gitSwitch()">Make active in gh</button></div>
       <div class="muted" id="gitAcctNote"></div>
       <details id="gitPrBox"><summary><b>Pull requests</b> <span class="muted" id="gitPrHead"></span></summary>
         <table><thead><tr><th>#</th><th>Title</th><th>Branches</th><th>Author</th><th>Checks</th><th></th></tr></thead><tbody id="gitPrs"></tbody></table>
@@ -406,12 +413,12 @@ function shell() {
           <div class="gitrow"><span class="k">From branch</span><input id="prHead" list="gitBranches" size="22"><datalist id="gitBranches"></datalist>
             <span class="muted">into</span><input id="prBase" size="16"><label><input type="checkbox" id="prDraft"> Draft</label></div>
           <input id="prTitle" placeholder="Title"><textarea id="prBody" placeholder="Description (optional)"></textarea>
-          <div><button class="primary" onclick="gitPrCreate()" title="gh pr create (asks first). Push the branch first.">Create pull request…</button></div></div></details>
+          <div><button class="primary" onclick="gitPrCreate()">Create pull request…</button></div></div></details>
       <pre id="gitMsg" style="white-space:pre-wrap"></pre></div></section>
   <section id="bSec"><h3>Build <span class="muted" id="bHead"></span><span class="spacer"></span>
-      <button class="sm primary" id="bBuild" onclick="buildVersion()" title="build/&lt;version&gt; = the version's base + the checked tasks, then the build command. The base branch and task branches are not changed; nothing is pushed.">Build</button>
+      <button class="sm primary" id="bBuild" onclick="buildVersion()">Build</button>
       <button class="sm" id="bStop" onclick="buildStop()" disabled>Stop</button><button class="sm" onclick="buildOpen()">Open folder</button>
-      <details class="menu" id="bMenu"><summary title="Build a branch or commit as it is, clean rebuild, custom build">More ▾</summary><div class="menubox">
+      <details class="menu" id="bMenu"><summary>More ▾</summary><div class="menubox">
         <span class="muted">A branch or commit as it is (no tasks merged):</span>
         <input id="bRef" placeholder="branch or commit (default: base)">
         <div><button id="bPlain" onclick="buildGo('build')">Build it</button> <button id="bClean" onclick="buildGo('clean')">Clean + rebuild</button>
@@ -428,7 +435,7 @@ function shell() {
     </div></section>
   </div>
   <section><h3>Disk <span class="muted" id="dHead"></span><span class="spacer"></span>
-      <button onclick="diskLoad(true)">Measure again</button><button id="dClean" onclick="diskPreview()" title="Shows what would be deleted first (dry run)">Clean up</button></h3>
+      <button onclick="diskLoad(true)">Measure again</button><button id="dClean" onclick="diskPreview()">Clean up</button></h3>
     <div style="padding:8px 14px"><div id="dWarn"></div><div id="dInfo"></div><div id="dPlan"></div><pre id="dMsg" style="white-space:pre-wrap"></pre></div></section>
   <section><h3>Needs attention <span class="badge" id="attnCount">0</span></h3><div id="attn"></div></section>
   <section><h3>Activity</h3><div class="log"><pre id="log"></pre></div></section>`;
@@ -468,7 +475,7 @@ async function diskPreview() {
   if (d.error || !d.report) return ($("dMsg").textContent = d.error || "Not measured yet: wait a moment.");
   diskShow(d);
   const acts = d.report.actions || [];
-  $("dPlan").innerHTML = `<div class="muted" style="margin-top:6px">Dry run, nothing has been deleted. Choose what to clean up:</div>` +
+  $("dPlan").innerHTML = `<div class="muted" style="margin-top:6px">Choose what to clean up:</div>` +
     acts.map((a, i) => `<label style="display:block;margin:4px 0"><input type="checkbox" class="dAct" value="${i}" checked> <b>${esc(a.kind)}</b> <code>${esc(a.path)}</code> ${bytesText(a.bytes)}
       <div class="muted" style="margin-left:22px">${esc(a.why)}</div></label>`).join("") +
     `<button class="primary" onclick="diskApply()">Delete selected</button> <button onclick="$('dPlan').innerHTML=''">Cancel</button>`;
@@ -787,7 +794,7 @@ async function refreshOnce() {
   $("tasks").innerHTML = st.tasks.length ? groups.filter(g => g[2].length).map(([k, title, list, dflt]) => {
     const open = (localStorage.getItem("grp_" + k) ?? (dflt ? "1" : "0")) === "1";
     return `<tr style="cursor:pointer" onclick="toggleGroup('${k}')"><td colspan="7" class="muted"><b>${open ? "▾" : "▸"} ${title} (${list.length})</b></td></tr>` + (open ? list.map(taskRow).join("") : "");
-  }).join("") : `<tr><td colspan="7" class="muted">No tasks yet: press "+ Task" or describe the work in the chat.</td></tr>`;
+  }).join("") : `<tr><td colspan="7" class="muted">No tasks yet.</td></tr>`;
   const box = $("log").parentElement, atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
   $("log").textContent = st.log.join("\n") + (st.errors.length ? "\n\n— process output —\n" + st.errors.join("\n") : "");
   if (atEnd) box.scrollTop = box.scrollHeight;
@@ -803,7 +810,7 @@ async function openAttention(id, what) {
   if (what === "log") { $("log").scrollIntoView({block: "center"}); }
   await pickTask(id);
 }
-function closeTask() { selTask = null; detailCache = null; const b = $("detail"); b.className = "detail empty"; b.dataset.h = ""; b.dataset.t = ""; b.innerHTML = '<span class="muted">Click a task for its brief, runs and result.</span>'; refresh(); }
+function closeTask() { selTask = null; detailCache = null; const b = $("detail"); b.className = "detail empty"; b.dataset.h = ""; b.dataset.t = ""; b.innerHTML = ''; refresh(); }
 async function pickTask(id) { selTask = id; await showDetail(true); refresh(); }
 // The task detail: Prompt → Orchestrator handoff → Agent work → Agent report, as <details> sections. The text is
 // fetched again only when the task's status or run count changes, and the panel is rebuilt only when its HTML
@@ -855,7 +862,7 @@ async function showDetail(fetchText) {
       : `<div class="muted">${pending ? "Not started yet." : "No activity recorded for this task."}</div>`);
   const report = d.report ? `<div class="report box">${mdBlock(d.report)}</div>` : `<div class="muted">${t.status === "done" ? "No report file." : pending ? "Not started yet." : "No report yet: it is written when the task is done."}</div>`;
   const sec = (k, title, sub, body) => `<details class="sec" data-k="${k}"><summary onclick="detailToggle(this)"><b>${title}</b> <span class="muted">${sub}</span></summary>${body}</details>`;
-  const html = `<div class="dhead"><b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span><button onclick="closeTask()" title="Close this task view (stop following it)">✕ Close</button></div>
+  const html = `<div class="dhead"><b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span><button onclick="closeTask()">✕ Close</button></div>
     ${sec("prompt", "Prompt", "", `<pre class="box">${esc(d.body || "(empty task)")}</pre>`)}
     ${sec("handoff", "Orchestrator handoff", esc(routed ? [h.tier, h.model && h.model + (h.effort ? ` (${h.effort})` : "")].filter(Boolean).join(" · ") : "not started yet"), handoff)}
     ${sec("work", "Agent work", esc(act.length ? `${act.filter(e => e.kind === "tool").length} tool calls` : pending ? "not started yet" : ""), work)}
@@ -916,9 +923,9 @@ function addMsg(role, text, meta) {
   const box = $("msgs"), atEnd = role === "user" || box.scrollTop + box.clientHeight >= box.scrollHeight - 60;
   box.appendChild(div); if (atEnd) box.scrollTop = box.scrollHeight; return div;
 }
-async function send() {
-  const text = $("input").value.trim(); if (!text || !cur) return;
-  $("input").value = ""; $("sendb").disabled = true; addMsg("user", text);
+async function send(preset) {
+  const text = (typeof preset === "string" ? preset : $("input").value).trim(); if (!text || !cur) return;
+  if (typeof preset !== "string") $("input").value = ""; $("sendb").disabled = true; addMsg("user", text);
   const wait = addMsg("assistant", ""), forProject = cur, t0 = Date.now();
   const dots = document.createElement("span"), label = document.createElement("span");
   dots.className = "working"; dots.append(document.createElement("i"), document.createElement("i"), document.createElement("i"));
@@ -966,8 +973,6 @@ async function resetChat() { await api(`/api/p/${cur}/chat/reset`, {}); $("msgs"
 
 // `p`: the project from /state (chat_mode, chat_model, chat_budget, cowork).
 const MODE_NAMES = {assistant: "Assistant", coworker: "Coworker", planner: "Planner"};
-const PLACEHOLDERS = {assistant: "What's blocked and why? / Queue a task: …", coworker: "What should I do? (I work in the project checkout)",
-  planner: "Describe the work; I'll plan it as tasks for your approval"};
 function showMode(p) {
   const mode = p.chat_mode, cw = mode === "coworker", pl = mode === "planner", budget = `$${Number(p.chat_budget ?? (mode === "coworker" ? 5 : 2)).toFixed(2)} per message`;
   for (const b of $("modeSeg").children) b.classList.toggle("on", b.dataset.mode === mode);
@@ -976,8 +981,17 @@ function showMode(p) {
   $("modeNote").hidden = !cw && !pl;
   if (cw) $("modeNote").textContent = `Full access: works in the project checkout (main included), runs any command without asking. Budget ${budget}.`;
   if (pl) $("modeNote").textContent = `Reads only and writes a draft plan; nothing runs until you press Approve and start. Budget ${budget}.`;
-  $("input").placeholder = PLACEHOLDERS[mode] || PLACEHOLDERS.assistant;
+  $("input").placeholder = "";
+  $("quick").hidden = pl;
 }
+const ASKS = {
+  agent: "What is the agent doing right now? Read the task timeline with task_activity (the working task, or the latest one if none is working) and describe it in one or two plain sentences: what it is on, the last step, anything stuck or failing.",
+  queue: "Give a short queue status: how many tasks are done, working, pending or blocked, what runs now and what comes next.",
+  attention: "Run a checkup and tell me briefly what needs my attention: failed or blocked tasks, unmerged branches, limits.",
+  spend: "How much has been spent today and in total (agents and chat), the token use, and where the account usage stands? Keep it short.",
+  tools: "Summarise the per-task tool-call stats (tool_stats in state.json, the Tools: line in the reports): which tools the workers use most, and how often MCP servers such as code-graph are called. Say plainly if there is not enough data yet.",
+};
+function ask(k) { if (!$("sendb").disabled) send(ASKS[k]); }
 async function setMode(mode) {
   const r = await api(`/api/p/${cur}/chat/mode`, {mode});
   if (r.error) return note(r.error);
@@ -1036,7 +1050,7 @@ async function pollPending() {
       <pre>${esc(x.detail)}</pre>
       <div class="row"><button class="primary" onclick="answer('${esc(x.id)}','allow_once')">Allow once</button>
       <button class="danger" onclick="answer('${esc(x.id)}','deny')">Deny</button>
-      ${x.prefix ? `<span class="always"><button onclick="answer('${esc(x.id)}','always_allow')">Always allow</button><input id="pre-${esc(x.id)}" value="${esc(x.prefix)}" title="Commands starting with this run without asking from now on (this project)"></span>` : ""}</div></div>`;
+      ${x.prefix ? `<span class="always"><button onclick="answer('${esc(x.id)}','always_allow')">Always allow</button><input id="pre-${esc(x.id)}" value="${esc(x.prefix)}"></span>` : ""}</div></div>`;
   }).join("");
   if (items.length) $("pending").scrollIntoView({block: "nearest"});
 }

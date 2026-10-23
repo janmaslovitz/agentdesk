@@ -6,6 +6,9 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- Quick-question buttons above the chat (what is the agent doing, queue status, what needs attention, spending, tool stats). The chat reads the agent timeline with the new `task_activity` tool; `queue_status` shows a "now:" line for running tasks.
+- The selected task opens as its own framed card with a Close button.
+
 - In-app updater: an "Update available" button checks GitHub Releases (once at start, cached 1 h; `[updates] check = false`
   in settings.toml disables it), downloads and verifies the installer and runs it silently. Installed build only.
 - Per-task tool-call stats (`tool_stats` in state.json: total, per tool, MCP calls per server; `runs_stats` per run with turns, cost, duration) and a "Tools:" line in `reports/<id>.md`, to measure how useful optional MCP servers are.
@@ -18,6 +21,9 @@ them under the new version number, tags it and builds the installer (see README,
 ### Changed
 - Project page: the Git and Build sections share one row (half the width each, stacked under 900 px); the Build log
   is folded, and the plain ref build, Clean + rebuild and Custom build moved into a small **More** menu.
+
+### Changed
+- Less explanatory text in the dashboard: no chat placeholder, no long tooltips, no empty-state hints.
 
 
 ## 1.2.1 - 2026-10-22
