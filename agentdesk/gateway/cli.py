@@ -86,6 +86,7 @@ def cmd_user(home, args) -> None:
             store.set_role(args.name, args.role, by)
             print(f"{args.name} is now {args.role}")
         elif args.action == "assign":
+            store.prune_projects(args.name, by)  # a project removed meanwhile must not block the new list
             cur = store.get(args.name)
             if cur is None:
                 raise KeyError(f"no user {args.name!r}")

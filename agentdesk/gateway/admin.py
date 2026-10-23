@@ -393,6 +393,7 @@ def route_api(h, ad: Admin, user: dict, parts: list[str]) -> None:
                     raise AdminError("not found", 404)
                 res = ad.projtool(u, "remove", parts[3], "1" if str(d.get("delete_repo", "")) in ("1", "true", "on") else "0")
                 ad.gw.audit.log("project removed", user=u["username"], by=by, project=parts[3])
+                ad.gw.users.prune_projects(u["username"], by)  # assignments only ever name existing projects
                 return h.json(res)
     elif head == "accounts":
         if n == 1 and get:
@@ -471,12 +472,12 @@ def account(h, user: dict, sess, path: str) -> None:
         if d is None:
             return h.json({"error": "bad request body"}, 400)
         name = user["username"]
-        if gw.throttle.blocked_for(name, h.ip) > 0:
+        if gw.throttle.begin(name, h.ip) > 0:  # reserves the attempt atomically (parallel guesses can't pile up)
             return h.json({"error": "Too many failed attempts. Try again later."}, 429)
         if gw.users.authenticate(name, str(d.get("current", ""))) is None:
-            gw.throttle.failure(name, h.ip)
             gw.audit.log("password change refused", user=name, ip=h.ip)
             return h.json({"error": "The current password is wrong."}, 403)
+        gw.throttle.success(name, h.ip)
         try:
             gw.users.set_password(name, str(d.get("new", "")), by=name)
         except ValueError as e:

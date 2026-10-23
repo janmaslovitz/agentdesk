@@ -2,6 +2,8 @@
 streaming, headers), isolation between users, and the instance lifecycle (fake and real `agentdesk serve`)."""
 import http.client
 import json
+import os
+import stat
 import sys
 import time
 from pathlib import Path
@@ -9,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from agentdesk.gateway import app, cli, config, users
-from agentdesk.gateway.instances import GATEWAY_HEADER, InstanceManager
+from agentdesk.gateway.instances import GATEWAY_HEADER, InstanceError, InstanceManager
 from agentdesk.gateway.sessions import SessionTable, Throttle
 
 FAKE = Path(__file__).resolve().parent / "gateway_fake_instance.py"
@@ -100,6 +102,9 @@ def test_user_store_never_returns_hashes(tmp_path):
     assert "scrypt$" not in (tmp_path / "audit.log").read_text()
     assert s.authenticate("carol", "a-long-password")["username"] == "carol"
     assert s.authenticate("carol", "wrong-password") is None and s.authenticate("nobody", "x") is None
+    (tmp_path / "users" / "carol" / "projects" / "proj-a").mkdir(parents=True)
+    with pytest.raises(ValueError):
+        s.assign("carol", ["nope"], None)  # only projects that exist in the user's home
     s.assign("carol", ["proj-a"], ["default"])
     assert s.get("carol")["projects"] == ["proj-a"] and s.get("carol")["accounts"] == ["default"]
     s.set_disabled("carol", True)
@@ -376,6 +381,9 @@ def test_user_cli(tmp_path, monkeypatch, capsys):
     import io
     monkeypatch.setattr(sys, "stdin", io.StringIO("cli-password-1\n"))
     cli.main(["--home", str(tmp_path), "user", "add", "erin", "--admin", "--password-stdin"])
+    with pytest.raises(SystemExit):  # only projects that exist in erin's home
+        cli.main(["--home", str(tmp_path), "user", "assign", "erin", "--project", "p1"])
+    (tmp_path / "users" / "erin" / "projects" / "p1").mkdir(parents=True)
     cli.main(["--home", str(tmp_path), "user", "assign", "erin", "--project", "p1", "--account", "default"])
     cli.main(["--home", str(tmp_path), "user", "list"])
     out = capsys.readouterr().out
@@ -455,3 +463,138 @@ def test_tls_listener_secure_cookie(tmp_path):
         assert c.getresponse().status == 403
     finally:
         stop()
+
+
+# ----------------------------------------------------------------------------- hardening
+
+def test_parallel_guesses_pass_throttle_at_most_max_failures():
+    import threading
+    th = Throttle(max_failures=5, ip_max_failures=1000, window_s=60, lockout_s=120)
+    passed, barrier = [], threading.Barrier(40)
+
+    def guess():
+        barrier.wait()
+        if th.begin("alice", "1.1.1.1") == 0:  # the password check only happens when this passes
+            passed.append(1)
+    ts = [threading.Thread(target=guess) for _ in range(40)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert len(passed) == 5 and th.blocked_for("alice", "1.1.1.1") > 0
+    th2 = Throttle(max_failures=5, ip_max_failures=1000)
+    th2.begin("bob", "2.2.2.2")
+    th2.success("bob", "2.2.2.2")
+    assert th2._fails[("ip", "2.2.2.2")] == [] and th2.begin("bob", "2.2.2.2") == 0
+
+
+def test_users_json_file_lock_across_processes(tmp_path):
+    import subprocess
+    code = """
+import sys
+from pathlib import Path
+from agentdesk.gateway import users
+users.SCRYPT_N = 2 ** 10
+s = users.UserStore(Path(sys.argv[1]))
+for i in range(6):
+    s.add(sys.argv[2] + str(i), "password-%d" % i)
+"""
+    ps = [subprocess.Popen([sys.executable, "-c", code, str(tmp_path), p]) for p in ("aa", "bb", "cc")]
+    assert [p.wait(120) for p in ps] == [0, 0, 0]
+    assert users.UserStore(tmp_path).count() == 18  # no lost updates
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+def test_permissions_posix(tmp_path):
+    s = users.UserStore(tmp_path)
+    s.add("dave", PW)
+    assert stat.S_IMODE((tmp_path / "users" / "dave").stat().st_mode) == 0o700
+    for f in ("users.json", "audit.log"):
+        assert stat.S_IMODE((tmp_path / f).stat().st_mode) == 0o600
+
+
+def test_instance_gets_only_assigned_accounts(tmp_path, monkeypatch):
+    from agentdesk.gateway.admin import AccountStore
+    from agentdesk.gateway.app import Gateway
+    cfg = config.load(tmp_path)
+    monkeypatch.setenv("KEY_A", "secret-a")
+    monkeypatch.setenv("KEY_B", "secret-b")
+    gw = Gateway(tmp_path, cfg, InstanceManager(tmp_path, cfg, command=fake_command))
+    gw.users.add("erin", PW)
+    acc = AccountStore(tmp_path)
+    acc.put("a", "api_key", "KEY_A")
+    acc.put("b", "api_key", "KEY_B")
+    gw.users.assign("erin", accounts=["a"])
+    try:
+        gw.instances.acquire("erin", tmp_path / "users" / "erin")
+        text = (tmp_path / "users" / "erin" / "settings.toml").read_text(encoding="utf-8")
+        assert 'name = "a"' in text and "KEY_A" in text and "KEY_B" not in text and "secret" not in text
+        hidden = gw.instances.prepare("erin", tmp_path / "users" / "erin")
+        assert "KEY_B" in hidden and "KEY_A" not in hidden
+    finally:
+        gw.instances.stop_all()
+
+
+def test_spawn_rejects_foreign_listener(tmp_path):
+    """A child that never answers as AgentDesk (here: a listener that is not ours) is killed, not routed to."""
+    import textwrap
+    stub = tmp_path / "squat.py"
+    stub.write_text(textwrap.dedent("""
+        import sys, socket
+        s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(5)
+        while True:
+            c, _ = s.accept(); c.sendall(b"HTTP/1.0 200 OK\r\n\r\nhello"); c.close()
+    """))
+    cfg = dict(config.DEFAULTS, instance_start_seconds=2)
+    m = InstanceManager(tmp_path, cfg, command=lambda u, h, port, t: [sys.executable, str(stub), str(port)])
+    with pytest.raises(InstanceError):
+        m.acquire("frank", tmp_path / "users" / "frank")
+    assert m.instances == {}
+
+
+def test_parallel_login_guesses_check_at_most_max_failures_passwords(gw, monkeypatch):
+    """Through the real /login handler: 30 simultaneous wrong guesses, only login_max_failures reach the password check."""
+    import threading
+    checks, real = [], gw.users.authenticate
+
+    def counting(name, password):
+        checks.append(1)
+        return real(name, password)
+    monkeypatch.setattr(gw.users, "authenticate", counting)
+    barrier, codes = threading.Barrier(30), []
+
+    def guess(i):
+        barrier.wait()
+        codes.append(Client(gw.port).login("alice", f"wrong-guess-{i}")[0])
+    ts = [threading.Thread(target=guess, args=(i,)) for i in range(30)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    limit = int(gw.cfg["login_max_failures"])
+    assert len(checks) == limit and codes.count(401) == limit and codes.count(429) == 30 - limit
+
+
+def test_right_password_on_last_attempt_is_not_locked_out():
+    th = Throttle(max_failures=3, ip_max_failures=1000)
+    for _ in range(2):
+        assert th.begin("amy", "3.3.3.3") == 0  # two wrong passwords
+    assert th.begin("amy", "3.3.3.3") == 0      # the last allowed attempt reserves (and sets the lockout)...
+    th.success("amy", "3.3.3.3")                # ...but it was right
+    assert th.blocked_for("amy", "3.3.3.3") == 0
+
+
+def test_prune_projects_and_credentials_kept_out(tmp_path, monkeypatch):
+    from agentdesk.gateway.admin import AccountStore
+    from agentdesk.gateway.app import Gateway
+    cfg = config.load(tmp_path)
+    gw = Gateway(tmp_path, cfg, InstanceManager(tmp_path, cfg, command=fake_command))
+    gw.users.add("gina", PW)
+    home = tmp_path / "users" / "gina"
+    for p in ("one", "two"):
+        (home / "projects" / p).mkdir(parents=True)
+    gw.users.assign("gina", projects=["one", "two"])
+    (home / "projects" / "two").rmdir()
+    AccountStore(tmp_path).put("work", "api_key", "ANTHROPIC_API_KEY")
+    hidden = gw.instances.prepare("gina", home)  # nothing assigned: the gateway's own key stays out
+    assert gw.users.get("gina")["projects"] == ["one"]
+    assert {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"} <= set(hidden)
+    assert gw.users.prune_projects("gina") == []
+    gw.users.assign("gina", accounts=["work"])
+    assert "ANTHROPIC_API_KEY" not in gw.instances.prepare("gina", home)  # assigned: kept

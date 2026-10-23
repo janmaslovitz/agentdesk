@@ -22,7 +22,7 @@ from pathlib import Path
 from . import admin as admin_mod
 from .instances import GATEWAY_HEADER, InstanceError, InstanceManager
 from .sessions import SessionTable, Throttle
-from .users import Audit, UserStore
+from .users import Audit, UserStore, harden_home
 
 CSRF_HEADER = "X-AgentDesk-CSRF"
 USER_HEADER = "X-AgentDesk-User"
@@ -33,6 +33,9 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
 DROP_REQUEST = HOP | {"host", "cookie", "origin", "referer", "content-length", GATEWAY_HEADER.lower(), USER_HEADER.lower(),
                       CSRF_HEADER.lower(), "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded"}
 DROP_RESPONSE = HOP | {"set-cookie", "server", "date"}
+# Claude credentials the claude CLI picks up from its environment: an instance only keeps one when an account assigned
+# to its user names it as key_env (otherwise the gateway's own key would be usable by every user).
+CREDENTIAL_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 CHUNK = 64 * 1024
 
@@ -122,6 +125,22 @@ class Gateway:
         self.max_body = int(cfg["max_body_mb"]) * 1024 * 1024
         self.proxy_timeout = 600.0
         self.admin = admin_mod.Admin(self)
+        if self.instances.prepare is None:
+            self.instances.prepare = self.prepare_instance
+        harden_home(home, not cfg.get("run_as_users"))
+
+    def prepare_instance(self, username: str, user_home: Path) -> list[str]:
+        """Before an instance starts: its settings.toml holds exactly the user's assigned accounts, and the key
+        variables of every account not assigned to it (and the gateway's own Claude credentials) stay out of its
+        environment. Assigned projects that no longer exist in the user's home are dropped."""
+        self.users.prune_projects(username, "gateway")
+        u = self.users.get(username)
+        defs = self.admin.accounts.list()
+        assigned = set(u["accounts"]) if u else set()
+        admin_mod.sync_accounts(user_home, sorted(assigned), defs)
+        allowed = {d["key_env"] for d in defs if d["name"] in assigned and d.get("kind") == "api_key" and d.get("key_env")}
+        candidates = {d["key_env"] for d in defs if d.get("kind") == "api_key" and d.get("key_env")} | CREDENTIAL_ENV
+        return sorted(candidates - allowed)
 
     @property
     def scheme(self) -> str:
@@ -347,7 +366,7 @@ class Handler(BaseHTTPRequestHandler):
         name = str(d.get("username", "")).strip().lower()[:64]
         password = str(d.get("password", ""))
         nxt = safe_next(d.get("next"))
-        wait = self.gw.throttle.blocked_for(name, self.ip)
+        wait = self.gw.throttle.begin(name, self.ip)  # reserves the attempt: counted as failed until it succeeds
         if wait > 0:
             self.gw.audit.log("login throttled", user=name, ip=self.ip)
             msg = f"Too many failed sign-ins. Try again in {max(1, int(wait // 60) + 1)} minutes."
@@ -359,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             return self.store_error(e)
         if user is None:
-            locked = self.gw.throttle.failure(name, self.ip)
+            locked = self.gw.throttle.blocked_for(name, self.ip) > 0
             self.gw.audit.log("login failed", user=name, ip=self.ip, **({"locked": True} if locked else {}))
             msg = "Wrong user name or password."
             return self.json({"error": msg}, 401) if as_json else self.send(401, login_page(msg, nxt, name))

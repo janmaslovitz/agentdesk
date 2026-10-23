@@ -16,7 +16,14 @@ import secrets
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 # scrypt cost: N=2^15, r=8, p=1 (32 MiB, ~0.1 s); stored with each hash so it can be raised later.
 SCRYPT_N, SCRYPT_R, SCRYPT_P, SCRYPT_LEN = 2 ** 15, 8, 1, 32
@@ -50,6 +57,67 @@ def write_atomic(target: Path, text: str) -> None:
             if i == 39:
                 raise
             time.sleep(0.05)
+
+
+def chmod_posix(path: Path, mode: int) -> None:
+    if os.name == "posix":
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+
+
+def harden_home(home: Path, per_user_dirs: bool = True) -> None:
+    """POSIX: the server home and its secrets are for the gateway's OS user only (users.json, accounts.json,
+    audit.log, token files 0600; users/<name> 0700)."""
+    if per_user_dirs:
+        chmod_posix(home, 0o700)
+    for name in ("users.json", "accounts.json", "audit.log", "users.json.lock"):
+        if (home / name).exists():
+            chmod_posix(home / name, 0o600)
+    for d in ("secret", "secrets", "instances", "logs"):
+        if (home / d).is_dir():
+            chmod_posix(home / d, 0o700)
+            for f in (home / d).iterdir():
+                if f.is_file():
+                    chmod_posix(f, 0o600)
+    for f in home.glob("*token*"):
+        if f.is_file():
+            chmod_posix(f, 0o600)
+    if per_user_dirs and (home / "users").is_dir():
+        for d in (home / "users").iterdir():
+            if d.is_dir() and not d.is_symlink():
+                chmod_posix(d, 0o700)
+
+
+@contextmanager
+def file_lock(path: Path):
+    """An exclusive lock on `path` across processes (fcntl.flock on POSIX, msvcrt.locking on Windows)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # tries for ~10 s per call
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            else:
+                try:
+                    os.lseek(fd, 0, 0)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+    finally:
+        os.close(fd)
 
 
 # ----------------------------------------------------------------------------- passwords
@@ -111,13 +179,25 @@ class Audit:
         with self.lock:
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
+                new = not self.path.exists()
                 with self.path.open("a", encoding="utf-8") as f:
                     f.write(line)
+                if new:
+                    chmod_posix(self.path, 0o600)
             except OSError:
                 pass
 
 
 # ----------------------------------------------------------------------------- users
+
+def existing_projects(user_home: Path) -> set[str]:
+    """Project slugs that exist in a user's home (`<home>/projects/<slug>/`)."""
+    d = user_home / "projects"
+    try:
+        return {p.name for p in d.iterdir() if p.is_dir() and not p.is_symlink()}
+    except OSError:
+        return set()
+
 
 class UserStore:
     """users.json: {"version": 1, "users": {name: {...}}}. Read from disk on every lookup (cheap; changes made with the
@@ -128,6 +208,14 @@ class UserStore:
         self.path = home / "users.json"
         self.audit = audit or Audit(home / "audit.log")
         self.lock = threading.RLock()
+        self._lockfile = home / "users.json.lock"
+
+    @contextmanager
+    def _locked(self):
+        """Thread lock + cross-process file lock around load-modify-save (the CLI and the gateway both write)."""
+        with self.lock:
+            with file_lock(self._lockfile):
+                yield
 
     # -- reading
     def _load(self) -> dict:
@@ -189,7 +277,7 @@ class UserStore:
 
     # -- changes (each one is audited)
     def _change(self, name: str, fn, event: str, by: str = "", **details) -> dict:
-        with self.lock:
+        with self._locked():
             data = self._load()
             u = data["users"].get(name)
             if u is None:
@@ -206,12 +294,13 @@ class UserStore:
             raise ValueError(f"role must be one of {', '.join(ROLES)}")
         check_password_rules(password)
         hashed = hash_password(password)
-        with self.lock:
+        with self._locked():
             data = self._load()
             if name in data["users"]:
                 raise ValueError(f"user {name!r} already exists")
             home = self.user_home(name)
             home.mkdir(parents=True, exist_ok=True)
+            chmod_posix(home, 0o700)
             u = {"role": role, "password": hashed, "disabled": False,
                  "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                  "home": str(home), "projects": [], "accounts": []}
@@ -246,14 +335,32 @@ class UserStore:
 
         def fn(u, _d):
             if projects is not None:
+                have = existing_projects(Path(u.get("home") or self.user_home(name)))
+                missing = [p for p in projects if p not in have]
+                if missing:
+                    raise ValueError(f"no such project in {name}'s home: {', '.join(missing)}")
                 u["projects"] = sorted(set(projects))
             if accounts is not None:
                 u["accounts"] = sorted(set(accounts))
         return self._change(name, fn, "assignments changed", by, projects=projects, accounts=accounts)
 
+    def prune_projects(self, name: str, by: str = "") -> list[str]:
+        """Drop assigned project slugs that no longer exist in the user's home; returns the dropped ones."""
+        u = self.get(name)
+        if u is None or set(u["projects"]) <= existing_projects(Path(u["home"] or self.user_home(name))):
+            return []  # nothing to drop: no write, no audit line
+        dropped: list[str] = []
+
+        def fn(rec, _d):  # recomputed under the lock
+            have = existing_projects(Path(rec.get("home") or self.user_home(name)))
+            dropped.extend(p for p in rec.get("projects", []) if p not in have)
+            rec["projects"] = [p for p in rec.get("projects", []) if p in have]
+        self._change(name, fn, "assignments changed", by, dropped_projects=dropped)
+        return dropped
+
     def remove(self, name: str, by: str = "", delete_data: bool = False) -> None:
         """Delete the account. The user's data folder is kept unless delete_data (only ever a folder under users/)."""
-        with self.lock:
+        with self._locked():
             data = self._load()
             if data["users"].pop(name, None) is None:
                 raise KeyError(f"no user {name!r}")

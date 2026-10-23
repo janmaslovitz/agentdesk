@@ -62,6 +62,30 @@ def answers(port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+def probe(port: int, token: str, timeout: float = 2.0) -> bool:
+    """Does the listener on the port answer an authenticated GET /api/busy as AgentDesk ({"busy": ...})? Only ever
+    sends this start's fresh token."""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            c.request("GET", "/api/busy", headers={GATEWAY_HEADER: token, "Host": f"127.0.0.1:{port}"})
+            r = c.getresponse()
+            data = json.loads(r.read(65536) or b"{}") if r.status == 200 else None
+        finally:
+            c.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    return isinstance(data, dict) and "busy" in data
+
+
+def harden_dir(path: Path) -> None:
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
 @dataclass
 class InstanceManager:
     home: Path                        # the server home
@@ -69,6 +93,7 @@ class InstanceManager:
     audit: object | None = None       # users.Audit
     command: Callable | None = None   # (username, user_home, port, token_arg) -> argv; default: agentdesk serve
     clock: Callable = time.time
+    prepare: Callable | None = None   # (username, user_home) -> env var names to keep out of the instance's environment
     instances: dict = field(default_factory=dict)
     restarts: dict = field(default_factory=dict)  # username -> [restart times]
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -94,7 +119,10 @@ class InstanceManager:
         d = self.home / "instances"
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"{username}.token"
+        harden_dir(d)
         fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if os.name == "posix":
+            os.chmod(f, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(token)
         return str(f)
@@ -110,14 +138,20 @@ class InstanceManager:
 
     def _spawn(self, username: str, user_home: Path) -> Instance:
         user_home.mkdir(parents=True, exist_ok=True)
+        hidden: set[str] = set()
+        if not self.cfg.get("run_as_users"):  # (another OS user must still be able to enter its folder)
+            harden_dir(user_home)
+        if self.prepare is not None:  # this user's assigned accounts into settings.toml, others' keys out of the env
+            hidden = set(self.prepare(username, user_home) or ())
         logs = self.home / "logs"
         logs.mkdir(parents=True, exist_ok=True)
+        harden_dir(logs)
         logf = logs / f"{username}.log"
         last = ""
         for _attempt in range(3):  # a picked port can be taken before the instance binds it: try another
             port, token = free_port(), secrets.token_urlsafe(32)
             argv = (self.command or self.serve_command)(username, user_home, port, self._token_arg(username, token))
-            env = {k: v for k, v in os.environ.items() if k != "AGENTDESK_SERVER_HOME"}
+            env = {k: v for k, v in os.environ.items() if k != "AGENTDESK_SERVER_HOME" and k not in hidden}
             env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home))
             kw: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
                         if sys.platform == "win32" else {"start_new_session": True})
@@ -136,16 +170,24 @@ class InstanceManager:
                 except OSError:
                     pass
             deadline = time.monotonic() + float(self.cfg.get("instance_start_seconds", 60))
-            while time.monotonic() < deadline and proc.poll() is None and not answers(port, 0.25):
+            verified = False
+            while time.monotonic() < deadline and proc.poll() is None:
+                # a listener on the port is only ours when our child is alive AND the listener accepts our token
+                if answers(port, 0.25) and probe(port, token):
+                    verified = True
+                    break
                 time.sleep(0.1)
-            if proc.poll() is None and answers(port, 0.5):
+            if verified and proc.poll() is None:
                 now = self.clock()
                 inst = Instance(username, user_home, port, token, proc, now, now, log=logf)
                 self._log("instance started", username, port=port, pid=proc.pid)
                 return inst
-            if proc.poll() is None:  # never answered: give up on it
+            if proc.poll() is None:  # never verified: kill it; a foreign listener on the port gets another port
+                foreign = answers(port, 0.5)
                 self._terminate(proc)
-                last = "it did not start listening in time"
+                last = "the listener on its port did not answer as AgentDesk" if foreign else "it did not start listening in time"
+                if foreign:
+                    continue
                 break
             last = f"it exited with code {proc.returncode}"
         self._log("instance failed", username, why=last)

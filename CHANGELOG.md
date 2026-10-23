@@ -37,6 +37,17 @@ them under the new version number, tags it and builds the installer (see README,
   stop / restart and log tail; server health (free disk, version); audit log viewer. Every user can change their own
   password at `/account`. The dashboard pages get a small "Admin / Account / Sign out" bar from the gateway.
 
+### Security
+- Gateway hardening: an instance gets only the Claude accounts assigned to its user (written to its `settings.toml` at
+  every start; the key variables of other accounts, and the gateway's own `ANTHROPIC_API_KEY` /
+  `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` unless an assigned account names them, are removed from its
+  environment); project assignments only name projects that exist in the user's home (checked on assign, stale ones
+  dropped when a project is removed and at every instance start); POSIX permissions (`users/<name>` 0700, `users.json`, `accounts.json`,
+  `audit.log`, token files 0600); `users.json` changes take a cross-process file lock (CLI + gateway); a new instance is
+  only used after its process is alive and the listener answers an authenticated `/api/busy` (otherwise it is killed and
+  another port is tried); the login throttle (and the current-password check on `/account`) reserves each attempt atomically, so parallel
+  guesses can't exceed the limit; a right password on the last allowed attempt no longer leaves a lockout behind.
+
 ### Changed
 - The dashboard checks the Host header of every request and the Origin of every POST against a configurable list
   (loopback by default), so the UI also works from `http://192.168.x.x:8765` when allowed, and foreign origins stay rejected.

@@ -102,23 +102,44 @@ class Throttle:
         with self._lock:
             return max([0.0] + [self._locked.get(k, 0) - now for k, _ in self._keys(user, ip)])
 
-    def failure(self, user: str, ip: str) -> bool:
-        """Count a failed login; True when this one triggered a lockout."""
-        now, locked = self.clock(), False
-        with self._lock:
-            for k, limit in self._keys(user, ip):
-                times = [t for t in self._fails.get(k, []) if now - t < self.window_s] + [now]
-                if len(times) >= limit:
-                    self._locked[k] = now + self.lockout_s
-                    times, locked = [], True
-                self._fails[k] = times
-            if len(self._fails) > 10_000:  # bound memory against a flood of made-up names
-                for k in [k for k, v in self._fails.items() if not v or now - v[-1] >= self.window_s]:
-                    del self._fails[k]
-                for k in [k for k, until in self._locked.items() if until <= now]:
-                    del self._locked[k]
+    def _count(self, user: str, ip: str, now: float) -> bool:
+        locked = False
+        for k, limit in self._keys(user, ip):
+            times = [t for t in self._fails.get(k, []) if now - t < self.window_s] + [now]
+            if len(times) >= limit:
+                self._locked[k] = now + self.lockout_s
+                times, locked = [], True
+            self._fails[k] = times
+        if len(self._fails) > 10_000:  # bound memory against a flood of made-up names
+            for k in [k for k, v in self._fails.items() if not v or now - v[-1] >= self.window_s]:
+                del self._fails[k]
+            for k in [k for k, until in self._locked.items() if until <= now]:
+                del self._locked[k]
         return locked
 
+    def failure(self, user: str, ip: str) -> bool:
+        """Count a failed login; True when this one triggered a lockout."""
+        with self._lock:
+            return self._count(user, ip, self.clock())
+
+    def begin(self, user: str, ip: str) -> float:
+        """Atomically check the lockout and, when free, reserve one attempt (counted as a failure until success()
+        clears it), so parallel guesses can't all pass the check before any failure is recorded. Returns the seconds
+        to wait (0 = go ahead and check the password)."""
+        now = self.clock()
+        with self._lock:
+            wait = max([0.0] + [self._locked.get(k, 0) - now for k, _ in self._keys(user, ip)])
+            if wait > 0:
+                return wait
+            self._count(user, ip, now)
+            return 0.0
+
     def success(self, user: str, ip: str) -> None:
+        """A right password: clears the (user, IP) counter and lockout (the last allowed attempt's reservation may
+        have set it) and gives back the reserved IP attempt."""
         with self._lock:
             self._fails.pop(self._keys(user, ip)[0][0], None)
+            self._locked.pop(self._keys(user, ip)[0][0], None)
+            ips = self._fails.get(self._keys(user, ip)[1][0])
+            if ips:
+                ips.pop()
