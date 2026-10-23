@@ -3,7 +3,8 @@
     python -m agentdesk [dashboard] [--browser]  open the dashboard in a window (--browser: in a browser tab)
     python -m agentdesk serve [--host H] [--port N] [--data DIR] ...   headless server, no window (see agentdesk/serve.py)
     python -m agentdesk gateway [--home DIR] [user ...]   multi-user gateway with login (see agentdesk/gateway/)
-    python -m agentdesk stop [--runs]           end the dashboard (--runs: also stop runs it started)
+    python -m agentdesk server [--home DIR] init|user|status|config|doctor   console admin of the server (agentdesk/gateway/admin_cli.py)
+    python -m agentdesk stop[--runs]           end the dashboard (--runs: also stop runs it started)
     python -m agentdesk projects                 list projects
     python -m agentdesk add-project NAME REPO BASE [--preset rust|node|python|go|none] [--account A]
     python -m agentdesk status PROJECT
@@ -27,6 +28,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+if __name__ == "__main__" and getattr(sys, "frozen", False) and sys.argv[1:2] in (["serve"], ["gateway"], ["server"]):
+    # AgentDesk.exe is the desktop App; serve / gateway / server belong to the headless Server product (the .deb)
+    sys.exit(f"AgentDesk {sys.argv[1]}: not part of the desktop App. Use the AgentDesk Server (agentdesk-server_*.deb) on Linux.")
 if __name__ == "__main__" and sys.argv[1:2] == ["serve"]:  # headless server: --data must be set before core is imported
     from . import serve
     serve.main(sys.argv[2:])
@@ -34,6 +38,11 @@ if __name__ == "__main__" and sys.argv[1:2] == ["serve"]:  # headless server: --
 if __name__ == "__main__" and sys.argv[1:2] == ["gateway"]:  # multi-user gateway: stdlib only, never imports core
     from .gateway import cli as gateway_cli
     gateway_cli.main(sys.argv[2:])
+    raise SystemExit(0)
+
+if __name__ == "__main__" and sys.argv[1:2] == ["server"]:  # console admin of the AgentDesk Server: stdlib only
+    from .gateway import admin_cli
+    admin_cli.main(sys.argv[2:])
     raise SystemExit(0)
 
 from . import core

@@ -1,4 +1,4 @@
-# PyInstaller spec: `pyinstaller agentdesk.spec` (build_exe.ps1 on Windows, build_unix.sh on macOS / Linux do this).
+# Builds the desktop App ONLY (product A); the Server is the .deb. PyInstaller spec: `pyinstaller agentdesk.spec` (build_exe.ps1 on Windows, build_unix.sh on macOS / Linux do this).
 # Onedir, no console. Windows: AgentDesk.exe with the .ico embedded. macOS: also AgentDesk.app (icon from
 # agentdesk/web/agentdesk.icns if there is one). Linux: the dist/AgentDesk folder.
 # Only code, the web page and the icon go in; data/, accounts/ and .env are never collected.
@@ -30,8 +30,13 @@ for pkg in ("claude_agent_sdk", "webview"):  # claude_agent_sdk/_bundled/claude(
 # Linux: pywebview's window is GTK 3 + WebKit2GTK 4.1 (through PyGObject).
 hooksconfig = {} if WIN or MAC else {"gi": {"module-versions": {"Gtk": "3.0", "WebKit2": "4.1"}}}
 
+# The App is one product, the headless Server (packaging/debian/build_deb.py) another: the multi-user gateway, its console
+# tool and the headless entry point are Server-only and stay out of AgentDesk.exe. (`AgentDesk.exe gateway|server|serve`
+# therefore does not exist; python -m agentdesk ... on a Linux server does.)
+SERVER_ONLY = ["agentdesk.gateway", "agentdesk.serve", "agentdesk.storage"]
+
 a = Analysis(["run_agentdesk.py"], pathex=["."], datas=datas, binaries=binaries, hiddenimports=hiddenimports,
-             hooksconfig=hooksconfig, excludes=["pytest", "tkinter"])
+             hooksconfig=hooksconfig, excludes=SERVER_ONLY + ["pytest", "tkinter"])
 pyz = PYZ(a.pure)
 icon = ICO if WIN else (ICNS if MAC and os.path.exists(ICNS) else None)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="AgentDesk", console=False, icon=icon,

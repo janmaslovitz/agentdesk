@@ -1,4 +1,4 @@
-"""`python -m agentdesk serve` / `agentdesk-server`: the dashboard as a headless server (no window, tray or browser).
+"""`python -m agentdesk serve` / `agentdesk-serve`: the dashboard as a headless server (no window, tray or browser).
 
     python -m agentdesk serve [--host 127.0.0.1] [--port 8765] [--data DIR] [--allowed-host H[:PORT]]...
                               [--auth-token-file FILE [--trust-proxy-auth]] [--pid-file FILE]
@@ -59,7 +59,7 @@ def start(argv: list[str]):
     prescan_data(argv)
     if args.trust_proxy_auth and not args.auth_token_file:
         raise SystemExit("agentdesk serve: --trust-proxy-auth needs --auth-token-file")
-    from . import server  # imports core; no GUI module is imported anywhere on this path
+    from . import reliability, server  # imports core; no GUI module is imported anywhere on this path
     loopback = server.is_loopback(args.host)
     if not loopback and not args.auth_token_file:
         raise SystemExit(f"agentdesk serve: refusing to listen on {args.host}: only loopback addresses are allowed without "
@@ -72,6 +72,9 @@ def start(argv: list[str]):
     server.GUARD = server.Guard(server.default_allowed(args.host, port, args.allowed_host), token)
     core = server.core
     core.settings()  # creates the data folder and default settings on first start
+    reliability.configure_logs(os.environ.get("AGENTDESK_LOG_MAX_MB"), os.environ.get("AGENTDESK_LOG_KEEP"))
+    os.environ.update(server.core.policy_env())  # AgentDesk Server: shared package caches for builds and chats too
+    server.recover_all()  # stale pid files, tasks left `working`, orphan worktrees, chats cut off mid-turn
     quit_ev = server.QUIT
     quit_ev.clear()
     pidf = Path(args.pid_file) if args.pid_file else None
@@ -80,16 +83,37 @@ def start(argv: list[str]):
     thread = threading.Thread(target=server.serve_supervised, args=(srv, quit_ev), daemon=True, name="http")
     thread.start()
     for fn, name in ((server.autorun_loop, "autorunner"), (server.usage_loop, "usage-reader"),
-                     (server.checkup_loop, "checkups"), (server.hygiene_loop, "disk-hygiene"), (server._load_sdk, "sdk-preload")):
+                     (server.checkup_loop, "checkups"), (server.guard_loop, "run-guard"), (server.hygiene_loop, "disk-hygiene"), (server._load_sdk, "sdk-preload")):
         threading.Thread(target=fn, daemon=True, name=name).start()
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
     print(f"AgentDesk server listening on http://{shown}:{port}  (bound {args.host}; data: {core.DATA}; "
           f"{'gateway token required' if token else 'no token'})", flush=True)
 
+    headers = {server.GATEWAY_HEADER: token} if token else {}
+
+    def self_check() -> tuple[bool, str]:
+        ok, why = reliability.loopback_get(port, "/api/busy", headers, timeout=10)  # the request loop answers
+        if not ok:
+            return False, why
+        try:
+            core.settings()  # the data folder is readable
+        except Exception as e:
+            return False, f"settings unreadable: {e}"
+        return reliability.disk_ok(core.DATA, 0.05)
+
+    wd = reliability.start_watchdog(self_check)  # only under systemd with WatchdogSec
+    reliability.sd_notify("READY=1")
+
     def stop() -> None:
+        reliability.sd_notify("STOPPING=1")
+        if wd:
+            wd.stop()
         quit_ev.set()
         if thread.is_alive():
-            srv.shutdown()
+            srv.shutdown()  # no new requests
+        grace = float(os.environ.get("AGENTDESK_SHUTDOWN_GRACE", "20"))
+        for line in server.shutdown_runs(grace):
+            server.log_error(f"shutdown: {line}")
         srv.server_close()
         if pidf:
             pidf.unlink(missing_ok=True)

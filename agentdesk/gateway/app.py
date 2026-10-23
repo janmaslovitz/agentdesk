@@ -10,6 +10,9 @@ import hmac
 import html
 import http.client
 import json
+import os
+import re
+import signal
 import socket
 import ssl
 import threading
@@ -18,9 +21,11 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .. import __version__, reliability, storage as storage_mod
+from . import admin as admin_mod
 from .instances import GATEWAY_HEADER, InstanceError, InstanceManager
 from .sessions import SessionTable, Throttle
-from .users import Audit, UserStore
+from .users import Audit, UserStore, harden_home
 
 CSRF_HEADER = "X-AgentDesk-CSRF"
 USER_HEADER = "X-AgentDesk-User"
@@ -31,6 +36,9 @@ HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", 
 DROP_REQUEST = HOP | {"host", "cookie", "origin", "referer", "content-length", GATEWAY_HEADER.lower(), USER_HEADER.lower(),
                       CSRF_HEADER.lower(), "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded"}
 DROP_RESPONSE = HOP | {"set-cookie", "server", "date"}
+# Claude credentials the claude CLI picks up from its environment: an instance only keeps one when an account assigned
+# to its user names it as key_env (otherwise the gateway's own key would be usable by every user).
+CREDENTIAL_ENV = {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 CHUNK = 64 * 1024
 
@@ -81,6 +89,25 @@ def message_page(title: str, text: str) -> bytes:
                        f'<p>{html.escape(text)}</p><p><a href="/">Try again</a></p></div>').encode("utf-8")
 
 
+BAR_ID = "agentdesk-gateway-bar"
+
+
+def inject_bar(page: bytes, username: str, is_admin: bool, usage: dict | None = None) -> bytes:
+    """The gateway's small floating bar (user name, Account, Admin for admins) inside the dashboard page; the
+    dashboard's own index.html is not touched. Pages without a <body> are left as they are."""
+    m = re.search(rb"<body[^>]*>", page, re.I)
+    if not m:
+        return page
+    links = ('<a href="/admin">Admin</a>' if is_admin else "") + '<a href="/account">Account</a>'
+    bar = (f'<div id="{BAR_ID}" style="position:fixed;top:6px;right:8px;z-index:2147483000;display:flex;gap:10px;align-items:center;'
+           'padding:3px 10px;border-radius:14px;font:12px/1.4 system-ui,sans-serif;background:rgba(127,127,127,.18);'
+           'backdrop-filter:blur(4px)">'
+           f'<span style="opacity:.7">{html.escape(username)}</span>{storage_mod.bar_html(usage or {})}{links}'
+           '<a href="/logout">Sign out</a></div>'
+           f'<style>#{BAR_ID} a{{color:inherit;text-decoration:none;font-weight:600}}#{BAR_ID} a:hover{{text-decoration:underline}}</style>')
+    return page[:m.end()] + bar.encode("utf-8") + page[m.end():]
+
+
 class Gateway:
     def __init__(self, home: Path, cfg: dict, instances: InstanceManager | None = None, clock=time.time):
         self.home, self.cfg, self.clock = home, cfg, clock
@@ -101,6 +128,100 @@ class Gateway:
         self.cookie = "__Host-agentdesk_session" if self.ssl_ctx else "agentdesk_session"
         self.max_body = int(cfg["max_body_mb"]) * 1024 * 1024
         self.proxy_timeout = 600.0
+        self.admin = admin_mod.Admin(self)
+        self.storage = storage_mod.Storage(home, cfg, self.users, self.audit, tool=self.storage_tool, busy=self.user_busy, clock=clock)
+        if self.instances.prepare is None:
+            self.instances.prepare = self.prepare_instance
+        if getattr(self.instances, "extra_env", False) is None:
+            self.instances.extra_env = lambda name, user_home: storage_mod.instance_env(home, cfg, user_home)
+        harden_home(home, not cfg.get("run_as_users"))
+        reliability.configure_logs(cfg.get("log_max_mb"), cfg.get("log_keep"))
+
+    def health(self) -> dict:
+        """GET /gateway/health: no secrets, no user names."""
+        return {"ok": True, "version": __version__, "instances": self.instances.health()}
+
+    def recover(self) -> list[str]:
+        """At start: instances left over from a gateway that crashed (their pid files) are ended, since their tokens are
+        gone with it; the new instance's own recovery then fixes tasks they left `working`. Old token files go too."""
+        did = []
+        d = self.home / "instances"
+        for f in sorted(d.glob("*.pid")) if d.is_dir() else []:
+            try:
+                pid = int(f.read_text(encoding="utf-8").split()[0])
+                since = f.stat().st_mtime
+            except (OSError, ValueError, IndexError):
+                pid, since = 0, None
+            if pid > 0 and reliability.pid_is_ours(pid, since, ("agentdesk",)):
+                if not reliability.kill_group(pid):
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError:
+                        pass
+                did.append(f"ended orphan instance of {f.stem} (pid {pid})")
+            f.unlink(missing_ok=True)
+        for f in sorted(d.glob("*.token")) if d.is_dir() else []:
+            f.unlink(missing_ok=True)
+        for line in did:
+            self.audit.log("recovery", note=line)
+        return did
+
+    def resume(self) -> list[str]:
+        """autostart_instances: start the instance of every enabled user who was active before the reboot / crash."""
+        if not self.cfg.get("autostart_instances", True):
+            return []
+        try:
+            users = [(u["username"], self.users.user_home(u["username"])) for u in self.users.list() if not u["disabled"]]
+        except RuntimeError:
+            return []
+        return self.instances.resume(users)
+
+    def self_check(self, port: int) -> tuple[bool, str]:
+        """Watchdog check: the request loop answers on loopback, users.json is readable, the disk is not full."""
+        allowed = self.cfg.get("allowed_hosts") or []
+        ok, why = reliability.loopback_get(port, "/gateway/health", tls=self.ssl_ctx is not None,
+                                           host_header=allowed[0] if allowed else None)
+        if not ok:
+            return False, why
+        try:
+            self.users.count()
+        except Exception as e:
+            return False, f"user store unreadable: {e}"
+        return reliability.disk_ok(self.home, float(self.cfg.get("min_free_gb", 1.0)))
+
+    def prepare_instance(self, username: str, user_home: Path) -> list[str]:
+        """Before an instance starts: its settings.toml holds exactly the user's assigned accounts, and the key
+        variables of every account not assigned to it (and the gateway's own Claude credentials) stay out of its
+        environment. Assigned projects that no longer exist in the user's home are dropped."""
+        self.users.prune_projects(username, "gateway")
+        try:  # the server's disk policy for this instance: gate, [hygiene] defaults, cache env, clone options
+            self.storage.write_policy(username, user_home)
+        except OSError:
+            pass
+        u = self.users.get(username)
+        defs = self.admin.accounts.list()
+        assigned = set(u["accounts"]) if u else set()
+        admin_mod.sync_accounts(user_home, sorted(assigned), defs)
+        allowed = {d["key_env"] for d in defs if d["name"] in assigned and d.get("kind") == "api_key" and d.get("key_env")}
+        candidates = {d["key_env"] for d in defs if d.get("kind") == "api_key" and d.get("key_env")} | CREDENTIAL_ENV
+        return sorted(candidates - allowed)
+
+    def storage_tool(self, u: dict, *args: str) -> dict:
+        """The project tool for the storage cleanup (hygiene in the user's own process / OS account)."""
+        return admin_mod.call_projtool(self.cfg, u, *args, timeout=3600)
+
+    def user_busy(self, username: str) -> bool:
+        with self.instances._lock:
+            inst = self.instances.instances.get(username)
+        return bool(inst and inst.alive() and self.instances.busy(inst))
+
+    def bar_usage(self, username: str) -> dict:
+        """The user's disk usage for the dashboard bar ({} when it can't be told: the bar is left out)."""
+        try:
+            u = self.storage.usage(username)
+            return {**u, "gate": self.storage.gate_for(username) or ""}
+        except Exception:
+            return {}
 
     @property
     def scheme(self) -> str:
@@ -124,6 +245,7 @@ class Gateway:
             try:
                 self.instances.tick()
                 self.sessions.sweep()
+                self.storage.tick()  # starts the background disk walker / auto-clean when due; never blocks
             except Exception as e:  # never let supervision die
                 self.audit.log("supervisor error", error=repr(e)[:300])
 
@@ -131,6 +253,7 @@ class Gateway:
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 128  # the default backlog of 5 resets connections under a burst (seen on Windows)
 
     def handle_error(self, request, client_address):  # a client that went away is not worth a traceback
         import sys
@@ -279,7 +402,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, b"forbidden host", "text/plain")
         path = urllib.parse.urlsplit(self.path).path
         if path == "/gateway/health":
-            return self.send(200, b"ok", "text/plain")
+            return self.send(200, json.dumps(self.gw.health()).encode("utf-8"), "application/json")
         if path == "/login":
             return self.login_post() if self.command == "POST" else self.send(200, login_page(next_url=self.query("next")))
         sid = self.cookie_value()
@@ -304,6 +427,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.command in UNSAFE and not self.csrf_ok(sess):
             self.gw.audit.log("csrf refused", user=sess.username, ip=self.ip, path=path[:200])
             return self.json({"error": "cross-site request refused"}, 403)
+        if admin_mod.dispatch(self, user, sess, path):
+            return None
         return self.proxy(user)
 
     def store_error(self, e: Exception) -> None:
@@ -324,11 +449,7 @@ class Handler(BaseHTTPRequestHandler):
         name = str(d.get("username", "")).strip().lower()[:64]
         password = str(d.get("password", ""))
         nxt = safe_next(d.get("next"))
-        with self.gw.login_lock:
-            return self._login_checked(d, name, password, nxt, as_json)
-
-    def _login_checked(self, d, name, password, nxt, as_json) -> None:
-        wait = self.gw.throttle.blocked_for(name, self.ip)
+        wait = self.gw.throttle.begin(name, self.ip)  # reserves the attempt: counted as failed until it succeeds
         if wait > 0:
             self.gw.audit.log("login throttled", user=name, ip=self.ip)
             msg = f"Too many failed sign-ins. Try again in {max(1, int(wait // 60) + 1)} minutes."
@@ -340,7 +461,7 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:
             return self.store_error(e)
         if user is None:
-            locked = self.gw.throttle.failure(name, self.ip)
+            locked = self.gw.throttle.blocked_for(name, self.ip) > 0
             self.gw.audit.log("login failed", user=name, ip=self.ip, **({"locked": True} if locked else {}))
             msg = "Wrong user name or password."
             return self.json({"error": msg}, 401) if as_json else self.send(401, login_page(msg, nxt, name))
@@ -382,6 +503,14 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return self.send(413, b"request body too large", "text/plain")
         mgr, name, home = self.gw.instances, user["username"], Path(user["home"])
+        path = urllib.parse.urlsplit(self.path).path
+        if self.command == "POST" and path == "/api/projects/import":
+            why = self.gw.storage.gate_for(name)  # refuse before the upload / clone, not after
+            if why:
+                self.close_connection = True
+                self.gw.audit.log("storage refused", user=name, path=path, why=why[:200])
+                return self.send(507, json.dumps({"ok": False, "disk_budget": True, "error": why, "message": f"not importing: {why}"}).encode("utf-8"),
+                                 "application/json; charset=utf-8")
         try:
             inst = mgr.acquire(name, home)
         except InstanceError as e:
@@ -405,6 +534,7 @@ class Handler(BaseHTTPRequestHandler):
                         held = True
                     except InstanceError as e:
                         return self.send(503, message_page("Not available", str(e)))
+            self.role = user["role"]
             self.forward(conn, inst, name, n)
         finally:
             if held:
@@ -440,6 +570,20 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return self.send(502, message_page("Not available", "Your AgentDesk instance did not answer the request."))
         try:
+            ctype = (resp.getheader("Content-Type") or "").lower()
+            if (self.command == "GET" and resp.status == 200 and ctype.startswith("text/html")
+                    and not resp.getheader("Content-Encoding") and (resp.getheader("Content-Length") or "0").isdigit()
+                    and int(resp.getheader("Content-Length") or 0) <= 4 * 1024 * 1024):
+                page = inject_bar(resp.read(), username, getattr(self, "role", "user") == "admin", self.gw.bar_usage(username))
+                self.send_response(resp.status, resp.reason)
+                for k, v in resp.getheaders():
+                    if k.lower() not in DROP_RESPONSE and k.lower() != "content-length":
+                        self.send_header(k, v)
+                self.send_header("Content-Length", str(len(page)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(page)
+                return
             self.send_response(resp.status, resp.reason)
             for k, v in resp.getheaders():
                 if k.lower() not in DROP_RESPONSE:

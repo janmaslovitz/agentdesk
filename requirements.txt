@@ -1,2 +1,3 @@
-claude-agent-sdk>=0.2.166
+# Desktop App runtime: the core plus the window (pywebview). The headless Server uses requirements-core.txt only.
+-r requirements-core.txt
 pywebview>=5.0

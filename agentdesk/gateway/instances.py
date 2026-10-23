@@ -21,6 +21,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .. import reliability
+
+SHUTDOWN = "gateway shutting down"
 GATEWAY_HEADER = "X-AgentDesk-Gateway-Token"  # = agentdesk.server.GATEWAY_HEADER (not imported: that pulls in core)
 APP = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent.parent.parent
 RESTART_WINDOW_S = 600
@@ -62,6 +65,49 @@ def answers(port: int, timeout: float = 0.5) -> bool:
         return False
 
 
+def probe(port: int, token: str, timeout: float = 2.0) -> bool:
+    """Does the listener on the port answer an authenticated GET /api/busy as AgentDesk ({"busy": ...})? Only ever
+    sends this start's fresh token."""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+        try:
+            c.request("GET", "/api/busy", headers={GATEWAY_HEADER: token, "Host": f"127.0.0.1:{port}"})
+            r = c.getresponse()
+            data = json.loads(r.read(65536) or b"{}") if r.status == 200 else None
+        finally:
+            c.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return False
+    return isinstance(data, dict) and "busy" in data
+
+
+def harden_dir(path: Path) -> None:
+    if os.name == "posix":
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
+ACTIVE_MARK = "was_active"
+
+
+def mark_active(user_home: Path, active: bool) -> None:
+    """Record in the user's data whether their instance was in use, so that a reboot or crash resumes their queue."""
+    f = user_home / ACTIVE_MARK
+    try:
+        if active:
+            f.write_text(str(int(time.time())), encoding="utf-8")
+        else:
+            f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def was_active(user_home: Path) -> bool:
+    return (user_home / ACTIVE_MARK).exists()
+
+
 @dataclass
 class InstanceManager:
     home: Path                        # the server home
@@ -69,6 +115,8 @@ class InstanceManager:
     audit: object | None = None       # users.Audit
     command: Callable | None = None   # (username, user_home, port, token_arg) -> argv; default: agentdesk serve
     clock: Callable = time.time
+    prepare: Callable | None = None   # (username, user_home) -> env var names to keep out of the instance's environment
+    extra_env: Callable | None = None  # (username, user_home) -> extra environment (shared package caches)
     instances: dict = field(default_factory=dict)
     restarts: dict = field(default_factory=dict)  # username -> [restart times]
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -94,10 +142,20 @@ class InstanceManager:
         d = self.home / "instances"
         d.mkdir(parents=True, exist_ok=True)
         f = d / f"{username}.token"
+        harden_dir(d)
         fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        if os.name == "posix":
+            os.chmod(f, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(token)
         return str(f)
+
+    def _write_pid(self, username: str, pid: int) -> None:
+        try:
+            (self.home / "instances").mkdir(parents=True, exist_ok=True)
+            (self.home / "instances" / f"{username}.pid").write_text(str(pid), encoding="utf-8")
+        except OSError:
+            pass
 
     def _log(self, event: str, username: str, **kw) -> None:
         if self.audit is not None:
@@ -110,17 +168,32 @@ class InstanceManager:
 
     def _spawn(self, username: str, user_home: Path) -> Instance:
         user_home.mkdir(parents=True, exist_ok=True)
+        hidden: set[str] = set()
+        if not self.cfg.get("run_as_users"):  # (another OS user must still be able to enter its folder)
+            harden_dir(user_home)
+        if self.prepare is not None:  # this user's assigned accounts into settings.toml, others' keys out of the env
+            hidden = set(self.prepare(username, user_home) or ())
         logs = self.home / "logs"
         logs.mkdir(parents=True, exist_ok=True)
+        harden_dir(logs)
         logf = logs / f"{username}.log"
         last = ""
         for _attempt in range(3):  # a picked port can be taken before the instance binds it: try another
             port, token = free_port(), secrets.token_urlsafe(32)
             argv = (self.command or self.serve_command)(username, user_home, port, self._token_arg(username, token))
-            env = {k: v for k, v in os.environ.items() if k != "AGENTDESK_SERVER_HOME"}
-            env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home))
+            env = {k: v for k, v in reliability.strip_systemd_env(dict(os.environ)).items()
+                   if k != "AGENTDESK_SERVER_HOME" and k not in hidden}
+            env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home),
+                       AGENTDESK_LOG_MAX_MB=str(self.cfg.get("log_max_mb", 10)), AGENTDESK_LOG_KEEP=str(self.cfg.get("log_keep", 5)),
+                       AGENTDESK_SHUTDOWN_GRACE=str(self.cfg.get("shutdown_grace_seconds", 25)))
+            if self.extra_env is not None:
+                try:
+                    env.update(self.extra_env(username, user_home) or {})
+                except OSError:
+                    pass
             kw: dict = ({"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
                         if sys.platform == "win32" else {"start_new_session": True})
+            reliability.rotate(logf, self._log_max(), int(self.cfg.get("log_keep", 5)))
             out = logf.open("ab")
             try:
                 proc = subprocess.Popen(argv, cwd=APP, env=env, stdout=out, stderr=out,
@@ -136,16 +209,26 @@ class InstanceManager:
                 except OSError:
                     pass
             deadline = time.monotonic() + float(self.cfg.get("instance_start_seconds", 60))
-            while time.monotonic() < deadline and proc.poll() is None and not answers(port, 0.25):
+            verified = False
+            while time.monotonic() < deadline and proc.poll() is None:
+                # a listener on the port is only ours when our child is alive AND the listener accepts our token
+                if answers(port, 0.25) and probe(port, token):
+                    verified = True
+                    break
                 time.sleep(0.1)
-            if proc.poll() is None and answers(port, 0.5):
+            if verified and proc.poll() is None:
                 now = self.clock()
                 inst = Instance(username, user_home, port, token, proc, now, now, log=logf)
+                mark_active(user_home, True)
+                self._write_pid(username, proc.pid)
                 self._log("instance started", username, port=port, pid=proc.pid)
                 return inst
-            if proc.poll() is None:  # never answered: give up on it
+            if proc.poll() is None:  # never verified: kill it; a foreign listener on the port gets another port
+                foreign = answers(port, 0.5)
                 self._terminate(proc)
-                last = "it did not start listening in time"
+                last = "the listener on its port did not answer as AgentDesk" if foreign else "it did not start listening in time"
+                if foreign:
+                    continue
                 break
             last = f"it exited with code {proc.returncode}"
         self._log("instance failed", username, why=last)
@@ -195,6 +278,12 @@ class InstanceManager:
         if event:
             self._log(event, inst.username, **kw)
 
+    def _log_max(self) -> int:
+        return max(1024, int(float(self.cfg.get("log_max_mb", 10)) * 1024 * 1024))
+
+    def _grace(self) -> float:
+        return float(self.cfg.get("shutdown_grace_seconds", 25))
+
     @staticmethod
     def _terminate(proc: subprocess.Popen, wait_s: float = 10) -> None:
         if proc.poll() is not None:
@@ -218,26 +307,56 @@ class InstanceManager:
                 inst.stopping = True
         if inst is None:
             return False
-        self._terminate(inst.proc)
+        self._terminate(inst.proc, self._grace())
+        if reason != SHUTDOWN:  # a deliberate stop; a shutdown / reboot keeps "was active" so the queue resumes
+            mark_active(inst.home, False)
         self._log("instance stopped", username, reason=reason)
         return True
 
     def stop_all(self) -> None:
-        for name in list(self.instances):
-            self.stop(name, "gateway shutting down")
+        """Stop every instance at once (each gets the grace period to finish its step), for the gateway's shutdown."""
+        threads = [threading.Thread(target=self.stop, args=(name, SHUTDOWN)) for name in list(self.instances)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def resume(self, users: list[tuple[str, Path]]) -> list[str]:
+        """Start the instance of every (name, home) that was active before the reboot / crash (autostart_instances)."""
+        started = []
+        for name, home in users:
+            if not was_active(home):
+                continue
+            try:
+                self.ensure(name, home)
+                self._log("instance resumed", name)
+                started.append(name)
+            except InstanceError as e:
+                self._log("instance resume failed", name, why=str(e)[:200])
+        return started
+
+    def health(self) -> dict:
+        with self._lock:
+            cur = list(self.instances.values())
+        up = sum(1 for i in cur if i.alive() and not i.stopping)
+        return {"up": up, "down": len(cur) - up}
 
     # -- supervision
-    def busy(self, inst: Instance) -> bool:
-        """Does the instance report a run / chat turn / build in progress? (An unreachable instance is not busy.)"""
+    def busy_info(self, inst: Instance) -> dict:
+        """The instance's GET /api/busy answer ({} when it can't be reached)."""
         try:
             c = http.client.HTTPConnection("127.0.0.1", inst.port, timeout=5)
             c.request("GET", "/api/busy", headers={GATEWAY_HEADER: inst.token, "Host": f"127.0.0.1:{inst.port}"})
             r = c.getresponse()
             data = json.loads(r.read(65536) or b"{}") if r.status == 200 else {}
             c.close()
-            return bool(data.get("busy"))
+            return data if isinstance(data, dict) else {}
         except (OSError, ValueError, http.client.HTTPException):
-            return False
+            return {}
+
+    def busy(self, inst: Instance) -> bool:
+        """Does the instance report a run / chat turn / build in progress? (An unreachable instance is not busy.)"""
+        return bool(self.busy_info(inst).get("busy"))
 
     def tick(self) -> None:
         """One supervision pass: restart crashed instances that were in use, stop idle ones."""
@@ -248,6 +367,8 @@ class InstanceManager:
         for inst in current:
             if inst.stopping:
                 continue
+            if inst.log is not None:
+                reliability.rotate(inst.log, self._log_max(), int(self.cfg.get("log_keep", 5)), copytruncate=True)
             if not inst.alive():
                 self._forget(inst, "instance exited", code=inst.proc.returncode)
                 recent = [t for t in self.restarts.get(inst.username, []) if now - t < RESTART_WINDOW_S]
@@ -272,7 +393,8 @@ class InstanceManager:
                     continue
                 inst.stopping = True
                 del self.instances[inst.username]
-            self._terminate(inst.proc)
+            self._terminate(inst.proc, self._grace())
+            mark_active(inst.home, False)
             self._log("instance stopped", inst.username, reason="idle")
 
     def status(self) -> list[dict]:

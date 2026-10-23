@@ -28,6 +28,8 @@ import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import reliability
+
 _SDK_NAMES = ("AssistantMessage", "ClaudeAgentOptions", "ClaudeSDKClient", "PermissionResultAllow", "PermissionResultDeny",
               "RateLimitEvent", "ResultMessage", "TextBlock", "ToolResultBlock", "ToolUseBlock", "UserMessage", "query")
 _sdk_lock = threading.Lock()
@@ -215,6 +217,8 @@ budget_usd = 5.0
 enabled = true
 interval_s = 30
 retry_crashed = 1
+run_timeout_min = 720     # kill a run (and its git / claude children) that is older than this; 0 = never
+min_free_gb = 1.0         # no run starts with less free disk space
 
 # Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
 [chat.planner]
@@ -1034,7 +1038,9 @@ class Store:
     def log(self, msg: str) -> None:
         line = f"[{dt.datetime.now():%m-%d %H:%M:%S}] {msg}"
         print(line, flush=True)
-        with self.p.path("agentdesk.log").open("a", encoding="utf-8") as f:
+        lf = self.p.path("agentdesk.log")
+        reliability.rotate(lf)
+        with lf.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
 
     def load(self) -> dict:
@@ -1945,6 +1951,9 @@ def ensure_worktree(p: Project, store: Store, task: Task) -> Path:
     wt = Path(p.cfg["repo"]["worktrees"]) / task.id
     if wt.exists():
         return wt
+    why = worktree_cap_reason(p, task.id)
+    if why:
+        raise RuntimeError(why)
     branch, base = f"auto/{task.id}", p.cfg["repo"]["base"]
     state = store.load()
     for dep in task.depends:
@@ -2016,7 +2025,8 @@ def run_gates(p: Project, store: Store, wt: Path, kind: str, crates: list[str] |
 # ----------------------------------------------------------------------------- auto-runner (pure logic; the loop is in server.py)
 
 NL = chr(10)
-AUTO_DEFAULTS = {"enabled": True, "interval_s": 30, "retry_crashed": 1}
+# run_timeout_min: a run older than this is killed with all its children (0 = never); min_free_gb: no run starts below it.
+AUTO_DEFAULTS = {"enabled": True, "interval_s": 30, "retry_crashed": 1, "run_timeout_min": 720, "min_free_gb": 1.0}
 
 
 def autorunner_cfg(p: Project | None = None, global_cfg: dict | None = None, project_cfg: dict | None = None) -> dict:
@@ -2027,13 +2037,124 @@ def autorunner_cfg(p: Project | None = None, global_cfg: dict | None = None, pro
     out["enabled"] = bool(out["enabled"])
     out["interval_s"] = max(5, int(out["interval_s"]))
     out["retry_crashed"] = max(0, int(out["retry_crashed"]))
+    out["run_timeout_min"] = max(0, int(out["run_timeout_min"]))
+    out["min_free_gb"] = max(0.0, float(out["min_free_gb"]))
     return out
 
 
+SERVER_POLICY = "server-policy.json"
+_POLICY: dict = {"key": None, "data": {}}
+
+
+def server_policy() -> dict:
+    """`<data>/server-policy.json`, written by the AgentDesk Server gateway for this user's instance ({} on the
+    desktop): the server's [hygiene] defaults, the disk gate (refuse new runs / clones / imports when the server is
+    at its hard limit or the user over quota), environment for the shared package caches, clone options and the
+    upload limit. Re-read when the file changes."""
+    f = DATA / SERVER_POLICY
+    try:
+        st = f.stat()
+    except OSError:
+        return {}
+    key = (st.st_mtime_ns, st.st_size)
+    if _POLICY["key"] != key:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        _POLICY.update(key=key, data=data if isinstance(data, dict) else {})
+    return _POLICY["data"]
+
+
+def disk_gate() -> str | None:
+    """Why new runs, clones, imports and uploads are refused right now (server disk budget / user quota), or None.
+    Running work is never stopped by it. A gate the gateway stopped refreshing (`until` passed) no longer counts."""
+    g = server_policy().get("gate") or {}
+    if not isinstance(g, dict) or not g.get("refuse"):
+        return None
+    try:
+        if float(g.get("until") or 0) and float(g["until"]) < time.time():
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(g.get("reason") or "the server's disk budget is used up")
+
+
+def policy_env(p: "Project | None" = None) -> dict[str, str]:
+    """Extra environment for runs on a server: the shared package caches, and with a shared target dir a per-user
+    CARGO_TARGET_DIR per project (only when the project does not set its own in [gates.env])."""
+    pol = server_policy()
+    env = {str(k): str(v) for k, v in pol["env"].items()} if isinstance(pol.get("env"), dict) else {}
+    st = pol.get("shared_target_dir")
+    if p is not None and st and not ((p.cfg.get("gates") or {}).get("env") or {}).get("CARGO_TARGET_DIR"):
+        env["CARGO_TARGET_DIR"] = str(Path(str(st)) / p.slug / "target")
+    return env
+
+
+def clone_options() -> list[str]:
+    """`git clone` options from the server policy: --depth N (clone_depth) and --filter=blob:none (partial_clone)."""
+    g = server_policy().get("git") or {}
+    out: list[str] = []
+    try:
+        depth = int(g.get("clone_depth") or 0)
+    except (TypeError, ValueError):
+        depth = 0
+    if depth > 0:
+        out += ["--depth", str(depth), "--no-single-branch"]
+    if g.get("partial_clone"):
+        out.append("--filter=blob:none")
+    return out
+
+
+def worktree_cap_reason(p: "Project", task_id: str) -> str | None:
+    """Why no new worktree may be made for `task_id` ([hygiene] max_worktrees reached), or None."""
+    cap = int(hygiene_cfg(p)["max_worktrees"])
+    raw = str((p.cfg.get("repo") or {}).get("worktrees") or "")
+    if cap <= 0 or not raw:
+        return None
+    root = Path(raw)
+    if (root / task_id).exists() or not root.is_dir():
+        return None
+    try:
+        n = sum(1 for d in root.iterdir() if d.is_dir() and not d.is_symlink() and d.name != COWORK)
+    except OSError:
+        return None
+    if n >= cap:
+        return (f"the project already has {n} task worktrees (limit [hygiene] max_worktrees = {cap}); disk hygiene "
+                "removes finished ones, then the next task starts")
+    return None
+
+
+def large_files(wt: Path, base: str, limit_mb: float) -> list[tuple[str, int]]:
+    """Files added or changed on this branch (since `base`) that are larger than limit_mb: [(path, bytes)]."""
+    if limit_mb <= 0:
+        return []
+    code, out = git(["diff", "--name-only", "--diff-filter=AM", "-z", f"{base}...HEAD"], wt)
+    names = [n for n in out.split("\0") if n.strip()][:2000] if code == 0 else []
+    if not names:
+        return []
+    code, out = git(["ls-tree", "-r", "-l", "-z", "HEAD", "--", *names], wt)
+    rows = []
+    for rec in out.split("\0") if code == 0 else []:
+        meta, _, path = rec.partition("\t")
+        parts = meta.split()
+        if len(parts) == 4 and parts[3].isdigit() and int(parts[3]) > limit_mb * 1024 * 1024:
+            rows.append((path, int(parts[3])))
+    return sorted(rows, key=lambda r: -r[1])
+
+
 HYGIENE_DEFAULTS = {"enabled": True, "auto": False, "max_target_gb": 60.0, "max_total_gb": 150.0, "stale_days": 3.0,
-                    "max_runs_mb": 200.0, "max_log_mb": 20.0, "interval_min": 30.0, "target_dirs": []}
+                    "max_runs_mb": 200.0, "max_log_mb": 20.0, "interval_min": 30.0, "target_dirs": [],
+                    "artifacts": False,          # also clean other build kinds (node_modules, venvs, dist ...): server on
+                    "worktree_ttl_hours": 0.0,   # >0: worktrees of done tasks idle this long are removed (branch kept)
+                    "max_worktrees": 0.0,        # >0: at most this many task worktrees per project (cowork not counted)
+                    "git_gc_hours": 0.0,         # >0: `git gc --auto` at most this often, off-peak, never during a run
+                    "offpeak_hours": "",         # "01-06": local hours in which git gc may run ("" = any time)
+                    "large_file_mb": 0.0}        # >0: the task report warns about committed files above this size
 _HYGIENE_RANGE = {"max_target_gb": (0.1, 100000.0), "max_total_gb": (0.1, 100000.0), "stale_days": (0.0, 3650.0),
-                  "max_runs_mb": (1.0, 1e6), "max_log_mb": (1.0, 1e5), "interval_min": (5.0, 10080.0)}
+                  "max_runs_mb": (1.0, 1e6), "max_log_mb": (1.0, 1e5), "interval_min": (5.0, 10080.0),
+                  "worktree_ttl_hours": (0.0, 1e5), "max_worktrees": (0.0, 1000.0), "git_gc_hours": (0.0, 1e5),
+                  "large_file_mb": (0.0, 1e6)}
 
 
 def _hygiene_value(key: str, v) -> tuple[bool, object]:
@@ -2045,6 +2166,10 @@ def _hygiene_value(key: str, v) -> tuple[bool, object]:
         if isinstance(v, list) and all(isinstance(x, str) and x.strip() for x in v):
             return True, [x.strip() for x in v]
         return False, "expected a list of folder paths"
+    if isinstance(d, str):
+        if isinstance(v, str) and (not v.strip() or re.fullmatch(r"\s*\d{1,2}\s*-\s*\d{1,2}\s*", v)):
+            return True, v.strip()
+        return False, 'expected hours like "01-06" (or "")'
     if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
         return False, "expected a number"
     lo, hi = _HYGIENE_RANGE[key]
@@ -2053,10 +2178,14 @@ def _hygiene_value(key: str, v) -> tuple[bool, object]:
     return True, float(v)
 
 
-def hygiene_cfg(p: Project | None = None, global_cfg: dict | None = None, project_cfg: dict | None = None) -> dict:
-    """Effective disk-hygiene settings: code defaults < settings.toml [hygiene] < project.toml [hygiene]. Never raises:
-    a bad or unknown value is ignored (the one below it stays) and described in `errors` (logged by the hygiene loop)."""
+def hygiene_cfg(p: Project | None = None, global_cfg: dict | None = None, project_cfg: dict | None = None,
+                server_cfg: dict | None = None) -> dict:
+    """Effective disk-hygiene settings: code defaults < settings.toml [hygiene] < the server policy's [hygiene]
+    (AgentDesk Server only: the admin's defaults, build cleanup on) < project.toml [hygiene]. Never raises: a bad or
+    unknown value is ignored (the one below it stays) and described in `errors` (logged by the hygiene loop)."""
     errors: list[str] = []
+    if server_cfg is None and global_cfg is None:
+        server_cfg = server_policy().get("hygiene") or {}
     if global_cfg is None:
         try:
             global_cfg = settings().get("hygiene", {})
@@ -2065,7 +2194,10 @@ def hygiene_cfg(p: Project | None = None, global_cfg: dict | None = None, projec
     if project_cfg is None:
         project_cfg = (p.cfg.get("hygiene", {}) if isinstance(p.cfg, dict) else {}) if p is not None else {}
     out = copy.deepcopy(HYGIENE_DEFAULTS)
-    for where, src in (("settings.toml", global_cfg), ("project.toml", project_cfg)):
+    layers = [("settings.toml", global_cfg), ("project.toml", project_cfg)]
+    if server_cfg:  # AgentDesk Server: the admin's policy (build cleanup on) beats the user's settings.toml
+        layers.insert(1, ("server policy", server_cfg))
+    for where, src in layers:
         if not isinstance(src, dict):
             errors.append(f"{where}: [hygiene] is not a table; ignored")
             continue
@@ -2694,6 +2826,20 @@ def keep_notes(p: Project, task: Task, summary: str) -> None:
             f.write(f"- ({task.id}) {l}\n")
 
 
+def large_files_note(p: Project, store: Store, task: Task, wt: Path, entry: dict) -> str:
+    """The report's warning about large files the agent committed ([hygiene] large_file_mb), "" if none."""
+    try:
+        big = large_files(wt, p.cfg["repo"]["base"], float(hygiene_cfg(p)["large_file_mb"]))
+    except Exception:  # a warning must never fail a finished task
+        return ""
+    if not big:
+        return ""
+    entry["large_files"] = [{"path": n, "bytes": b} for n, b in big[:20]]
+    store.log(f"{task.id}: WARNING: {len(big)} large file(s) committed: " + ", ".join(n for n, _ in big[:5]))
+    return ("## Warning: large files committed\n\n" + "".join(f"- `{n}` ({b / 1048576:.1f} MB)\n" for n, b in big[:20])
+            + "\nLarge files bloat the repository and every clone for good; remove them or use Git LFS.\n\n")
+
+
 def ready(task: Task, state: dict) -> bool:
     if state["tasks"].get(task.id, {}).get("status") in ("done", "blocked"):
         return False
@@ -2720,9 +2866,10 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
             sha = commit(p, task, wt, " → ".join(tried))
             keep_notes(p, task, summary)
             entry.update(status="done", commit=sha, branch=f"auto/{task.id}", finished=dt.datetime.now().isoformat(timespec="seconds"))
+            warn = large_files_note(p, store, task, wt, entry)
             p.path("reports").mkdir(exist_ok=True)
             p.path("reports").joinpath(f"{task.id}.md").write_text(
-                f"# {task.id}: {task.title}\n\nBranch `auto/{task.id}` at {sha}; tiers {' → '.join(tried)}.\n\n## Brief\n\n{plan['brief']}\n\n"
+                f"# {task.id}: {task.title}\n\nBranch `auto/{task.id}` at {sha}; tiers {' → '.join(tried)}.\n\n{warn}## Brief\n\n{plan['brief']}\n\n"
                 f"## Worker summary\n\n{summary}\n", encoding="utf-8")
             store.save(state)
             store.log(f"{task.id}: done at {sha}")
@@ -3165,7 +3312,8 @@ def clone_for_import(url: str, into: Path | None = None, branch: str | None = No
     imports = DATA / "imports"
     imports.mkdir(parents=True, exist_ok=True)
     dest = into or Path(tempfile.mkdtemp(prefix="agentdesk-import-", dir=imports))
-    code, out = run(["git", "clone", *(["--branch", branch] if branch else []), "--", url, str(dest)], imports, env={"GIT_TERMINAL_PROMPT": "0"}, timeout=600)
+    code, out = run(["git", "clone", *clone_options(), *(["--branch", branch] if branch else []), "--", url, str(dest)], imports,
+                    env={"GIT_TERMINAL_PROMPT": "0"}, timeout=600)
     if code != 0:
         raise BadExport(f"git clone failed: {out.strip()}")
     return dest

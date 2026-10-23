@@ -6,7 +6,50 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
-- Headless server mode: `python -m agentdesk serve` (also `agentdesk-server`) runs the dashboard with no window, tray or
+- Two products, one core: the desktop **App** and the headless **Server** are built independently (README, "Two products").
+  `pyproject.toml` dependencies are the core only, with extras `app` (pywebview, tray) and `server`; new
+  `requirements-core.txt`. `agentdesk.spec` leaves the gateway / server code out of `AgentDesk.exe`; the `.deb` leaves out
+  GUI icons and GUI packages. `release.ps1 -Target app|server|both`. A test imports serve, the gateway and the console tool
+  with every GUI module blocked.
+- Server disk budget (docs/SERVER.md, "Disk budget"): `disk_total_gb` (512), `disk_reserve_gb` (40), soft limit
+  (80 %: warn + automatic cleanup) and hard limit (92 %: new runs, clones, imports and uploads are refused with the
+  reason; running work goes on), measured by a background, cached walker plus the real file-system usage.
+  Per-user quotas (`quota_gb`, overridden per user in the admin cabinet or `agentdesk-server user quota NAME GB`):
+  over quota, that user's new runs / clones are refused and their data is cleaned first. Usage bars in the dashboard
+  bar and the cabinet; a new **Storage** tab (totals, sortable per-user table with top consumers, per project, per
+  cache, the dry-run list of the next cleanup, "Clean now"); `agentdesk-server storage`, `clean [--dry-run]`;
+  `doctor` warns above the soft limit. Every automatic deletion is in `audit.log`.
+- Disk hygiene: a registry of build kinds (cargo, node_modules with a lockfile, Python venvs and caches, dist / build,
+  gradle, maven) cleaned by age and per-project size cap, only when git-ignored and untracked; worktrees of done tasks
+  removed after `worktree_ttl_hours` (branch kept); `max_worktrees` per project (the next task waits); half-created
+  worktrees removed; scheduled off-peak `git gc --auto`; a report warning for large committed files. On the server
+  these are on by default (desktop unchanged).
+- Shared package caches on the server: npm, pip, uv, go modules, cargo registry / git and gradle modules in
+  `<server-home>/cache/<tool>`, each with a size cap and LRU / age pruning, optional hard-link dedupe; optional per-user
+  shared `CARGO_TARGET_DIR` per project. Clones from a URL can be shallow (`clone_depth`) or partial (`partial_clone`);
+  `max_upload_mb`; import / upload temp files are removed after use and swept after 24 h.
+- Server reliability (docs/SERVER.md): systemd `Type=notify` with `WatchdogSec=60`, `Restart=always`, unlimited start
+  retries, enabled at install; the gateway and instances send `READY=1` and `WATCHDOG=1` (pure Python, no-op outside
+  systemd) and ping only while a self-check passes (loopback `/gateway/health`, user store readable, disk not full), so
+  a hung server is restarted. `/gateway/health` returns JSON (ok, version, instances up / down); `agentdesk-server
+  status` and `doctor` show it.
+- Crash / boot recovery at gateway and instance start: stale pid files (dead process or reused pid), orphan children of
+  dead runs, tasks left `working`, orphan and half-created worktrees; a chat cut off mid-turn shows "interrupted by a
+  restart". `autostart_instances` (default on) restarts the instances of users who were active before a reboot so
+  their auto-runner continues the queue.
+- Guards: `[autorunner] run_timeout_min` kills a run and its children after a hard timeout, `min_free_gb` refuses to
+  start runs on a nearly full disk; graceful SIGTERM shutdown (`shutdown_grace_seconds`); size-based rotation of
+  `audit.log`, `agentdesk.log`, `runner.log` and instance logs (`log_max_mb`, `log_keep`).
+- Console admin tool `agentdesk-server` (also `python -m agentdesk server ...`, stdlib only, works over SSH): `init`
+  (server home, `server.toml` with defaults, first admin interactively or `--admin-password-file`), `user
+  add|list|passwd|disable|enable|delete`, `status`, `config get|set` (host, port, tls, idle_timeout, run_as_users, ...) and
+  `doctor` (git, claude CLI and login, port, permissions, disk). The headless `serve` command is now `agentdesk-serve`.
+- Debian package `agentdesk-server_<version>_all.deb` (`python3 packaging/debian/build_deb.py`, attached to releases by
+  CI): virtualenv in `/opt/agentdesk-server` created by the postinst, system user `agentdesk`, state in
+  `/var/lib/agentdesk-server`, settings in `/etc/agentdesk-server/server.toml` (`AGENTDESK_SERVER_CONFIG` overrides the
+  location), systemd unit `agentdesk-server.service` (hardened, logs in the journal), nginx / Caddy TLS examples. No
+  pywebview or pystray on the server. README: "Server (Debian, headless)".
+- Headless server mode: `python -m agentdesk serve` (also `agentdesk-serve`) runs the dashboard with no window, tray or
   browser, on Linux without a display. Options: `--host`, `--port` (0 = free port), `--data` (sets AGENTDESK_HOME),
   `--allowed-host`, `--pid-file`; logs to stdout; SIGTERM / SIGINT shut it down cleanly.
 - Binding a non-loopback address needs `--auth-token-file`: every request must then carry the secret in the
@@ -21,6 +64,23 @@ them under the new version number, tags it and builds the installer (see README,
   `users.json`); sign-ins and user changes go to `audit.log`. Optional HTTPS (`tls_cert`, `tls_key`) and optional
   separate OS accounts per user (`run_as_users`, see README).
 - `GET /api/busy` on the dashboard: whether a run, chat turn or build is in progress.
+- Gateway admin cabinet at `/admin` (admins only; a normal user gets 403 on every route): create, disable/enable, delete
+  (the data folder is kept unless a separate box is ticked) and reset the password of users; per-user projects with size
+  on disk, add from a git URL (cloned on the server) or an exported .zip, remove; Claude accounts (API key by the name
+  of an environment variable, or a config folder) assigned to users, keys are never shown; instance status, start /
+  stop / restart and log tail; server health (free disk, version); audit log viewer. Every user can change their own
+  password at `/account`. The dashboard pages get a small "Admin / Account / Sign out" bar from the gateway.
+
+### Security
+- Gateway hardening: an instance gets only the Claude accounts assigned to its user (written to its `settings.toml` at
+  every start; the key variables of other accounts, and the gateway's own `ANTHROPIC_API_KEY` /
+  `ANTHROPIC_AUTH_TOKEN` / `CLAUDE_CODE_OAUTH_TOKEN` unless an assigned account names them, are removed from its
+  environment); project assignments only name projects that exist in the user's home (checked on assign, stale ones
+  dropped when a project is removed and at every instance start); POSIX permissions (`users/<name>` 0700, `users.json`, `accounts.json`,
+  `audit.log`, token files 0600); `users.json` changes take a cross-process file lock (CLI + gateway); a new instance is
+  only used after its process is alive and the listener answers an authenticated `/api/busy` (otherwise it is killed and
+  another port is tried); the login throttle (and the current-password check on `/account`) reserves each attempt atomically, so parallel
+  guesses can't exceed the limit; a right password on the last allowed attempt no longer leaves a lockout behind.
 
 ### Changed
 - The dashboard checks the Host header of every request and the Origin of every POST against a configurable list

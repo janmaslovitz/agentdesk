@@ -155,7 +155,7 @@ def test_release_workflow():
     assert on["push"]["tags"] == ["v*"] and "tag" in on["workflow_dispatch"]["inputs"]
     jobs = wf["jobs"]
     assert set(jobs["build"]["strategy"]["matrix"]["os"]) == {"ubuntu-22.04", "macos-latest", "windows-latest"}
-    assert jobs["build"]["needs"] == "release" and jobs["release"]["needs"] == "test" and jobs["publish"]["needs"] == "build"
+    assert jobs["build"]["needs"] == "release" and jobs["release"]["needs"] == "test" and jobs["publish"]["needs"] == ["build", "deb"]
     tests = [s["run"] for j in jobs.values() for s in j["steps"] if "pytest" in s.get("run", "") and "pip install" not in s["run"]]
     assert len(tests) == 1 and "pytest" in tests[0] and jobs["test"]["runs-on"] == "ubuntu-22.04"  # the tests run once
     for j in jobs.values():

@@ -44,6 +44,8 @@ class H(BaseHTTPRequestHandler):
             return
         if self.path == "/api/busy":
             return self.reply(200, json.dumps({"busy": (DATA / "busy").exists()}).encode(), "application/json")
+        if self.path == "/page":
+            return self.reply(200, b"<html><body>fake page</body></html>", "text/html")
         if self.path == "/whoami":
             return self.reply(200, str(DATA).encode(), "text/plain")
         if self.path == "/headers":

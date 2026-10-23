@@ -4,6 +4,22 @@ Delegates coding tasks to Claude agents, choosing the cheapest model that can do
 across any number of projects and Claude accounts, with a dashboard to follow progress and spend
 and a chat to talk to.
 
+## Two products
+
+AgentDesk ships as two products that share one core and one version number:
+
+| | **App** (desktop) | **Server** (headless) |
+|---|---|---|
+| For | one person on their own computer | several people on a LAN, one Linux machine |
+| Has | window, tray, `AgentDesk.exe` + installer | login gateway, per-user instances, console tool, systemd |
+| Download | `AgentDesk-Setup-x.y.z.exe` (macOS / Linux archives too) | `agentdesk-server_x.y.z_all.deb` |
+| Build | `build_exe.ps1` / `build_installer.ps1` (`agentdesk.spec`) | `packaging/debian/build_deb.py` |
+| Python extra | `pip install ".[app]"` (pywebview, tray) | `pip install ".[server]"` (core only, no GUI libraries) |
+
+Pick the App to work alone; pick the Server to give a team browser access. They never need each other: the App build
+leaves out the gateway and server code, the `.deb` leaves out the GUI code and libraries. `release.ps1 -Target app|server|both`
+builds one or both. `pip install .` installs the core only. Details for the Server: [Server (Debian, headless)](#server-debian-headless).
+
 ## Downloads
 
 Every release on the [Releases page](https://github.com/janmaslovitz/agentdesk/releases/latest) has ready-made builds
@@ -395,6 +411,12 @@ gateway's own origin or carry the session's CSRF token (`X-AgentDesk-CSRF`, from
 `login_max_failures` wrong passwords for one user from one address (or many from one address) that pair is locked for
 `login_lockout_minutes`.
 
+**Admin cabinet.** Admins open `/admin` (link "Admin" in the bar the gateway adds to every page): users, per-user projects
+(git URL or exported .zip), Claude accounts, instances (start / stop / restart, log tail, disk free) and the audit log.
+Accounts are kept in `<server-home>/accounts.json` and written to the assigned user's `settings.toml`; an API-key account
+only names the environment variable holding the key (set it where the gateway runs). Everyone changes their own password
+at `/account`.
+
 **HTTPS:** set `tls_cert` and `tls_key` (PEM files) in server.toml. Without TLS, passwords cross the LAN unencrypted.
 
 **Separate OS accounts (optional, Linux).** Without it every instance runs as the gateway's OS user, so the agents of one
@@ -408,6 +430,72 @@ user could read another user's files on disk; the gateway itself never lets one 
    `agentdesk ALL=(%agentdesk-users) NOPASSWD: /usr/bin/python3 -m agentdesk serve *` (put the accounts in group
    `agentdesk-users`, or list them). The gateway runs `sudo -n -u agentdesk-<username> -- python -m agentdesk serve ...`.
 4. Or set `run_as = "systemd-run"` when the gateway runs as root: it uses `systemd-run --pipe --uid=agentdesk-<username>`.
+
+## Server (Debian, headless)
+
+For a Debian / Ubuntu machine without a desktop (needs Python 3.11+, systemd). The `.deb` from the GitHub Release
+installs the gateway of the previous section as a service, with the console tool `agentdesk-server`.
+
+**Install.**
+
+```
+sudo apt install ./agentdesk-server_X.Y.Z_all.deb      # pulls python3, python3-venv, git; postinst builds /opt/agentdesk-server/venv
+sudo apt install nodejs npm && sudo npm install -g @anthropic-ai/claude-code   # the claude CLI (not packaged)
+sudo -u agentdesk -H claude                             # sign in once (or use API-key accounts in /admin)
+```
+
+The postinst installs the Python packages with pip (internet needed; build the package with `--bundle-wheels` on the
+same distro for an offline install). Layout: program `/opt/agentdesk-server`, settings `/etc/agentdesk-server/server.toml`,
+state `/var/lib/agentdesk-server` (user `agentdesk`), logs `journalctl -u agentdesk-server`. To build the package yourself:
+`python3 packaging/debian/build_deb.py` (on Debian / Ubuntu, needs `dpkg-deb`) writes `dist/agentdesk-server_X.Y.Z_all.deb`.
+
+**Init and first login.**
+
+```
+sudo agentdesk-server init                       # creates server.toml and the first admin (asks for the password)
+sudo agentdesk-server init --admin alice --admin-password-file /root/pw   # unattended
+sudo systemctl enable --now agentdesk-server
+sudo agentdesk-server doctor                     # git, claude CLI + login, port, permissions, disk
+```
+
+Open `http://<server>:8080/`, sign in as the admin. Everything below works over SSH too:
+`agentdesk-server status`, `user add NAME [--admin] | list | passwd NAME | disable NAME | enable NAME | delete NAME [--purge]`,
+`config get [KEY]`, `config set host|port|idle_timeout|run_as_users|tls ...` (`config set tls CERT KEY`, `config set tls off`;
+restart the service afterwards). Passwords are asked on the terminal or read from a file, never taken as arguments.
+
+**Adding users and projects.** Add users with `agentdesk-server user add bob` or in the admin cabinet (`/admin`), which also
+adds projects to a user (git URL cloned on the server, or an exported zip) and assigns Claude accounts. Each user gets an
+own AgentDesk with its own data folder `/var/lib/agentdesk-server/users/<name>/`.
+
+**Updating.** `sudo apt install ./agentdesk-server_NEW_all.deb`: settings and state are kept, the service is restarted.
+Users' running instances stop with it (runs in progress are interrupted), so update when nobody is working.
+
+**Backup.** Stop the service (or accept a slightly inconsistent copy) and copy `/var/lib/agentdesk-server` (users.json
+with password hashes, project data, audit log, the Claude login in `home/`) and `/etc/agentdesk-server/server.toml`, e.g.
+`sudo systemctl stop agentdesk-server && sudo tar czf agentdesk-backup.tgz /var/lib/agentdesk-server /etc/agentdesk-server && sudo systemctl start agentdesk-server`.
+Keep the archive private: it holds credentials. Restore by unpacking it over the same paths.
+
+**Security.**
+- LAN only. The gateway listens on `0.0.0.0:8080` by default; never forward the port or expose the server to the public
+  internet. Limit it with the firewall, e.g. `sudo ufw allow from 192.168.1.0/24 to any port 8080 proto tcp`.
+- Put TLS in front: without it passwords cross the LAN in clear text. Either `agentdesk-server config set tls CERT KEY`, or
+  nginx / Caddy as a reverse proxy (examples in `/usr/share/doc/agentdesk-server/`: `nginx-agentdesk.conf.example`,
+  `Caddyfile.example`), then `agentdesk-server config set host 127.0.0.1` so only the proxy can reach the gateway.
+- The agents run code and shell commands as the OS user `agentdesk`; all users share that account unless you enable
+  `run_as_users` (see above; edit the unit with `systemctl edit agentdesk-server` and set `NoNewPrivileges=false`, since sudo
+  needs it). The unit is hardened (`ProtectSystem=full`, `ProtectHome=true`, `PrivateTmp`, `NoNewPrivileges`): repositories
+  outside `/var/lib/agentdesk-server` need `ReadWritePaths=` in a drop-in.
+- Use strong passwords; repeated wrong passwords lock the user and address for a while (see above).
+
+**Troubleshooting.**
+- `sudo agentdesk-server doctor` first; then `journalctl -u agentdesk-server -e` and `systemctl status agentdesk-server`.
+- *Packages missing / service fails to import*: the postinst could not reach PyPI. Run `sudo apt install --reinstall ./agentdesk-server_*.deb`.
+- *Page does not load from another computer*: firewall, or `host` is `127.0.0.1` (`agentdesk-server config get host`);
+  behind a proxy set `allowed_hosts` to the name users type.
+- *"claude not found" / not signed in*: install the CLI, then `sudo -u agentdesk -H claude`; the service's `PATH` must contain it
+  (`/usr/bin` or `/usr/local/bin` do).
+- *Port in use*: `agentdesk-server config set port 8081` and restart.
+- *Forgot the admin password*: `sudo agentdesk-server user passwd NAME`.
 
 ## Command line
 

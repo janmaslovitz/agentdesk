@@ -12,6 +12,8 @@ import hmac
 import json
 import os
 import re
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -24,7 +26,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, hygiene
+from . import core, hygiene, reliability
 
 _SDK_NAMES = ('AgentDefinition', 'AssistantMessage', 'ClaudeSDKClient', 'HookMatcher', 'PermissionResultAllow', 'PermissionResultDeny', 'RateLimitEvent', 'ResultMessage', 'SystemMessage', 'TaskNotificationMessage', 'TaskStartedMessage', 'TextBlock', 'ToolResultBlock', 'ToolUseBlock', 'UserMessage', 'create_sdk_mcp_server')
 
@@ -66,8 +68,21 @@ class Runner:
     def start(self, args: list[str]) -> str | None:
         if self.running():
             return "a run is already going for this project"
+        gate = core.disk_gate()
+        if gate:  # the server's disk budget / this user's quota (running work is never stopped by it)
+            core.Store(self.p).log(f"DISK BUDGET: not starting a run for {self.p.slug}: {gate}")
+            return f"not starting: {gate}"
+        cfg = core.autorunner_cfg(self.p)
+        for where in {str(core.DATA), str(self.p.cfg.get("repo", {}).get("worktrees") or core.DATA)}:
+            ok, why = reliability.disk_ok(where, cfg["min_free_gb"])
+            if not ok:  # a full disk wrecks half-written state: refuse loudly instead
+                msg = f"DISK FULL: not starting a run for {self.p.slug}: {why} on {where}"
+                core.Store(self.p).log(msg)
+                print(msg, file=sys.stderr, flush=True)
+                return f"not enough free disk space ({why}); free some space and try again"
+        reliability.rotate(self.p.path("runner.log"))
         out = self.p.path("runner.log").open("a", encoding="utf-8")
-        env = {**os.environ, "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "AGENTDESK_HOME": str(core.DATA)}
+        env = {**os.environ, **core.policy_env(self.p), "PYTHONUTF8": "1", "PYTHONUNBUFFERED": "1", "AGENTDESK_HOME": str(core.DATA)}
         # Detach from the dashboard's console/session so the run outlives the dashboard and its window.
         if sys.platform == "win32":
             kw: dict = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW}
@@ -1846,6 +1861,19 @@ def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
     t = core.next_startable(tasks, state, running, cfg["retry_crashed"])
     if t is None:
         return did
+    cap = core.worktree_cap_reason(p, t.id)
+    if cap:  # [hygiene] max_worktrees: wait until disk hygiene has removed a finished worktree
+        if f"cap|{cap}" not in seen:
+            seen.add(f"cap|{cap}")
+            store.log(f"auto-runner: {t.id} waits: {cap}")
+        return did
+    gate = core.disk_gate()
+    if gate:  # the server's disk budget / quota: logged once, retried every pass
+        if f"gate|{gate}" not in seen:
+            seen.add(f"gate|{gate}")
+            store.log(f"auto-runner: {t.id} waits: {gate}")
+        return did
+    seen.difference_update({k for k in seen if k.startswith(("cap|", "gate|"))})
     again = int(state["tasks"].get(t.id, {}).get("crashes", 0)) > 0
     err = starter(p, run_args(p, "task", t.id) or [])
     if err:
@@ -1883,6 +1911,166 @@ def checkup_loop() -> None:
                     c.inject(CHECKUP_PROMPT, "⏱ Scheduled checkup")
         except Exception as e:
             log_error(f"checkups: {type(e).__name__}: {e}")
+
+
+# ----------------------------------------------------------------------------- crash / boot recovery, guards
+
+RUN_NAMES = ("agentdesk", "python", "run_agentdesk")  # what a live run's command line contains
+INTERRUPTED = "interrupted by a restart"
+
+
+def recover_project(p: core.Project, log=None) -> list[str]:
+    """After a crash or reboot (instance start): drop a stale runner.pid (dead process, or a reused pid), kill
+    children left behind by a dead run, put tasks that are `working` with no live run back to pending (counts as a
+    crash, so retry_crashed applies), prune orphan and half-created worktrees, and mark a chat that was mid-turn."""
+    log = log or log_error
+    did: list[str] = []
+    store = core.Store(p)
+    pidf = p.path("runner.pid")
+    try:
+        old_pid = int(pidf.read_text(encoding="utf-8").split()[0])
+    except (OSError, ValueError, IndexError):
+        old_pid = 0
+    if reliability.clean_pid_file(pidf, RUN_NAMES):
+        did.append("removed stale runner.pid")
+        if old_pid > 1 and not reliability.pid_alive(old_pid) and reliability.group_alive(old_pid):
+            reliability.kill_group(old_pid)  # git / claude children of a run whose parent died
+            did.append("killed orphan children of a dead run")
+    alive, code = run_alive(p)
+    state = store.load()
+    stale = core.recover_stale(state, alive, code)
+    if stale:
+        store.save(state)
+        for tid in stale:
+            did.append(f"task {tid} was working with no live run: set back to pending ({state['tasks'][tid]['last_failure']})")
+    if not alive:
+        did += prune_worktrees(p)
+    did += mark_interrupted_chat(p)
+    for line in did:
+        store.log(f"recovery: {line}")
+        log(f"recovery [{p.slug}]: {line}")
+    return did
+
+
+def prune_worktrees(p: core.Project) -> list[str]:
+    """`git worktree prune`, and remove worktree folders with no .git entry (an add that died half way)."""
+    did = []
+    repo = p.cfg.get("repo", {}).get("path")
+    if repo and Path(repo).is_dir():
+        core.git(["worktree", "prune"], Path(repo))
+    root = Path(p.cfg.get("repo", {}).get("worktrees") or "")
+    if root.is_dir():
+        for d in root.iterdir():
+            if d.is_dir() and not (d / ".git").exists():
+                shutil.rmtree(d, ignore_errors=True)
+                did.append(f"removed half-created worktree {d.name}")
+    return did
+
+
+def mark_interrupted_chat(p: core.Project) -> list[str]:
+    """A transcript that ends with the user's message or an unfinished answer gets an 'interrupted by a restart' note."""
+    f = p.path("chat.json")
+    try:
+        hist = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(hist, list) or not hist or not isinstance(hist[-1], dict):
+        return []
+    last = hist[-1]
+    mid = last.get("role") == "user" or (last.get("kind") in ("live", "progress") and last.get("cost") is None)
+    if not mid:
+        return []
+    seq = max([int(h.get("seq", 0)) for h in hist if isinstance(h, dict)] + [0]) + 1
+    hist.append({"role": "assistant", "kind": "interrupted", "text": "⚠ " + INTERRUPTED, "seq": seq})
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(hist, indent=2, ensure_ascii=False), encoding="utf-8")
+    core.replace_file(tmp, f)
+    return ["chat was mid-turn: marked as interrupted"]
+
+
+def recover_all(log=None) -> list[str]:
+    """Everything above for every project, plus the dashboard's own stale pid file."""
+    out = []
+    if reliability.clean_pid_file(pid_file(), RUN_NAMES):
+        out.append("removed stale dashboard.pid")
+    for p in core.projects():
+        try:
+            out += recover_project(p, log)
+        except Exception as e:  # one broken project must not keep the server from starting
+            (log or log_error)(f"recovery [{p.slug}] failed: {type(e).__name__}: {e}")
+    return out
+
+
+def run_age_s(p: core.Project) -> float | None:
+    try:
+        return time.time() - p.path("runner.pid").stat().st_mtime
+    except OSError:
+        return None
+
+
+def guard_pass() -> list[str]:
+    """Stuck-child guard (one pass): a run older than [autorunner] run_timeout_min is killed with its children.
+    Also rotates the runner logs. Returns what it did. (The tasks are then recovered as crashed.)"""
+    did = []
+    for p in core.projects():
+        reliability.rotate(p.path("runner.log"), copytruncate=True)
+        age = run_age_s(p)
+        limit = core.autorunner_cfg(p)["run_timeout_min"] * 60
+        if age is None or not limit or age <= limit:
+            continue
+        alive, _ = run_alive(p)
+        if not alive:
+            continue
+        r = runner(p)
+        if r.proc is not None and r.proc.poll() is None:
+            core.kill_tree(r.proc)
+        else:
+            try:
+                reliability.kill_group(int(p.path("runner.pid").read_text(encoding="utf-8").split()[0]))
+            except (OSError, ValueError, IndexError):
+                pass
+        msg = f"run exceeded the hard timeout ({limit // 60} min): killed with its children"
+        core.Store(p).log(f"guard: {msg}")
+        log_error(f"guard [{p.slug}]: {msg}")
+        did.append(f"{p.slug}: {msg}")
+    return did
+
+
+def guard_loop() -> None:
+    while not QUIT.wait(30):
+        try:
+            guard_pass()
+            reliability.rotate(core.DATA / "agentdesk.log", copytruncate=True)
+        except Exception as e:
+            log_error(f"guard: {type(e).__name__}: {e}")
+
+
+def shutdown_runs(grace_s: float = 20.0) -> list[str]:
+    """Graceful stop (SIGTERM of the service): ask every live run to end, wait up to grace_s, then kill the rest with
+    their children. Tasks left `working` are put back to pending by recover_project at the next start."""
+    pids = []
+    for p in core.projects():
+        alive, _ = run_alive(p)
+        if not alive:
+            continue
+        try:
+            pid = int(p.path("runner.pid").read_text(encoding="utf-8").split()[0])
+        except (OSError, ValueError, IndexError):
+            continue
+        if pid == os.getpid():
+            continue
+        pids.append(pid)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    deadline = time.monotonic() + grace_s
+    while pids and time.monotonic() < deadline and any(reliability.pid_alive(x) for x in pids):
+        time.sleep(0.2)
+    left = [x for x in pids if reliability.pid_alive(x)]
+    for x in left:
+        reliability.kill_group(x)
+    return [f"run pid {x} killed after {grace_s:.0f}s" for x in left]
 
 
 def autorun_loop() -> None:
@@ -2111,15 +2299,31 @@ class Handler(BaseHTTPRequestHandler):
         """Import a project: an uploaded .zip (raw body, options in the query), or JSON naming a zip/folder/repo
         (`source`) or a git URL to clone (`source_url`). Never overwrites: a taken name asks for a new one."""
         upload = None
+        cloned = None
+        gate = core.disk_gate()
+        if gate:  # the server's disk budget / this user's quota: no new clones, imports or uploads
+            if "zip" in (self.headers.get("Content-Type") or ""):
+                self.close_connection = True  # the upload body is not read
+            return {"ok": False, "disk_budget": True, "message": f"not importing: {gate}"}
         try:
             if not d and "zip" in (self.headers.get("Content-Type") or ""):
                 import tempfile
                 n = int(self.headers.get("Content-Length") or 0)
-                if n <= 0 or n > core.MAX_TOTAL_BYTES:
-                    return {"ok": False, "message": "the file is empty or too large"}
-                fd, tmp = tempfile.mkstemp(suffix=".zip")
+                limit = min(core.MAX_TOTAL_BYTES, int(float(core.server_policy().get("max_upload_mb") or 1e9) * 1024 * 1024))
+                if n <= 0 or n > limit:
+                    self.close_connection = True
+                    return {"ok": False, "message": f"the file is empty or too large (limit {limit // (1024 * 1024)} MB)"}
+                spool = core.DATA / "imports"  # swept by disk hygiene after 24 h if an import dies half way
+                spool.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(prefix="upload-", suffix=".zip", dir=spool)
                 with os.fdopen(fd, "wb") as f:
-                    f.write(self.rfile.read(n))
+                    left = n
+                    while left > 0:
+                        chunk = self.rfile.read(min(1 << 20, left))
+                        if not chunk:
+                            raise ValueError("the upload broke off")
+                        f.write(chunk)
+                        left -= len(chunk)
                 upload = Path(tmp)
                 d = query
             repo = str(d.get("repo") or "").strip()
@@ -2129,7 +2333,9 @@ class Handler(BaseHTTPRequestHandler):
                 if core.repo_state(repo) != "plain" or (Path(repo).exists() and any(Path(repo).iterdir())):
                     return {"ok": False, "message": f"{repo} already exists and is not empty; choose a new folder to clone into"}
                 core.clone_for_import(str(d["repo_url"]), Path(repo))
-            src = upload or (core.clone_for_import(str(d["source_url"]), None, str(d.get("source_branch") or "").strip() or None) if d.get("source_url") else Path(str(d.get("source") or "")))
+            if d.get("source_url") and not upload:
+                cloned = core.clone_for_import(str(d["source_url"]), None, str(d.get("source_branch") or "").strip() or None)
+            src = upload or cloned or Path(str(d.get("source") or ""))
             if not str(src):
                 return {"ok": False, "message": "choose an export file, folder or repository"}
             p = core.import_project(src, repo, str(d.get("new_name") or ""), str(d.get("account") or "") or None,
@@ -2142,6 +2348,8 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if upload:
                 upload.unlink(missing_ok=True)
+            if cloned is not None and hygiene.inside(cloned, core.DATA / "imports"):  # the temporary config-repo clone
+                hygiene.safe_delete(core.DATA / "imports", cloned)
 
     def guard(self, post: bool) -> bool:
         bad = GUARD.check(self.headers.get("Host"), self.headers.get("Origin"), self.headers.get(GATEWAY_HEADER), post)
@@ -2414,6 +2622,7 @@ def window_settings(save: dict | None = None) -> dict:
 def log_error(msg: str) -> None:
     print(msg, file=sys.stderr)
     try:
+        reliability.rotate(core.DATA / "agentdesk.log")
         with (core.DATA / "agentdesk.log").open("a", encoding="utf-8") as f:
             print(msg, file=f)
     except OSError:

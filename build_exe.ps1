@@ -1,6 +1,7 @@
 <#
-Builds dist\AgentDesk\AgentDesk.exe (PyInstaller, no Python needed to run it) and a Desktop shortcut "AgentDesk".
-  .\build_exe.ps1 [-NoDesktopShortcut]
+Builds the desktop App ONLY (product A): dist\AgentDesk\AgentDesk.exe (PyInstaller, no Python needed to run it) and,
+with -DesktopShortcut, a Desktop shortcut "AgentDesk". The headless Server is a separate product (packaging\debian/build_deb.py).
+  .\build_exe.ps1 [-DesktopShortcut]
 #>
 param([switch]$DesktopShortcut)
 $ErrorActionPreference = "Stop"
