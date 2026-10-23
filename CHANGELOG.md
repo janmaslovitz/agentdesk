@@ -8,6 +8,7 @@ them under the new version number, tags it and builds the installer (see README,
 ### Added
 - In-app updater: an "Update available" button checks GitHub Releases (once at start, cached 1 h; `[updates] check = false`
   in settings.toml disables it), downloads and verifies the installer and runs it silently. Installed build only.
+- Per-task tool-call stats (`tool_stats` in state.json: total, per tool, MCP calls per server; `runs_stats` per run with turns, cost, duration) and a "Tools:" line in `reports/<id>.md`, to measure how useful optional MCP servers are.
 
 
 ## 1.2.1 - 2026-10-22

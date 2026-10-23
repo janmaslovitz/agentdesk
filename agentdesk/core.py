@@ -2373,6 +2373,43 @@ ACTIVITY_KEY = {"start", "routed", "result", "check", "retry", "network_retry", 
 FILE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
 
+def new_tool_stats() -> dict:
+    return {"total": 0, "by_tool": {}, "mcp": {}}
+
+
+def count_tool(stats: dict, name: str) -> None:
+    """Count one tool call; `mcp__<server>__<tool>` calls are also grouped per server. Never raises."""
+    try:
+        stats["total"] += 1
+        stats["by_tool"][name] = stats["by_tool"].get(name, 0) + 1
+        if name.startswith("mcp__"):
+            server = name.split("__")[1] or "?"
+            stats["mcp"][server] = stats["mcp"].get(server, 0) + 1
+    except Exception:
+        pass
+
+
+def merge_tool_stats(entry: dict, run: dict) -> None:
+    """Add one run's stats into the task entry's `tool_stats` and append it to `runs_stats`."""
+    acc = entry.setdefault("tool_stats", new_tool_stats())
+    acc["total"] = acc.get("total", 0) + run["total"]
+    for key in ("by_tool", "mcp"):
+        d = acc.setdefault(key, {})
+        for k, v in run[key].items():
+            d[k] = d.get(k, 0) + v
+    entry.setdefault("runs_stats", []).append(run)
+
+
+def tools_line(stats: dict) -> str:
+    top = sorted(stats.get("by_tool", {}).items(), key=lambda kv: -kv[1])[:8]
+    line = f"Tools: {stats.get('total', 0)} calls"
+    if top:
+        line += " (" + ", ".join(f"{k} {v}" for k, v in top) + ")"
+    mcp = stats.get("mcp") or {}
+    line += "; MCP: " + (", ".join(f"{k} {v}" for k, v in sorted(mcp.items())) if mcp else "none")
+    return line
+
+
 def activity_path(p: Project, task_id: str) -> Path:
     return p.path("runs") / f"{task_id}.jsonl"
 
@@ -2385,6 +2422,11 @@ class Activity:
     def __init__(self, p: Project, task_id: str, role: str):
         self.path, self.role = activity_path(p, task_id), role
         self.calls: dict[str, str] = {}
+        self.stats = new_tool_stats()   # tool calls seen since the last take_stats()
+
+    def take_stats(self) -> dict:
+        s, self.stats = self.stats, new_tool_stats()
+        return s
 
     def add(self, kind: str, **fields) -> None:
         try:
@@ -2407,6 +2449,7 @@ class Activity:
                 elif isinstance(b, ToolUseBlock):
                     args = b.input or {}
                     self.calls[b.id] = b.name
+                    count_tool(self.stats, b.name)
                     path = args.get("file_path") or args.get("notebook_path")
                     self.add("tool", name=b.name, input=tool_summary(b.name, args),
                              file=str(path) if path and b.name in FILE_TOOLS else None)
@@ -2520,6 +2563,12 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                                                                  "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
                                                                  "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
                                                                  "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.used(before)})
+                            try:
+                                run = act.take_stats()
+                                run.update(turns=msg.num_turns, cost_usd=msg.total_cost_usd, duration_ms=msg.duration_ms, tier=tier, attempt=attempt)
+                                merge_tool_stats(entry, run)
+                            except Exception as e:  # stats must never break a run
+                                store.log(f"{task.id}: tool stats failed ({e})")
                             store.save(meter.state)
                     ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
                     gates = p.cfg.get("gates", {}).get("quick", [])
