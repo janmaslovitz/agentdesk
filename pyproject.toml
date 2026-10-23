@@ -5,9 +5,10 @@ requires-python = ">=3.11"
 
 [project.scripts]
 agentdesk-server = "agentdesk.serve:main"
+agentdesk-gateway = "agentdesk.gateway.cli:main"
 
 [tool.setuptools]
-packages = ["agentdesk"]
+packages = ["agentdesk", "agentdesk.gateway"]
 
 [tool.setuptools.dynamic]
 version = { attr = "agentdesk.__version__" }

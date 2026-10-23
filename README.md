@@ -357,6 +357,58 @@ GitHub Release of the tag. A missing release is created as a draft, with the not
 draft. To rebuild a tag, run the workflow by hand (Actions → Release → *Run workflow*, tag `vx.y.z`): existing assets
 are replaced. It uses only `GITHUB_TOKEN`; nothing is signed.
 
+## AgentDesk Server (several users)
+
+`python -m agentdesk serve` runs the dashboard without a window (`--host`, `--port`, `--data`, `--auth-token-file`).
+For several people on one machine, run the **gateway** in front of it:
+
+```
+python -m agentdesk gateway --home /srv/agentdesk user add alice --admin   # asks for the password
+python -m agentdesk gateway --home /srv/agentdesk user add bob
+python -m agentdesk gateway --home /srv/agentdesk                          # listens on 0.0.0.0:8080
+```
+
+Users open `http://<server>:8080`, sign in at `/login` (sign out at `/logout`) and get their own AgentDesk: the gateway
+starts `python -m agentdesk serve --host 127.0.0.1 --port <free port> --data <home>/users/<name>` for that user on first
+use, passes everything (API, chat, uploads, export zips, streamed answers) through to it with a per-instance secret in
+`X-AgentDesk-Gateway-Token`, restarts it if it dies and stops it after `idle_stop_minutes` without requests (never while a
+run, chat turn or build is going on: the gateway asks `GET /api/busy`). Instances listen on loopback only. Which instance
+a request reaches comes only from the server-side session, never from anything the browser sends.
+
+The server home (`--home`, else `AGENTDESK_SERVER_HOME`, else `~/agentdesk-server`) holds:
+
+```
+server.toml         settings (written with comments on first start): host, port, tls_cert/tls_key, allowed_hosts,
+                    session_hours, session_idle_minutes, login_max_failures, login_lockout_minutes, idle_stop_minutes,
+                    run_as_users, run_as
+users.json          users: role (admin|user), scrypt password hash (salted), disabled, created, home, projects, accounts
+users/<name>/       each user's AgentDesk data folder
+audit.log           sign-ins, failed sign-ins, lockouts, user changes, instance starts/stops (JSON lines; no passwords)
+instances/, logs/   per-instance secrets (0600) and instance output
+```
+
+Users: `user list | add NAME [--admin] | passwd NAME | disable NAME | enable NAME | remove NAME | role NAME admin|user |
+assign NAME --project SLUG --account NAME` (`--password-stdin` reads the password from standard input). A password change,
+disabling or removing a user ends that user's sessions. Sessions live in the gateway's memory (a restart signs everyone
+out); the cookie is HttpOnly and SameSite=Strict (and Secure with TLS). State-changing requests must come from the
+gateway's own origin or carry the session's CSRF token (`X-AgentDesk-CSRF`, from `GET /gateway/me`). After
+`login_max_failures` wrong passwords for one user from one address (or many from one address) that pair is locked for
+`login_lockout_minutes`.
+
+**HTTPS:** set `tls_cert` and `tls_key` (PEM files) in server.toml. Without TLS, passwords cross the LAN unencrypted.
+
+**Separate OS accounts (optional, Linux).** Without it every instance runs as the gateway's OS user, so the agents of one
+user could read another user's files on disk; the gateway itself never lets one user reach another's instance. With
+`run_as_users = true` each instance runs as OS user `agentdesk-<username>`, its secret is passed on standard input:
+
+1. Create the accounts: `sudo useradd --system --home-dir /srv/agentdesk/users/alice --shell /usr/sbin/nologin agentdesk-alice`,
+   then `sudo chown -R agentdesk-alice: /srv/agentdesk/users/alice && sudo chmod 700 /srv/agentdesk/users/alice`.
+2. The app folder (this repository) and Python must be readable by those accounts; each one needs its own Claude login.
+3. Let the gateway's user (say `agentdesk`) start them without a password, `/etc/sudoers.d/agentdesk`:
+   `agentdesk ALL=(%agentdesk-users) NOPASSWD: /usr/bin/python3 -m agentdesk serve *` (put the accounts in group
+   `agentdesk-users`, or list them). The gateway runs `sudo -n -u agentdesk-<username> -- python -m agentdesk serve ...`.
+4. Or set `run_as = "systemd-run"` when the gateway runs as root: it uses `systemd-run --pipe --uid=agentdesk-<username>`.
+
 ## Command line
 
 ```

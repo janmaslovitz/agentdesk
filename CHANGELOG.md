@@ -11,6 +11,16 @@ them under the new version number, tags it and builds the installer (see README,
   `--allowed-host`, `--pid-file`; logs to stdout; SIGTERM / SIGINT shut it down cleanly.
 - Binding a non-loopback address needs `--auth-token-file`: every request must then carry the secret in the
   `X-AgentDesk-Gateway-Token` header (checked in constant time), otherwise the server refuses to start.
+- AgentDesk Server gateway: `python -m agentdesk gateway` (also `agentdesk-gateway`) listens on the LAN (default
+  0.0.0.0:8080, `<server-home>/server.toml`), with a sign-in page, server-side sessions (HttpOnly, SameSite=Strict, Secure
+  with TLS), sign-out, a lockout after repeated wrong passwords per user + address, and CSRF protection. Each user gets an
+  own AgentDesk instance (`agentdesk serve` on a loopback port, data in `<server-home>/users/<name>/`), started on first
+  use, restarted when it dies and stopped when idle (not while a run, chat or build is going on); everything is passed
+  through to it, including uploads, export zips and streamed answers. Users are managed with
+  `python -m agentdesk gateway user add|list|passwd|disable|enable|remove|role|assign` (scrypt-hashed passwords in
+  `users.json`); sign-ins and user changes go to `audit.log`. Optional HTTPS (`tls_cert`, `tls_key`) and optional
+  separate OS accounts per user (`run_as_users`, see README).
+- `GET /api/busy` on the dashboard: whether a run, chat turn or build is in progress.
 
 ### Changed
 - The dashboard checks the Host header of every request and the Origin of every POST against a configurable list
