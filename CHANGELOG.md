@@ -5,6 +5,19 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- macOS and Linux downloads: a GitHub Actions workflow (`.github/workflows/release.yml`) builds every `v*` tag on
+  Windows, macOS and Linux and attaches `AgentDesk-Setup-x.y.z.exe`, `AgentDesk-x.y.z-macos-<arch>.zip` (unsigned
+  `AgentDesk.app`) and `AgentDesk-x.y.z-linux-x86_64.tar.gz` to its GitHub Release, with the notes from this file. It
+  can also rebuild a given tag by hand. `build_unix.sh` builds and packs on macOS / Linux; `tools/release.py notes`
+  prints a version's notes.
+
+### Changed
+- `agentdesk.spec` works on every platform (the Windows icon, version resource and imports only on Windows).
+- On macOS and Linux the "Update available" button opens the release page instead of installing (the in-app updater
+  stays Windows-only).
+- The packaged program on macOS / Linux keeps its data in `~/Library/Application Support/AgentDesk` /
+  `~/.local/share/AgentDesk`, and `AgentDesk stop` recognises it there. Windows is unchanged.
 
 ## 1.3.0 - 2026-10-23
 

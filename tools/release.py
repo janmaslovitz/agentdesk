@@ -4,6 +4,7 @@
     python tools/release.py release --bump patch|minor|major
     python tools/release.py release --version 1.4.0     tests are run by release.ps1, not here
     python tools/release.py buildinfo                   write agentdesk/_buildinfo.py and version_info.txt (build_exe.ps1 does this)
+    python tools/release.py notes 1.4.0                 print CHANGELOG.md's section for 1.4.0 (the GitHub Release notes in CI)
 
 `release` bumps `__version__` in agentdesk/__init__.py, turns the `## Unreleased` section of CHANGELOG.md into
 `## <version> - <date>` (a fresh empty Unreleased goes on top), commits "Release <version>" and tags `v<version>`.
@@ -72,6 +73,15 @@ def changelog_release(text: str, version: str, date: str) -> str:
     return text[:m.start()] + "## Unreleased\n\n\n" + f"## {version} - {date}\n" + text[m.end():]
 
 
+def changelog_notes(text: str, version: str) -> str | None:
+    """The body of CHANGELOG.md's `## <version> - <date>` section (stripped), or None if there is no such section."""
+    m = re.search(rf"^## \[?v?{re.escape(version)}\]?(?=[ \t\]-]|$)[^\n]*\n?", text, re.M)
+    if not m:
+        return None
+    nxt = re.search(r"^## ", text[m.end():], re.M)
+    return (text[m.end(): m.end() + nxt.start()] if nxt else text[m.end():]).strip()
+
+
 def git(root: Path, *args: str) -> str:
     r = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
@@ -132,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("current")
     sub.add_parser("buildinfo")
+    n = sub.add_parser("notes")
+    n.add_argument("version", nargs="?", help="x.y.z or vx.y.z (default: the current version)")
     r = sub.add_parser("release")
     g = r.add_mutually_exclusive_group()
     g.add_argument("--bump", choices=("major", "minor", "patch"))
@@ -141,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
         print(read_version())
     elif a.cmd == "buildinfo":
         print(buildinfo())
+    elif a.cmd == "notes":
+        version = (a.version or read_version()).removeprefix("v")
+        notes = changelog_notes((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), version)
+        if not notes:
+            print(f"CHANGELOG.md has no notes for {version}", file=sys.stderr)
+        sys.stdout.reconfigure(encoding="utf-8")
+        print(notes or f"AgentDesk {version}")
     else:
         print(release(part=a.bump, version=a.version))
     return 0

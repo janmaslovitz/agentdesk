@@ -61,8 +61,10 @@ def is_agentdesk(pid: int) -> bool:
     info = process_info(pid)
     if not info:
         return False
-    if core.FROZEN:  # the program itself: AgentDesk.exe [command]
-        return re.search(r"agentdesk\.exe", info[1], re.I) is not None
+    if core.FROZEN:  # the program itself: AgentDesk.exe [command] (macOS / Linux: .../AgentDesk [command])
+        if sys.platform == "win32":
+            return re.search(r"agentdesk\.exe", info[1], re.I) is not None
+        return re.search(r"(^|/)AgentDesk(\s|$)", info[1]) is not None
     return re.search(r"-m\s+agentdesk(\s|$)", info[1]) is not None
 
 

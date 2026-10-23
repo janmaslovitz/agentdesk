@@ -1698,8 +1698,19 @@ def update_status(force: bool = False) -> dict:
     else:
         info = core.check_update(force)
     out = {k: info.get(k) for k in ("status", "current", "latest", "available", "notes")}
-    out.update(installable=core.FROZEN and os.name == "nt", enabled=enabled, job=dict(UPDATE_JOB), run_active=any_run_active())
+    # The in-app updater is Windows-only; on macOS / Linux the badge links to the release page (download by hand).
+    out.update(installable=core.FROZEN and os.name == "nt", link_only=os.name != "nt", page=info.get("page") or core.RELEASES_PAGE,
+               enabled=enabled, job=dict(UPDATE_JOB), run_active=any_run_active())
     return out
+
+
+def update_open() -> dict:
+    """POST /api/update/open: show the latest release's page in the browser (macOS / Linux update)."""
+    page = core.check_update().get("page") or core.RELEASES_PAGE
+    if not core.update_url_ok(page):
+        page = core.RELEASES_PAGE
+    webbrowser.open(page)
+    return {"ok": True, "page": page}
 
 
 def launch_installer(path: Path) -> None:
@@ -2083,6 +2094,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parts == ["api", "update", "install"]:
                 return self.json(update_install(d.get("confirm") is True))
+            if parts == ["api", "update", "open"]:
+                return self.json(update_open())
             if parts == ["api", "projects"]:
                 try:
                     p = core.add_project(str(d.get("name", "")).strip(), str(d.get("repo", "")).strip(), str(d.get("base", "")).strip() or "main",

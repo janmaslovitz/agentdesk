@@ -1,0 +1,123 @@
+# Release builds: pushing a tag vX.Y.Z (release.ps1 makes it; `git push --follow-tags`) runs the tests, builds
+# AgentDesk on Windows, macOS and Linux and attaches the downloads to the GitHub Release of that tag:
+#   AgentDesk-Setup-X.Y.Z.exe (the in-app updater looks for AgentDesk-Setup*.exe: keep the name),
+#   AgentDesk-X.Y.Z-macos-<arch>.zip, AgentDesk-X.Y.Z-linux-x86_64.tar.gz.
+# A missing release is created as a draft with the notes of that version from CHANGELOG.md and published once all
+# three builds are attached. Run it by hand (Actions > Release > Run workflow) to rebuild an existing tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build, e.g. v1.3.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+  PYTHON_VERSION: "3.12"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: The tag matches the version in agentdesk/__init__.py
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not vX.Y.Z"; exit 1; }
+          version="$(python tools/release.py current)"
+          [ "v$version" = "$TAG" ] || { echo "::error::tag $TAG but agentdesk/__init__.py says $version"; exit 1; }
+      - name: Install
+        run: python -m pip install -r requirements.txt -r requirements-tray.txt pytest pyyaml
+      - name: Tests
+        run: |
+          git config --global user.name "AgentDesk CI"
+          git config --global user.email "ci@example.invalid"
+          python -m pytest -q -p no:cacheprovider tests
+
+  release:
+    needs: test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Create the release if it is missing (draft, notes from CHANGELOG.md)
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists: the builds replace its assets"
+          else
+            python3 tools/release.py notes "$TAG" > release-notes.md
+            gh release create "$TAG" --draft --verify-tag --title "AgentDesk ${TAG#v}" --notes-file release-notes.md
+          fi
+
+  build:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Linux libraries for the window (pywebview on GTK / WebKit2GTK) and the tray
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libcairo2-dev libgirepository1.0-dev \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0 gir1.2-ayatanaappindicator3-0.1
+      - name: Build (macOS / Linux)
+        if: runner.os != 'Windows'
+        run: |
+          python -m venv .venv-build
+          bash build_unix.sh
+      - name: Build (Windows installer)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          python -m venv .venv-build
+          .\build_installer.ps1 -Version $env:TAG.Substring(1)
+      - name: Attach to the release
+        run: |
+          version="${TAG#v}"
+          shopt -s nullglob
+          files=(dist/AgentDesk-"$version"-linux-*.tar.gz dist/AgentDesk-"$version"-macos-*.zip dist/installer/AgentDesk-Setup-"$version".exe)
+          [ ${#files[@]} -gt 0 ] || { echo "::error::no build output in dist/"; exit 1; }
+          gh release upload "$TAG" "${files[@]}" --clobber
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Publish the release (if it is still a draft)
+        run: |
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release edit "$TAG" --draft=false
+          fi
