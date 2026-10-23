@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.3.2 - 2026-10-23
+
 ### Fixed
 - The dashboard could show no projects (and a 404 on every project) after a crash or kill: a data file written at that
   moment, such as the account usage file, was left as zeros, and reading it failed every request. Data files are now
