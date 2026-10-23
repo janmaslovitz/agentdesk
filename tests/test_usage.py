@@ -54,6 +54,7 @@ def test_high_usage_never_stops_work(project):
 
 
 def test_sdk_event_saves_reading_and_old_files_load(project):
+    core._load_sdk()  # the SDK is imported lazily: load it so this test passes when run alone
     name = project.account["name"]
     meter = core.Meter(project, core.Store(project), {})
     meter.see(RateLimitEvent(rate_limit_info=RateLimitInfo(status="allowed", utilization=None, rate_limit_type="five_hour"), uuid="u", session_id="s"))

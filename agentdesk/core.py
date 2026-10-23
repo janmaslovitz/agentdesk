@@ -428,14 +428,14 @@ def record_version() -> tuple[str | None, str]:
     f = DATA / "app_version.json"
     try:
         prev = json.loads(f.read_text(encoding="utf-8")).get("version")
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, AttributeError):  # (a corrupt record is just replaced below)
         # no record yet: data that already has a log came from a build before versions were recorded
         prev = "an earlier build" if (DATA / "agentdesk.log").exists() else None
     if prev == v["version"]:
         return None, v["version"]
     try:
         DATA.mkdir(parents=True, exist_ok=True)
-        f.write_text(json.dumps({**v, "previous": prev, "since": dt.datetime.now().isoformat(timespec="seconds")}, indent=2), encoding="utf-8")
+        write_json(f, {**v, "previous": prev, "since": dt.datetime.now().isoformat(timespec="seconds")}, indent=2)
     except OSError:
         pass
     return prev, v["version"]
@@ -515,14 +515,12 @@ def bundled_cli() -> str:
 
 
 def account_usage(name: str) -> dict:
-    p = DATA / "accounts" / f"{name}.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    data = read_json(DATA / "accounts" / f"{name}.json", {})
+    return data if isinstance(data, dict) else {}
 
 
 def save_account_usage(name: str, usage: dict) -> None:
-    p = DATA / "accounts" / f"{name}.json"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(usage, indent=2), encoding="utf-8")
+    write_json(DATA / "accounts" / f"{name}.json", usage, indent=2)
 
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -816,9 +814,61 @@ def replace_file(tmp: Path, target: Path, tries: int = 40) -> None:
 
 
 def write_atomic(target: Path, text: str) -> None:
+    """Write `text` so that `target` is always either the old or the new content, also after a crash, a kill or a power
+    cut: the data is flushed to disk before the rename. (A plain write_text can leave a file of zero bytes on Windows
+    when the process dies mid-write, which blanked the whole dashboard once.)"""
     tmp = target.with_name(target.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
     replace_file(tmp, target)
+
+
+def write_json(target: Path, obj, **kw) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(target, json.dumps(obj, **kw))
+
+
+def quarantine(path: Path, why: str = "unreadable") -> Path | None:
+    """Move a corrupt data file out of the way (kept for inspection as `<name>.corrupt-<time>`) and say so in the log."""
+    dest = path.with_name(f"{path.name}.corrupt-{dt.datetime.now():%Y%m%d-%H%M%S}")
+    try:
+        path.replace(dest)
+    except OSError:
+        return None
+    try:
+        with (DATA / "agentdesk.log").open("a", encoding="utf-8") as f:
+            f.write(f"[{dt.datetime.now():%m-%d %H:%M:%S}] data file {path.name} was {why}; moved aside as {dest.name}\n")
+    except OSError:
+        pass
+    return dest
+
+
+def read_json(path: Path, default, backup: Path | None = None):
+    """The parsed JSON file, or `default` when it is missing. A file that can't be parsed (empty, zero-filled after a
+    crash, half written) is set aside with quarantine() and replaced by `backup` when that parses, else `default`:
+    one bad data file must never make the dashboard fail."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError):  # unreadable or not UTF-8 (a zero-filled file reads fine; this is the rest)
+        text = None
+    if text is not None:
+        try:
+            return json.loads(text)
+        except ValueError:
+            pass
+    quarantine(path, "corrupt")
+    if backup is not None:
+        try:
+            data = json.loads(backup.read_text(encoding="utf-8"))
+            write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+            return data
+        except (OSError, ValueError):
+            pass
+    return default
 
 
 # ----------------------------------------------------------------------------- chat settings (project.toml / settings.toml)
@@ -989,10 +1039,17 @@ class Store:
 
     def load(self) -> dict:
         s = self.p.path("state.json")
-        return json.loads(s.read_text(encoding="utf-8")) if s.exists() else {"tasks": {}, "spent_usd": 0.0}
+        data = read_json(s, {"tasks": {}, "spent_usd": 0.0}, backup=self.p.path("state.json.bak"))
+        return data if isinstance(data, dict) and isinstance(data.get("tasks"), dict) else {"tasks": {}, "spent_usd": 0.0}
 
     def save(self, state: dict) -> None:
-        write_atomic(self.p.path("state.json"), json.dumps(state, indent=2, ensure_ascii=False))
+        s, bak = self.p.path("state.json"), self.p.path("state.json.bak")
+        try:  # the previous good state is kept as a backup (at most once a minute: this is saved very often)
+            if s.exists() and s.stat().st_size > 2 and time.time() - (bak.stat().st_mtime if bak.exists() else 0) > 60:
+                shutil.copyfile(s, bak)
+        except OSError:
+            pass
+        write_atomic(s, json.dumps(state, indent=2, ensure_ascii=False))
 
     def notes(self) -> str:
         n = self.p.path("notes.md")
@@ -3260,7 +3317,7 @@ class BuildJob:
     def _set(self, **kw) -> None:
         self.st.update(kw)
         try:
-            self.statf.write_text(json.dumps(self.st), encoding="utf-8")
+            write_atomic(self.statf, json.dumps(self.st))
         except OSError:
             pass
 

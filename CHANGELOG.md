@@ -5,6 +5,13 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- The dashboard could show no projects (and a 404 on every project) after a crash or kill: a data file written at that
+  moment, such as the account usage file, was left as zeros, and reading it failed every request. Data files are now
+  flushed to disk before they replace the old one, a file that can't be read is set aside as `<name>.corrupt-<time>`
+  (and noted in the log) instead of failing, `state.json` falls back to its last backup (`state.json.bak`, kept at most
+  once a minute) instead of an empty queue, and the web server restarts its own loop if it ever dies (a window could stay
+  open on a server that no longer answered).
 
 ## 1.3.1 - 2026-10-23
 
@@ -47,7 +54,7 @@ them under the new version number, tags it and builds the installer (see README,
 ### Fixed
 - After an update the dashboard could show no projects at all: the installed app had been started from an agent's
   shell (an install or restart done by the Coworker) that carried the workers' throw-away `AGENTDESK_HOME`
-  (`%TEMP%gentdesk-worker-home`), so it read an empty data folder. The installed program now never uses that
+  (`%TEMP%\agentdesk-worker-home`), so it read an empty data folder. The installed program now never uses that
   folder as its data, and the full-access Coworker is no longer given it. Your data was never touched.
 
 ## 1.2.0 - 2026-10-22

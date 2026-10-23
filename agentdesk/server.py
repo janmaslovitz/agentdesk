@@ -858,7 +858,7 @@ class Chat:
         u["spent_usd"] = round(u.get("spent_usd", 0.0) + cost, 4)
         for k, v in tokens.items():
             u.setdefault("tokens", {})[k] = u.get("tokens", {}).get(k, 0) + v
-        self.p.path("chat_usage.json").write_text(json.dumps(u), encoding="utf-8")
+        core.write_json(self.p.path("chat_usage.json"), u)
         parts = ["\n\n".join(reply).strip()]
         if coworker and (note := budget_note(result, cost, mode)):
             parts.append(note)
@@ -901,7 +901,7 @@ class Chat:
         d = u.get("daily") if (u.get("daily") or {}).get("date") == today else {"date": today, "usd": 0.0}
         d["usd"] = round(float(d["usd"]) + cost, 4)
         u["daily"] = d
-        self.p.path("chat_usage.json").write_text(json.dumps(u), encoding="utf-8")
+        core.write_json(self.p.path("chat_usage.json"), u)
 
     def _live_add(self, entry: dict) -> None:
         """Add an entry to the transcript; the page fetches the ones newer than its last seq."""
@@ -1142,8 +1142,8 @@ class Chat:
         threading.Thread(target=later, daemon=True, name=f"checkup-{self.p.slug}").start()
 
     def usage(self) -> dict:
-        f = self.p.path("chat_usage.json")
-        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {"spent_usd": 0.0, "tokens": {}}
+        data = core.read_json(self.p.path("chat_usage.json"), {"spent_usd": 0.0, "tokens": {}})
+        return data if isinstance(data, dict) else {"spent_usd": 0.0, "tokens": {}}
 
     def start(self, text: str) -> dict:
         """Answer in the background and return at once: a request held open for minutes gets dropped by the
@@ -1616,6 +1616,20 @@ def project_state(p: core.Project) -> dict:
             "auto_error": auto_error(p.account.get("name", "default")) if p.account.get("kind") != "api_key" else None,
             "tier_avg": tier_averages(tasks),
             "tiers": {k: {"model": v["model"], "effort": v.get("effort")} for k, v in s["tiers"].items()}}
+
+
+def serve_supervised(srv, stop: threading.Event | None = None) -> None:
+    """serve_forever that restarts itself: if its loop ever dies with an error the window would stay open on a server
+    that no longer answers (it did once), so log it and start the loop again."""
+    while True:
+        try:
+            srv.serve_forever()
+            return  # shutdown() was called: finished
+        except Exception as e:
+            log_error(f"web server loop failed ({type(e).__name__}: {e}); restarting it")
+            if stop is not None and stop.wait(0.5):
+                return
+            time.sleep(0.5 if stop is None else 0)
 
 
 def quiet_errors(srv):
@@ -2400,7 +2414,7 @@ def main(port: int = 8765, browser: bool = False, window: bool = True) -> None:
     server = quiet_errors(ThreadingHTTPServer(("127.0.0.1", port), Handler))
     pid_file().write_text(str(os.getpid()), encoding="utf-8")
     print(f"AgentDesk at {url}  (data: {core.DATA}; stop with `python -m agentdesk stop` — runs keep going)")
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=serve_supervised, args=(server, QUIT), daemon=True)
     thread.start()
     QUIT.clear()
     # Only this process (the one that owns the port, checked above) runs the loop.
