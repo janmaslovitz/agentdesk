@@ -5,6 +5,12 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Changed
+- The chat opens fast however long it is: the page loads the last 30 entries behind a loading skeleton and fetches older ones
+  when you scroll up (`GET /chat?limit=&before=`); long tool output is cut in pages. JSON answers are gzipped.
+- `chat.json` is saved compact, and once it passes 600 entries the old part moves to `chat_archive.jsonl` (still reachable by
+  scrolling up). A very long chat shows a hint to start a new one.
+
 
 ## 1.5.5 - 2026-10-26
 

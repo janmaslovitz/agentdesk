@@ -530,6 +530,7 @@ function shell() {
         <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
       <div class="modenote" id="modeNote" hidden></div>
+      <div class="modenote" id="longHint" hidden></div>
       <div class="quick" id="quick">
         <button onclick="ask('agent')">What is the agent doing?</button>
         <button onclick="ask('queue')">Queue status</button>
@@ -892,11 +893,13 @@ async function refreshOnce() {
     let h; try { h = await api(`/api/p/${want}/chat?limit=${CHAT_PAGE}`); } finally { if (want === cur) chatSkeleton(false); }
     if (want !== cur) { chatFor = null; refreshAgain = true; return; }  // switched while loading: don't mix projects
     for (const m of h.history) addMsg(m.role, m.text, m);
-    firstSeq = h.history.length ? h.history[0].seq || 0 : 0; showMore(h.more);
+    firstSeq = h.start || 0; showMore(h.more);
     lastSeq = h.seq || 0; $("msgs").scrollTop = $("msgs").scrollHeight;
   } else if ((st.chat_seq || 0) > lastSeq) await fetchNotes();
   showMode(st.project);
   showLive(st);
+  { const n = st.chat_len || 0, el = $("longHint"); // a very long chat is slow for the model too: suggest a fresh one
+    el.hidden = n <= 800; if (n > 800) el.textContent = `This chat has ${n} entries. A fresh chat starts faster: press “New chat” (the project memory stays).`; }
   if (gitFor !== cur) gitLoad();
   const doneKey = st.tasks.filter(t => t.status === "done").map(t => t.id).join(",");
   if (buildFor !== cur || doneKey !== buildDoneKey) { buildDoneKey = doneKey; buildLoad(); }  // a task finished: its tick box appears
@@ -1074,7 +1077,7 @@ function showMore(more) {
   box.prepend(b);
 }
 async function loadOlder() {
-  if (loadingOlder || !firstSeq) return;
+  if (loadingOlder || !firstSeq) return;  // firstSeq: position of the oldest loaded entry
   loadingOlder = true; const proj = cur, box = $("msgs"), btn = box.querySelector(".older");
   if (btn) btn.innerHTML = `<span class="working"><i></i><i></i><i></i></span> Loading…`;
   try {
@@ -1086,7 +1089,7 @@ async function loadOlder() {
     const added = [];
     for (const m of h.history) added.push(addMsg(m.role, m.text, m, true));
     for (const el of added) box.insertBefore(el, keep[0] || null);
-    if (h.history.length) firstSeq = h.history[0].seq || firstSeq;
+    firstSeq = h.start || 0;
     showMore(h.more); box.scrollTop = prevT + (box.scrollHeight - prevH);
   } catch { if (btn) btn.textContent = "Load earlier messages (retry)"; }
   finally { loadingOlder = false; }

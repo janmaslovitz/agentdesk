@@ -431,11 +431,15 @@ tool_summary = core.tool_summary  # shared with the task run timeline (core.Acti
 result_text = core.result_text
 
 
+ARCHIVE_ABOVE, ARCHIVE_KEEP = 600, 300  # entries in chat.json before the older ones move to chat_archive.jsonl, and how many stay
+
+
 class Chat:
     def __init__(self, loop: asyncio.AbstractEventLoop, p: core.Project):
         _load_sdk()
         self.loop, self.p = loop, p
         self.client: ClaudeSDKClient | None = None
+        self.archived = 0  # entries moved out of chat.json into chat_archive.jsonl (older than the live tail)
         self.history: list[dict] = self.load_history()
         self.lock = threading.Lock()
         self.approvals = Approvals(loop)
@@ -469,7 +473,41 @@ class Chat:
             data = json.loads(self.p.path("chat.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):  # ValueError covers bad JSON and bad UTF-8
             return []
-        return data if isinstance(data, list) else []
+        data = data if isinstance(data, list) else []
+        if len(data) > ARCHIVE_ABOVE:  # keep chat.json (rewritten on every save) short: the old part goes to an archive
+            old, data = data[:-ARCHIVE_KEEP], data[-ARCHIVE_KEEP:]
+            try:
+                with self.p.path("chat_archive.jsonl").open("a", encoding="utf-8") as f:
+                    f.write("".join(json.dumps(m, ensure_ascii=False, separators=(",", ":")) + "\n" for m in old))
+                self.p.path("chat.json").write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            except OSError:
+                data = old + data  # could not archive: keep everything where it was
+        self.archived = self._archive_count()
+        return data
+
+    def _archive_count(self) -> int:
+        try:
+            with self.p.path("chat_archive.jsonl").open("rb") as f:
+                return sum(1 for _ in f)
+        except OSError:
+            return 0
+
+    def _archive_slice(self, start: int, end: int) -> list[dict]:
+        """Archived entries with absolute positions start..end-1 (the archive is the oldest part of the transcript)."""
+        rows: list[dict] = []
+        try:
+            with self.p.path("chat_archive.jsonl").open(encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if i >= end:
+                        break
+                    if i >= start:
+                        try:
+                            rows.append(json.loads(line))
+                        except ValueError:
+                            pass
+        except OSError:
+            pass
+        return rows
 
     def save_history(self) -> None:
         f = self.p.path("chat.json")
@@ -1221,8 +1259,9 @@ class Chat:
             self.generation += 1
             self.mode, self.session_id, self.session_cost = "", None, 0.0
             if not keep_history:
-                self.history = []
+                self.history, self.archived = [], 0
                 self.p.path("chat.json").unlink(missing_ok=True)
+                self.p.path("chat_archive.jsonl").unlink(missing_ok=True)
                 self.p.path("chat_memory.md").unlink(missing_ok=True)
 
     @staticmethod
@@ -1243,12 +1282,15 @@ class Chat:
         mode = core.chat_mode(self.p)
         cs = core.chat_settings(mode)
         history = self.history if since is None else [m for m in list(self.history) if m.get("seq", 0) > since]
-        more = False
-        if limit:  # a page: the last `limit` entries (older than `before` when given), so a long chat opens fast
-            pool = list(history) if before is None else [m for m in list(history) if m.get("seq", 0) < before]
-            more = len(pool) > limit
-            history = [self._slim(m) for m in pool[-limit:]]
-        out = {"history": history, "mode": mode, "busy": self.is_busy(), "model": cs["model"], "seq": self.seq, "more": more}
+        more, start = False, 0
+        if limit:  # a page by position: the last `limit` entries before position `before` (archive + live tail)
+            hist = list(self.history)
+            total = self.archived + len(hist)
+            end = total if before is None or since is not None else min(before, total)
+            start = max(0, end - limit)
+            rows = (self._archive_slice(start, min(end, self.archived)) if start < self.archived else []) + hist[max(start - self.archived, 0):max(end - self.archived, 0)]
+            history, more = [self._slim(m) for m in rows], start > 0
+        out = {"history": history, "mode": mode, "busy": self.is_busy(), "model": cs["model"], "seq": self.seq, "more": more, "start": start}
         if mode in AUTONOMOUS:
             out.update(budget_usd=float(cs["budget_usd"]))
         out["live"] = self.is_live()
@@ -1632,6 +1674,7 @@ def project_state(p: core.Project) -> dict:
     s = core.settings()
     mode = core.chat_mode(p)
     cs = core.chat_settings(mode)
+    ch = chat(p)
     try:
         plan = core.plan_view(p)
     except (ValueError, KeyError) as e:  # a hand-edited plan.json
@@ -1640,8 +1683,9 @@ def project_state(p: core.Project) -> dict:
                         "gates": p.cfg.get("gates", {}).get("quick", []), "chat_mode": mode,
                         "chat_model": cs["model"] + (f" ({cs['effort']})" if cs.get("effort") else ""),
                         "chat_budget": cs.get("budget_usd"), "cowork": str(core.cowork_path(p))},
-            "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": chat(p).usage(),
-            "plan": plan, "chat_seq": chat(p).seq, "chat_busy": chat(p).is_busy(), "chat_live": chat(p).is_live(), "chat_idle_s": chat(p).idle_s(),
+            "tasks": tasks, "spent_usd": state.get("spent_usd", 0.0), "tokens": state.get("tokens", {}), "chat": ch.usage(),
+            "plan": plan, "chat_seq": ch.seq, "chat_busy": ch.is_busy(), "chat_live": ch.is_live(), "chat_idle_s": ch.idle_s(),
+            "chat_len": len(ch.history) + ch.archived,
             "runner": runner(p).info(), "log": tail(p.path("agentdesk.log"), 150), "errors": tail(p.path("runner.log"), 25),
             "limits": {"run_budget": s["limits"]["run_budget_usd"]},
             "usage": core.account_usage(p.account.get("name", "default")).get("rate_limits", {}),

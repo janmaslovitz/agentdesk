@@ -510,3 +510,33 @@ def test_task_activity_reads_the_timeline(chat):
     assert not err and "tool calls: 1" in text and "tool errors: 1" in text and "core.py" in text and "Edit" in text
     err, text = call_tool(chat, "task_activity", {"id": "042"})
     assert err and "no task" in text
+
+
+def test_chat_pages_and_archive(tmp_path, monkeypatch):
+    """info(limit, before) walks a long transcript page by page, across the chat.json / chat_archive.jsonl split."""
+    import json
+    from agentdesk import server
+
+    entries = [{"role": "user", "text": f"m{i}", "seq": i + 1} for i in range(700)]
+    (tmp_path / "chat.json").write_text(json.dumps(entries), encoding="utf-8")
+
+    class P:
+        def path(self, n):
+            return tmp_path / n
+
+    monkeypatch.setattr(server.core, "chat_mode", lambda p: "assistant")
+    monkeypatch.setattr(server.core, "chat_settings", lambda m: {"model": "x"})
+    c = server.Chat.__new__(server.Chat)
+    c.p = P()
+    c.history = c.load_history()
+    c.is_busy, c.is_live = (lambda: False), (lambda: False)
+    assert len(c.history) == server.ARCHIVE_KEEP and c.archived == 700 - server.ARCHIVE_KEEP
+    c.client, c.busy, c.live_calls, c.seq = None, False, {}, 700
+    got, before = [], None
+    while True:
+        r = c.info(None, 50, before)
+        got = r["history"] + got
+        before = r["start"]
+        if not r["more"]:
+            break
+    assert [m["text"] for m in got] == [m["text"] for m in entries]
