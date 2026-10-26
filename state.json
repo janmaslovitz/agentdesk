@@ -1,0 +1,2162 @@
+{
+  "tasks": {
+    "001": {
+      "title": "Dashboard and runs don't need a console window kept open",
+      "status": "done",
+      "started": "2026-10-16T09:45:03",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00392234,
+          "turns": 5,
+          "error": false,
+          "tokens": {
+            "input": 4,
+            "output": 2389,
+            "cache_read": 21424,
+            "cache_write": 10768
+          },
+          "at": "2026-10-16T09:37:43"
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00470159,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3679,
+            "cache_read": 67209,
+            "cache_write": 9043
+          },
+          "at": "2026-10-16T09:45:30"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.2029576,
+          "turns": 13,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 20,
+            "output": 8019,
+            "cache_read": 312242,
+            "cache_write": 22792
+          },
+          "at": "2026-10-16T09:49:32"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.2602543,
+          "turns": 6,
+          "error": false,
+          "attempt": 2,
+          "tokens": {
+            "input": 12,
+            "output": 1927,
+            "cache_read": 236827,
+            "cache_write": 3580
+          },
+          "at": "2026-10-16T09:50:12"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Implement Task 001 in C:\\Users\\kochurin.a\\AgentDesk. Full spec: data\\projects\\agentdesk\\tasks\\001-run-without-console.md (source of truth).\n\nGoal: the dashboard runs without a console window and survives closing the window that started it. Runs started from the dashboard detach from any console. Add a stop command and a single-instance check. Update the README \"Start\" section.\n\nFiles:\n- agentdesk\\server.py:47-53 Runner.start: Popen uses only CREATE_NEW_PROCESS_GROUP. On win32 add DETACHED_PROCESS | CREATE_NO_WINDOW. Keep stdout/stderr to the log files. Keep run args unchanged.\n- agentdesk\\server.py:408-416 main(): binds 127.0.0.1:port. First probe the port; if it answers, webbrowser.open the URL and exit 0. Write a PID file (e.g. data\\dashboard.pid) and remove it on exit.\n- agentdesk\\server.py:58 Runner.stop: reuse for the optional run stop.\n- agentdesk\\__main__.py:58-74: argparse subcommands. Add `stop`: read PID file, end the dashboard (taskkill on Windows, SIGTERM elsewhere), optionally stop the run. Keep all existing commands, including `status agentdesk`.\n- AgentDesk.cmd: keep the .venv lookup; use a hidden start (e.g. `start \"\" /min`, pythonw, or a .vbs). Double-click must still open the browser.\n- agentdesk.sh and install.ps1: keep the .venv lookup; use nohup/setsid on POSIX.\n- README.md around line 17: make the Start section match the code.\n\nConstraints: Windows is primary, keep macOS/Linux working. Don't change agentdesk\\core.py or run arguments. Bind 127.0.0.1 only. No secrets, no change to data\\settings.toml format.\n\nDone when:\n- Launcher opens the browser, and http://127.0.0.1:8765 still answers after the launching console closes.\n- A run started from the dashboard keeps going after the dashboard closes; `python -m agentdesk status agentdesk` shows it running and runner.log keeps growing.\n- A second start opens the existing dashboard with no port error.\n- A documented `python -m agentdesk stop` ends the dashboard and can stop the run.\n- README matches behavior.\nReport what was actually tested.",
+      "last_failure": "$ python -m pytest -q -x\nC:\\Users\\kochurin.a\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe: No module named pytest",
+      "commit": "02bf5ef",
+      "branch": "auto/001",
+      "finished": "2026-10-16T09:50:16"
+    },
+    "002": {
+      "title": "Projects in plain folders: local git setup when adding a project",
+      "status": "done",
+      "started": "2026-10-16T09:53:32",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.0056088200000000005,
+          "turns": 13,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3611,
+            "cache_read": 56772,
+            "cache_write": 14377
+          },
+          "at": "2026-10-16T09:53:58"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.19158740000000002,
+          "turns": 18,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 14,
+            "output": 7303,
+            "cache_read": 196539,
+            "cache_write": 24637
+          },
+          "at": "2026-10-16T09:54:58"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: let a user add a project from a plain folder without knowing git. When the folder isn't a git repo, or is a repo with no commits, AgentDesk offers local version tracking. If accepted, it sets up the repo and uses it like any other. Full spec: zz_agentdesk_next.md section 3 and the Task 002 file in data/projects/agentdesk/tasks/002-plain-folder-local-git.md (read-only context).\n\nRelevant code (line hints from current tree):\n- agentdesk/core.py:200-223 add_project. Line 206 currently raises \"not a git repository\" when `.git` is missing. Add the git-state check and the setup step here, behind an explicit opt-in argument. Never run git init unless the caller passed that opt-in.\n- agentdesk/core.py:309 git(args, cwd) helper. Use it for all git calls. Add a small helper for the setup (init, .gitignore, identity, commit, base branch).\n- agentdesk/core.py:313-332 ensure_worktree. It branches from the base at line 323. Confirm a repo with a first commit on the base branch works end to end.\n- agentdesk/server.py:364-367 POST /api/projects. When setup is needed, return a response that says so (for example needs_local_git with a reason) and do not change anything. The dashboard re-POSTs with the opt-in.\n- agentdesk/__main__.py:64-65 add-project args (add --local-git); 78-79 the handler. Without the flag on a plain folder, print a clear message and exit non-zero. Do not prompt in a non-interactive run.\n- agentdesk/web/index.html:138-142 addProject(). On needs-setup, show the offer \"Set up local version tracking (stays on this computer)\" and re-submit on accept.\n- README.md:39-44 Projects section. Add a short note: local only, nothing is pushed, no remote is added.\n\nConstraints:\n- Never overwrite an existing .gitignore. Write it only when absent, with: node_modules, target, dist, build, .venv, __pycache__, *.log, .DS_Store.\n- Commit everything as \"AgentDesk: starting point\". If `git config user.name`/`user.email` are unset, set the identity for this repo only (`git config --local`): AgentDesk <agentdesk@localhost>. Never touch global config.\n- Use the current branch as base. Never add remotes, never push.\n- Existing repo with commits: no change at all, including no new commit.\n- Repo with no commits: offer the same first commit only. Change nothing else.\n- Don't touch data/ or any real project. Tests run with `python -m pytest` (install pytest with pip; it's not in requirements.txt). Use a scratch folder in a temp dir and a temporary AGENTDESK_HOME. Check how core.py sets DATA to confirm the variable name.\n\nDone when:\n- A plain folder becomes a repo with one commit \"AgentDesk: starting point\" and the right .gitignore.\n- An existing repo is unchanged.\n- A task run on the new project creates its worktree from the base branch (test or manual check against the scratch project).\n- Unit tests cover the plain-folder path and the existing-repo path, and the full pytest run passes.\n- Report back: files changed, test results, and any open question.",
+      "commit": "cc47e40",
+      "branch": "auto/002",
+      "finished": "2026-10-16T09:55:01"
+    },
+    "003": {
+      "title": "Chat Assistant mode with approvals and run tools",
+      "status": "done",
+      "started": "2026-10-16T09:55:41",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00464039,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 3099,
+            "cache_read": 37909,
+            "cache_write": 12120
+          },
+          "at": "2026-10-16T09:56:05"
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "cost_usd": 3.0504918,
+          "turns": 71,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 98,
+            "output": 51853,
+            "cache_read": 4749425,
+            "cache_write": 132845
+          },
+          "at": "2026-10-16T10:05:38"
+        }
+      ],
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "Task 003: Chat Assistant mode with approvals and run tools (AgentDesk, Windows, PowerShell). Full spec: zz_agentdesk_next.md section 1 (read it). Coworker mode is task 004; do not build it.\n\nGOAL\n1. Per-project chat mode toggle in the chat header, persisted as `chat_mode = \"assistant\" | \"coworker\"` in project.toml (default assistant). Switching resets the chat session (Chat.reset, server.py ~175) and keeps visible history. In this task coworker can be stored but behaves as assistant or is disabled with a note.\n2. Assistant mode: model from settings `[chat.assistant]` (default haiku). Current Chat._client (server.py ~117-137) uses `[chat] model` and denies Bash/PowerShell in can_use_tool (~121-128). Replace that with:\n   - Read/Glob/Grep allowed without approval. Write/Edit only to tasks/*.md and notes.md (existing guard, keep).\n   - SDK MCP server (create_sdk_mcp_server + @tool) with add_task, run_next, run_task(id), run_all, plan_task(id), stop_run, queue_status. Calls into existing core.py pipeline functions (grep core.py for run/stop/queue/plan; do not change the pipeline beyond what these call). run_*/stop_run require approval. Do NOT put these or Bash/PowerShell in allowed_tools (it bypasses can_use_tool).\n   - Bash/PowerShell: approval every time unless the command starts with an entry in project.toml `[chat] allowed_commands` (exact prefixes, e.g. `git status`, `git log`). \"Always allow\" appends the prefix.\n3. Approval queue: in can_use_tool create a pending request {id, tool, command/args, reason} and await an asyncio Future on the SDK loop (self.loop). Store pending in a thread-safe structure. Endpoints: GET /api/p/<p>/pending; POST /api/p/<p>/pending/<id> with action allow_once | always_allow | deny. Resolve the Future via loop.call_soon_threadsafe (the HTTP handler runs on another thread). Timeout 10 min → deny. Nothing runs before Allow.\n4. Chat UI in agentdesk/web/index.html: mode toggle; poll pending every ~1-2 s; approval card with Allow once / Always allow / Deny; show every tool call (name, command or args, short output) collapsible; cost and tokens per message (chat_usage.json already tracked in _ask, server.py ~142-158). Note _ask currently records tool names only; capture ToolResultBlock output.\n5. README.md: document the two modes and the allow-list.\n\nWHERE\n- agentdesk/server.py: Chat class (~110-179), can_use_tool, new endpoints, polling.\n- agentdesk/core.py: allow-list read/write helpers (project.toml I/O), options() signature (~427-490 has can_use_tool and allowed_tools examples), settings loader for [chat.assistant].\n- agentdesk/web/index.html, README.md.\n\nCONSTRAINTS\n- Keep the chat unable to run shell commands without an approved card.\n- Don't change worker pipeline behaviour in core.py beyond what tools call.\n- No CLAUDE.md or AGENTS.md exists; follow README.\n- Tests: `pip install pytest` (not in requirements.txt), then `python -m pytest` in tests/. Tests patch core.DATA via AGENTDESK_HOME set before import; use a temp AGENTDESK_HOME and a scratch git repo; never write into the user's data/ folder.\n- Live chat test: Haiku only, a few cents max.\n\nDONE WHEN\n- Toggle persists in project.toml across restart.\n- Unit tests cover the approval queue (allow once, always allow, deny, timeout) and the allow-list (prefix match, add, persist).\n- In assistant mode a shell command shows an approval card; nothing runs until Allow.\n- A run tool call shows a card and starts the run only when allowed.\n- Headless screenshot of the dashboard with a pending approval card saved (e.g. under the scratch dir, reported path).\n- Report the commands run and test output summary.",
+      "commit": "b16f6da",
+      "branch": "auto/003",
+      "finished": "2026-10-16T10:05:43"
+    },
+    "004": {
+      "title": "Chat Coworker mode (autonomous, own worktree)",
+      "status": "done",
+      "started": "2026-10-16T10:08:09",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00534106,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 3570,
+            "cache_read": 39146,
+            "cache_write": 14359
+          },
+          "at": "2026-10-16T10:08:34"
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "cost_usd": 3.655211199999999,
+          "turns": 85,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 106,
+            "output": 65558,
+            "cache_read": 5891451,
+            "cache_write": 145623
+          },
+          "at": "2026-10-16T10:22:28"
+        }
+      ],
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "GOAL: Implement Coworker chat mode (task 004) in AgentDesk on top of task 003's chat modes. Coworker runs autonomously: no approval cards, but guarded and budget-limited. Full spec: zz_agentdesk_next.md section 1 (read it first). Task file: data\\projects\\agentdesk\\tasks\\004-chat-coworker-mode.md.\n\nBASE: The main checkout (C:\\Users\\kochurin.a\\AgentDesk) has NO chat-mode code yet (grep finds only spec/notes). Task 003 lives in data\\projects\\agentdesk\\worktrees\\003. Confirm the base branch with git before editing, and do not touch the user's checkout or main.\n\nFILES (line hints from the 003 worktree, agentdesk\\ subfolder):\n- core.py: :53 pause_at_utilization; :85 guard deny list; :202-203 CHAT_MODES / CHAT_DEFAULT_MODELS (add coworker model from [chat.coworker], default sonnet, effort medium); :209 chat_settings(mode); :233/:238 chat_mode/set_chat_mode; :285 command_allowed; :308 guard_denied; :313 add_project (worktree setup); :529 usage pause check; :536 guard(wt) with can_use_tool at :540. Reuse these; do not weaken them.\n- server.py: :135 ACTIONS; :138 Approvals; :201 Chat class; :310 _client (currently falls back to assistant for coworker); :373 reset(keep_history); :490 limits.\n- web\\index.html: ~208 mode toggle, ~312 setMode. Add the badge \"Coworker: runs commands without asking\" in the chat header.\n- README.md ~:62 \"The chat: Assistant and Coworker modes\" section, to update.\n- data\\settings.toml: add [chat.coworker] defaults (model sonnet, effort medium, budget_usd 2.0). Add keys only; do not rewrite the user's existing values.\n\nCONSTRAINTS:\n- Worktree: <worktrees>\\cowork on branch auto/cowork. All code edits go there. Commits are allowed there only.\n- Guard: same deny list as workers. No push, remotes, publishing, PRs, or edits outside the cowork worktree and the project folder. Shell commands go through the guard in can_use_tool. Do NOT put Bash/PowerShell in allowed_tools, because that bypasses can_use_tool.\n- Approval-free, but guard-checked: coworker's can_use_tool auto-allows only after guard_denied passes. Custom run/queue tools (mcp__agentdesk__*) are auto-allowed without a card.\n- Budget: [chat.coworker] budget_usd per message. When exceeded, stop with a clear chat message. When the account usage pause applies (pause_at_utilization), say it is paused instead of continuing.\n- Switching modes resets the session (Chat.reset) and keeps visible history.\n- Testing: pip install pytest; cd tests; python -m pytest -q. conftest.py sets a temp AGENTDESK_HOME. Use a scratch repo. Do not modify data\\. Live test only with a tiny prompt on haiku or sonnet, driving the server via Python urllib (curl -d is blocked by the worker guard).\n\nDONE WHEN:\n1. Switching to coworker shows the badge and resets the session with the same history.\n2. A coworker shell command runs without an approval card. A push or remote command is blocked by the guard.\n3. Edits land only in <worktrees>\\cowork on auto/cowork.\n4. Spending past budget_usd in one message stops it with a clear message.\n5. Tests cover the guard rules and the budget stop, and pass.\nReport: changed files, test output, and any spec deviations.",
+      "commit": "a5cb13b",
+      "branch": "auto/004",
+      "finished": "2026-10-16T10:22:39"
+    },
+    "005": {
+      "title": "Open the dashboard in a native desktop window (no browser)",
+      "status": "done",
+      "started": "2026-10-16T10:28:36",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.0042772800000000005,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2588,
+            "cache_read": 39588,
+            "cache_write": 10826
+          },
+          "at": "2026-10-16T10:22:59"
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00341245,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2349,
+            "cache_read": 44835,
+            "cache_write": 6917
+          },
+          "at": "2026-10-16T10:28:56"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.1623696,
+          "turns": 13,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 26,
+            "output": 3762,
+            "cache_read": 385958,
+            "cache_write": 21444
+          },
+          "at": "2026-10-16T10:30:18"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal (task 005): show the AgentDesk dashboard in a native pywebview window instead of a browser tab. The page `agentdesk/web/index.html` must not change. Server stays on 127.0.0.1:8765.\n\nBefore editing: a worktree at `data\\projects\\agentdesk\\worktrees\\005` already has a partial implementation (server.py ~lines 430-530: settings `[window]` helper, a window function, `main(port, browser, window)`; tests/test_instance.py). Check `git status`/`git log` there and in the main checkout first. Continue from whatever is correct and don't redo it. The main checkout still has the old code.\n\nFiles:\n- `requirements.txt`: add pywebview.\n- `agentdesk/__main__.py` (~line 62 `dashboard` subparser, ~line 74 call to `server.main`): add `--browser` (opens the old browser behaviour). Keep `--no-browser` only if it is still needed. Default is the window.\n- `agentdesk/server.py` `main()` (~line 408): start the HTTP server in a daemon thread, run the webview window on the main thread, and keep the server alive while the window is open. Closing the window must not stop runs. Don't touch the Quit/stop paths. The run-start code (~lines 40-75) must stay the same.\n- `AgentDesk.cmd` (5 lines) and `agentdesk.sh`: keep the `.venv` lookup; the default now opens the window.\n- `install.ps1`: install requirements so pywebview is present.\n- `README.md` \"Start\" section: describe the window, the `--browser` fallback, and that closing the window leaves the server and runs going.\n- `core.py`: do NOT change pipeline behaviour.\n\nWindow: title \"AgentDesk\", reasonable default size (about 1280x860). Read `[window]` from `data/settings.toml` (width, height, x, y). Add missing keys only; never overwrite existing user values. Save size and position on close.\n\nFailure: if the window cannot start (no WebView2 / engine missing), log the error (core.Store log or stderr), then open the browser at the same URL. Don't crash.\n\nConstraints: Windows first; macOS/Linux use the platform engine or fall back to the browser. Don't commit `__pycache__` changes. Run tests with `PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider` in `tests/` (`pip install pytest` if missing). Tests use a temp AGENTDESK_HOME from conftest.py; never touch the real `data/`. Existing tests monkeypatch `server.webbrowser.open`; keep that working and mock the window module in new tests.\n\nDone when:\n1. Tests pass.\n2. `AgentDesk.cmd` opens a window titled \"AgentDesk\" with no browser tab (verify by launching and checking the process/window title).\n3. Closing it leaves a run started from the dashboard alive.\n4. `python -m agentdesk dashboard --browser` opens the browser.\n5. With the window forced to fail, the browser opens and the error is logged.\n6. README updated.",
+      "commit": "433bc60",
+      "branch": "auto/005",
+      "finished": "2026-10-16T10:30:23"
+    },
+    "013": {
+      "title": "Chat opens an empty console window (claude CLI) on Windows",
+      "status": "done",
+      "started": "2026-10-16T11:02:16",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.0036774799999999995,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 1835,
+            "cache_read": 37288,
+            "cache_write": 10274
+          },
+          "at": "2026-10-16T11:02:34"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.0927078,
+          "turns": 6,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 10,
+            "output": 2734,
+            "cache_read": 108905,
+            "cache_write": 13536
+          },
+          "at": "2026-10-16T11:03:39"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: on Windows, sending a message in the Assistant or Coworker chat must not open an empty Claude CLI console window. The chat should still talk to the CLI in the background, the way the workers do.\n\nLikely cause (verify first): the chat creates `ClaudeSDKClient` (agentdesk/server.py:400-408, `Chat._client`, with `_assistant_options` at :374 and `_coworker_options` at :384). The SDK starts claude.exe via anyio.open_process with no creationflags (claude_agent_sdk/_internal/transport/subprocess_cli.py, ~line 873; it's in site-packages, not this repo). Runner.start (server.py:64) already uses CREATE_NO_WINDOW, which is why runs are fine. Also check the one-shot ClaudeSDKClient at agentdesk/core.py:772 for the same problem. requirements.txt pins claude-agent-sdk>=0.2.166. Before choosing a fix, check how that version exposes the subprocess (transport option or subclass hook). Options: a small Windows-only helper in core.py that wraps the transport or anyio.open_process, limited to the SDK, or a supported option if one exists.\n\nConstraints:\n- Windows only. No behaviour change on macOS/Linux.\n- Don't change permission checks, approval cards, or the guard (Chat.permission, coworker_permission, coworker_hook).\n- Don't change Runner.start or the run arguments (server.run_args).\n- Don't add Bash or PowerShell to allowed_tools.\n- Tests: from the repo root, `PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests`. Never touch the real data/ directory (tests use a temp AGENTDESK_HOME via conftest.py). __pycache__ is tracked in git, so don't leave .pyc changes behind.\n\nDone when:\n1. Start AgentDesk with no console (AgentDesk.cmd or pythonw). Send an Assistant message: no new console window appears and the answer comes back.\n2. Same in Coworker mode, with a message that runs a shell command.\n3. Verify during the message with the process list (e.g. Get-Process/CIM for claude.exe with a console) and a window list check. Report which method you used.\n4. Tests pass. Report what was tested and whether the cause was confirmed or something else turned up.",
+      "commit": "6112299",
+      "branch": "auto/013",
+      "finished": "2026-10-16T11:04:09"
+    },
+    "007": {
+      "title": "Read the real account usage and pause at the threshold",
+      "status": "done",
+      "started": "2026-10-16T14:17:16",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00446794,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2503,
+            "cache_read": 40984,
+            "cache_write": 12046
+          },
+          "at": "2026-10-16T11:05:39"
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00582124,
+          "turns": 5,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2110,
+            "cache_read": 33044,
+            "cache_write": 20192
+          },
+          "at": "2026-10-16T14:15:54"
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.0031389,
+          "turns": 4,
+          "error": false,
+          "tokens": {
+            "input": 4,
+            "output": 2280,
+            "cache_read": 29090,
+            "cache_write": 6554
+          },
+          "at": "2026-10-16T14:17:35"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.36210339999999996,
+          "turns": 12,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 24,
+            "output": 13601,
+            "cache_read": 483477,
+            "cache_write": 44332
+          },
+          "at": "2026-10-16T14:20:09"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "GOAL: Task 007. AgentDesk must read the account's real Claude usage %, show it with source and age, refuse or stop runs per the pause rules, and record per-run usage deltas in state.json with per-task and per-tier averages in the dashboard.\n\nWORK LOCATION: Work only in the isolated clone/container, never the live checkout (C:\\Users\\kochurin.a\\AgentDesk) or its data/. Use a temp AGENTDESK_HOME for tests. Note: tests/conftest.py sets AGENTDESK_HOME before import; run `python -m pytest tests` from the repo root (pip install pytest first). Don't run git commands that alter tracked __pycache__ files; use PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider.\n\nFILES (current line hints):\n- agentdesk/core.py: :53 pause_at_utilization=0.85; :144-149 account_usage / save_account_usage; :588-617 class Meter (see, stop_reason); :619 record_rate_limit; :628 over_pause; :636-650 the account pause check.\n- agentdesk/server.py: :431-440 Coworker pause and rate-limit event handling; :576-590 account_rows; :669-670 project usage payload. Add a POST endpoint for the manual value here.\n- agentdesk/web/index.html: :194 and :253-254 gauge computation. Add \"Current usage: [ ] %\" with Save, source, and age.\n- data/settings.toml:12: add only [limits] usage_max_age_min = 30 (keep existing values).\n- README.md:105: Accounts section.\n- tests/test_coworker.py:254-276: existing usage_reading helper and threshold test to extend.\n\nCONSTRAINTS:\n- Investigate the automatic source first: the SDK RateLimitEvent (rate_limit_info.utilization), then alternatives such as Claude CLI /usage output or statusline data. Use the first one that gives a non-null value; if none works, say so in the report and do the manual part only.\n- Store only percentage, timestamp, and source. No credentials or tokens.\n- Old data/accounts/*.json files without new fields must still load.\n- Don't change the run pipeline beyond the pause check and the before/after reading capture.\n- Missing readings show \"unknown\", never 0.\n- Pause rules: check the newest reading before each run and each attempt. No reading or a reading older than usage_max_age_min → refuse with \"usage unknown — enter it under Accounts\". At or above pause_at_utilization → stop with \"usage limit N% reached the pause threshold\".\n\nDONE WHEN:\n- Unit tests cover: null reading, stale reading, manual value, threshold stop (fake reading 0.90).\n- state.json run entries have usage_before, usage_after, usage_used_pct.\n- Dashboard shows per-task \"used about X% of your window\" and per-tier averages.\n- Report states which automatic source was used, or that none worked.",
+      "commit": "5c0886c",
+      "branch": "auto/007",
+      "finished": "2026-10-16T14:20:40"
+    },
+    "015": {
+      "title": "Merge finished task branches into main",
+      "status": "done",
+      "started": "2026-10-16T14:21:08",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00370744,
+          "turns": 5,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2712,
+            "cache_read": 37174,
+            "cache_write": 8181
+          },
+          "at": "2026-10-16T14:21:30"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.11776919999999999,
+          "turns": 10,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 20,
+            "output": 3240,
+            "cache_read": 237247,
+            "cache_write": 15330
+          },
+          "at": "2026-10-16T14:22:49"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Task 015: merge finished task branches into main, then stop. Do not push, add remotes, or touch data/.\n\nBEFORE ANYTHING: The project owner rule (README/notes) says the live checkout C:\\Users\\kochurin.a\\AgentDesk and its data/ are changed only by the user, and work happens in an isolated clone with a temp AGENTDESK_HOME. This task targets the live checkout. Do the merges in an isolated clone of the repo (a new empty directory, branch main). Do not modify the live checkout. Report that the live-checkout merge needs the user's explicit go-ahead.\n\nSteps (in the clone, PowerShell):\n1. git status on main. If there are uncommitted changes anywhere, stop and report them. Do not discard anything.\n2. git branch --no-merged main. Confirm auto/013 (commit 6112299) and auto/007 are listed. Merge any other finished auto/* branch only if it is clearly complete; otherwise report it.\n3. git merge --no-ff auto/013, then auto/007. Normal merge commits. Resolve a conflict only if the change is purely additive. If a conflict changes behaviour, stop and report the files and hunks.\n4. Tests: pip install pytest if missing, then from the repo root: PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider tests. It must pass. Use a temp AGENTDESK_HOME (tests/conftest.py sets one).\n5. Verify: agentdesk\\core.py contains def _hide_sdk_console (not on main yet; it comes from auto/013). agentdesk\\server.py contains the usage endpoints from 007. Usage code on main is around server.py:428, 479, 589, 667, and core.py:144, 582–640 (account_usage, usage_tokens, usage_paused). Find the endpoints by reading the server routes. Do not rely on the name usage_gate from the notes; check what 007 actually added.\n6. Keep __pycache__ out of commits. Never run git reset --hard, git push --force, or delete branches.\n\nReport: branches merged, merge commit hashes, test counts and result, conflicts (or none), any unmerged branch, and whether step 5 passed. Done when git branch --no-merged main shows no finished task branches and pytest passes on the merged main.",
+      "commit": "6112299",
+      "branch": "auto/015",
+      "finished": "2026-10-16T14:23:19"
+    },
+    "008": {
+      "title": "Package AgentDesk as a Windows program (.exe)",
+      "status": "done",
+      "started": "2026-10-16T14:31:19",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00625374,
+          "turns": 8,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 3465,
+            "cache_read": 41604,
+            "cache_write": 18528
+          },
+          "at": "2026-10-16T14:23:55"
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00520406,
+          "turns": 9,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3534,
+            "cache_read": 70196,
+            "cache_write": 11029
+          },
+          "at": "2026-10-16T14:31:45"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.18392640000000005,
+          "turns": 14,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 28,
+            "output": 4569,
+            "cache_read": 434844,
+            "cache_write": 23582
+          },
+          "at": "2026-10-16T14:35:26"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "GOAL: Package AgentDesk as dist\\AgentDesk\\AgentDesk.exe (PyInstaller, onedir) per the task 008 spec. Work only in the isolated clone with a temp AGENTDESK_HOME, never the live checkout C:\\Users\\kochurin.a\\AgentDesk or its data\\. Note: a worktree for 008 already exists at data\\projects\\agentdesk\\worktrees\\008 (it has requirements-build.txt). Check its git status before starting and don't clobber it.\n\nRELEVANT CODE:\n- agentdesk/core.py:38-39. APP = Path(__file__).parent.parent and DATA = AGENTDESK_HOME or APP/\"data\". When frozen, __file__ points inside the bundle (_internal/), so data would land in the wrong place. Fix only the frozen case: when sys.frozen, use the folder of sys.executable. Keep the rule and don't move or change any data.\n- agentdesk/server.py:42 WEB = agentdesk/web; :722-723 serves index.html. Bundle the web folder as data.\n- agentdesk/server.py:866 open_window(url) uses pywebview (import webview). Its window icon needs the .ico. Check that the webview backend (WebView2/edgechromium) is collected.\n- agentdesk/server.py:902 main(): single-instance check via answers(port), port 8765. Keep it working for the .exe; check pythonw/no-console stdout handling at ~912.\n- agentdesk/__main__.py:133 main() is the entry point; the exe should call the same dashboard path.\n- AgentDesk.cmd, agentdesk.sh, install.ps1, requirements.txt: must keep working unchanged.\n- README.md: add a \"Build the program\" section (build command, output location, where data goes: AGENTDESK_HOME, else data\\ next to the exe).\n\nCONSTRAINTS:\n- requirements-build.txt holds PyInstaller only. Don't touch the runtime requirements.\n- build_exe.ps1 at repo root: create a build venv (not .venv), install requirements + requirements-build, generate or use agentdesk/web/agentdesk.ico (16/32/48/256), run PyInstaller with --icon. Add -NoDesktopShortcut. The shortcut \"AgentDesk\" on the desktop goes via WScript.Shell COM, targets dist\\AgentDesk\\AgentDesk.exe with the same icon. Create only when missing; re-running updates the target and icon.\n- The output must not contain data\\ (projects, logins, settings secrets, account files). Don't bundle them. Check with a listing of dist.\n- Tests: pip install pytest, then from the repo root run python -m pytest tests. Use PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider, since __pycache__ is tracked.\n- Workers must not run git remote commands.\n\nDONE WHEN:\n1. Clean copy (no .venv) builds with build_exe.ps1 into dist\\AgentDesk\\AgentDesk.exe.\n2. The exe opens the dashboard window and reads an existing data\\ next to it (use a copy with a dummy data folder).\n3. A scratch repo task runs from the exe with Haiku the same as from source.\n4. dist has no data\\logins, no secrets, no project files.\n5. The exe icon shows in Explorer. The desktop shortcut opens the window with the icon, or say it was not checked.\n6. Report the exe size, the tests run, and the shortcut status. Run pytest first.",
+      "commit": "ff3d6a6",
+      "branch": "auto/008",
+      "finished": "2026-10-16T14:35:56"
+    },
+    "011": {
+      "title": "Closing the dashboard window hides it to the system tray",
+      "status": "done",
+      "started": "2026-10-16T14:36:08",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00483644,
+          "turns": 8,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2800,
+            "cache_read": 38334,
+            "cache_write": 13297
+          },
+          "at": "2026-10-16T14:36:33"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.14434630000000004,
+          "turns": 11,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 20,
+            "output": 4945,
+            "cache_read": 264359,
+            "cache_write": 17020
+          },
+          "at": "2026-10-16T14:39:35"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: in AgentDesk (Windows first), clicking the window's X hides the pywebview window to a system tray icon instead of ending it. Tray click or \"Open\" shows the same window with the same state. Tray \"Quit\" closes the window and stops the server, the same as the dashboard Quit button. Closing the window must never stop runs.\n\nRelevant code:\n- agentdesk/server.py:866-899 `open_window(url)`: creates the window, saves geometry in `closed()` (lines 882-889), calls `webview.start()`. Returns False on any failure, and `main` then opens the browser.\n- agentdesk/server.py:902-934 `main()`: starts `ThreadingHTTPServer` on a daemon thread, then `open_window` or the browser, then `while thread.is_alive(): join(0.5)`. `finally` shuts the server down and removes the pid file.\n- server.py ~855-863 is the log helper (`log_error`, writes `core.DATA/agentdesk.log`). Use it for the tray-fallback line.\n- agentdesk/__main__.py:133-155: the `dashboard` entry point calls `server.main(...)`. `stop` is `cmd_stop` (line 86), which kills the pid from `data/dashboard.pid`. Don't change its semantics.\n- README.md lines 16-19 (\"Start\" section): add one sentence on tray behaviour and Quit. Make it match the code exactly.\n- requirements.txt: pywebview>=5.0 is there. Add pystray and Pillow as optional (for example a `requirements-tray.txt` or an extras note). Don't break the base install.\n\nConstraints:\n- Work only in the isolated clone and with a temporary AGENTDESK_HOME. Never touch the live checkout (C:\\Users\\kochurin.a\\AgentDesk) or its data/. Never run anything that writes to the real data/.\n- Don't change the run pipeline in agentdesk/core.py. Don't change the data/settings.toml format or add settings keys unless required.\n- Server binds 127.0.0.1 only.\n- pywebview's `webview.start()` must stay on the main thread. Pystray and window calls from other threads need care. Read the pywebview and pystray docs for the threading rules before writing code.\n- If pystray or Pillow is missing, or the tray can't start, keep the current behaviour (close ends the window) and log one line to agentdesk.log saying why.\n- Keep the geometry saving working.\n- Git remote commands are blocked for workers. Don't commit to `__pycache__` (tracked). Run tests with `PYTHONDONTWRITEBYTECODE=1 python -m pytest tests -p no:cacheprovider`, or restore the pyc files afterwards. Tests need `pip install pytest` first.\n\nDone when:\n1. Closing the window leaves a tray icon. Clicking it shows the same dashboard with the same state.\n2. A run started from the dashboard keeps going after the window is hidden (check with `status` on a scratch project).\n3. Tray Quit ends the window and the server. `python -m agentdesk stop` then reports nothing running, unless a detached run was started.\n4. With pystray removed from the environment, the window closes as before and agentdesk.log has a line saying why.\n5. The README Start section matches the behaviour.\n6. Existing tests in tests/ pass.\n\nReport which files changed, how each done-check was verified, and anything not verified (for example the end-to-end pythonw check, which is still open per the notes).",
+      "commit": "58b009d",
+      "branch": "auto/011",
+      "finished": "2026-10-16T14:40:10"
+    },
+    "016": {
+      "title": "Git control panel in the dashboard (status, merge, pull, push)",
+      "status": "done",
+      "started": "2026-10-16T14:40:23",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.005906450000000001,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 2818,
+            "cache_read": 64905,
+            "cache_write": 17331
+          },
+          "at": "2026-10-16T14:40:47"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.3407083,
+          "turns": 14,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 26,
+            "output": 16026,
+            "cache_read": 471652,
+            "cache_write": 33227
+          },
+          "at": "2026-10-16T14:43:31"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: add a per-project \"Git\" panel to the dashboard (task 016 in data/projects/agentdesk/tasks/016-git-control-panel.md). It shows status and runs merge, pull, push and fetch/refresh, with a UI confirmation before any change.\n\nWork only in an isolated clone of the repo with a temp AGENTDESK_HOME. Never touch the live checkout C:\\Users\\kochurin.a\\AgentDesk or its data/. Do not run `git remote` commands in your own shell.\n\nFiles:\n- agentdesk/core.py: add small git helpers with no UI code. Existing helpers: `run()` and `git()` (~l.480-491), `add_worktree` (~l.494). Project repo path is `p.repo`; base branch is `p.cfg[\"repo\"][\"base\"]`. Add: status (current branch, base, clean/dirty, ahead/behind vs upstream if a remote exists, `auto/*` branches with commits ahead of base), fetch, merge (a branch into base; on conflict run `merge --abort` and return the conflicting files), pull (`--ff-only` by default), push (current or base branch; never force).\n- agentdesk/server.py: `do_GET` (~l.720) and `do_POST` (~l.745) route `/api/p/<slug>/...`; the task spec says `/api/projects/<p>/git`, so match the existing route style. Refuse any action while `runner(p).running()` (~l.54) is true for that project. Mutating actions require the UI confirm; there is no agent tool for them.\n- agentdesk/web/index.html: the panel. Show branch, clean/dirty, ahead/behind, `auto/*` list. Buttons: Refresh, Merge (pick a branch), Pull, Push. Each change action first shows a confirm dialog with branch names, commit count and remote URL. If there is no remote, disable Pull and Push with the hint \"local-only project\". Show git's own message in plain words.\n- Reference for the merge logic: the 015 merge work is only in the clone %TEMP%\\ad015clone (see data\\projects\\agentdesk\\reports\\015.md). It is not on the live main, so write it fresh.\n- tests/: add tests/test_git_panel.py. Use the `project` fixture in tests/conftest.py (scratch repo). Create a local bare repo as the remote with subprocess in the test. Run with `python -m pytest tests` from the repo root. Use `PYTHONDONTWRITEBYTECODE=1 ... -p no:cacheprovider` so tracked __pycache__ files don't change. Install pytest first if needed.\n\nConstraints (CLAUDE.md/README):\n- Never force-push, rewrite history, change remotes, or change global git config.\n- The workers' guard still blocks push for automated runs. The panel's push is a user action only.\n- Drive the server in live tests with Python urllib, not curl -d.\n\nDone when:\n1. Status is correct, and merge, pull, push and fetch work against the local bare remote in tests.\n2. A conflicting merge aborts cleanly. The repo is left exactly as before (same HEAD and clean status), and the response names the conflicting files.\n3. Pull/Push are disabled for a project with no remote.\n4. `python -m pytest tests` passes.\n5. Report the commit hash, files changed, and any part you could not verify.",
+      "commit": "5e39860",
+      "branch": "auto/016",
+      "finished": "2026-10-16T14:44:12"
+    },
+    "017": {
+      "title": "Build control panel (build / recompile menu)",
+      "status": "done",
+      "started": "2026-10-16T14:44:31",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.0053392100000000005,
+          "turns": 8,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 3236,
+            "cache_read": 41221,
+            "cache_write": 14718
+          },
+          "at": "2026-10-16T14:44:54"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.4459132,
+          "turns": 23,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 38,
+            "output": 18106,
+            "cache_read": 836663,
+            "cache_write": 45202
+          },
+          "at": "2026-10-16T14:49:54"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Task 017: add a Build panel to the AgentDesk dashboard.\n\nWORKSPACE: Do all work in an isolated clone or worktree of the test app, with a temp AGENTDESK_HOME. Never edit or run builds in the live checkout C:\\Users\\kochurin.a\\AgentDesk or its data\\ folder.\n\nGOAL: Build, Clean+rebuild, and optional custom build from the UI. Show a streamed log, status (idle/running/ok/failed), start time and duration, and the result path (dist\\AgentDesk\\AgentDesk.exe) with an \"Open folder\" button. Stop button. Only one build at a time. Refuse to start while a task run is active for the project (check runner(p).running() in server.py ~line 92). Build source is a branch or commit, default the base branch. The build runs in a separate worktree or clone so the working copy is untouched.\n\nFILES:\n- agentdesk/core.py: Project (~160), toml helpers near chat_settings (~261), NeedsLocalGit (~206), Store (~400). Add the build runner here: subprocess with no console window on Windows (CREATE_NO_WINDOW, as in server.py ~64), log file under the project folder, and the worktree helpers. Put the custom command in `[build] command = \"...\"` in the project's config. Build commands must come only from project config or the built-in script, never from request text.\n- agentdesk/server.py: do_GET ~720, do_POST ~745, route dispatch for /api/p/<p>/<act> ~766. Add POST build, GET build (status plus log tail), and POST build/stop. Note the route prefix is /api/p/, not /api/projects/. Mutating routes need confirm:true, following the git-panel pattern (core.git_* helpers, ~016).\n- agentdesk/web/index.html: add the panel beside the Git panel. It loads on project switch and after its own actions, not on the poll.\n- tests/: use a fake build command (a small script that prints lines and exits 0 or 1). Cover start, status, log, stop, and refusal during a run.\n\nCONSTRAINTS:\n- Stop must kill the whole process tree on Windows, not only the PowerShell parent. Check that the child PyInstaller process dies too.\n- Don't include data\\ or secrets in outputs.\n- Live dashboard test: use --port 8799, never 8765.\n- Run tests from repo root: `pip install pytest` then `python -m pytest tests`. Use PYTHONDONTWRITEBYTECODE=1 -p no:cacheprovider so tracked __pycache__ files don't change.\n- Shell state resets between calls, so set AGENTDESK_HOME in the same call.\n- Git remote commands are blocked for workers.\n\nDONE WHEN:\n- Build and Clean+rebuild run from the UI with a live log and correct status. Stop works. The result path and Open folder work.\n- A fake-command test covers Stop and the task-run refusal.\n- `python -m pytest tests` passes. Report the diff summary and any unverified items, such as the real build_exe.ps1 run, which may be slow.",
+      "commit": "2d2839e",
+      "branch": "auto/017",
+      "finished": "2026-10-16T14:50:37"
+    },
+    "012": {
+      "title": "Windows installer for the AgentDesk program (default: Program Files)",
+      "status": "done",
+      "started": "2026-10-16T14:50:49",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.004714380000000001,
+          "turns": 5,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2599,
+            "cache_read": 43188,
+            "cache_write": 12789
+          },
+          "at": "2026-10-16T14:51:09"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.6071371000000001,
+          "turns": 42,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 78,
+            "output": 23389,
+            "cache_read": 1780380,
+            "cache_write": 48671
+          },
+          "at": "2026-10-16T14:57:24"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: build AgentDesk-Setup.exe (Inno Setup) from the PyInstaller program of task 008, so it installs to {autopf}\\AgentDesk by default with a folder picker, Start menu entry, optional unchecked desktop icon, and an uninstaller in Apps & features. Data goes to %LOCALAPPDATA%\\AgentDesk when installed.\n\nWORKING COPY: Do not edit or build in C:\\Users\\kochurin.a\\AgentDesk or its data\\. Work in an isolated clone of the test app. Task 008's build files are not in the live checkout; they exist in the 008 worktree and in the clone %TEMP%\\ad015clone (which has 007 and 013 merged). Start from a clean checkout of that clone's main that contains build_exe.ps1, agentdesk.spec, run_agentdesk.py. Tests use a temp AGENTDESK_HOME. Never touch the real data/. git remote commands are blocked.\n\nFiles:\n- New installer/AgentDesk.iss: PrivilegesRequired=admin with DefaultDirName={autopf}\\AgentDesk and the directory page shown. Include the [Icons] entries (Start menu; desktop task unchecked by default). Uninstall step asks \"also remove my data\" and deletes %LOCALAPPDATA%\\AgentDesk only if ticked. Never delete or overwrite data\\ next to the exe. Check for Claude Code CLI and WebView2 with a message and link, then continue.\n- New build_installer.ps1: run build_exe.ps1, then ISCC.exe on the .iss, output dist\\installer\\AgentDesk-Setup.exe. Build from a clean checkout.\n- Data rule: agentdesk/core.py line 39 sets DATA from AGENTDESK_HOME or APP/data. For the frozen program, use data next to the .exe if it exists there, else %LOCALAPPDATA%\\AgentDesk (task 008's FROZEN rule). Or set AGENTDESK_HOME from the shortcut. Keep the source behaviour unchanged: AgentDesk.cmd must still work from the repo. server.py line 61 passes AGENTDESK_HOME=core.DATA to children; check that stays correct.\n- Shortcut: starts the program with the window (task 005, server.open_window) and tray (task 011). Single-instance and background behaviour from task 001 still apply.\n- README.md: add \"Build the installer\" and \"Install\" sections covering install, uninstall, and where data goes.\n\nConstraints: the installer must not bundle data\\, logins, API keys, or project files. It must not install Python or Claude Code. The installed file list must have no data, .venv, worktrees or __pycache__ (check with a listing).\n\nDone when:\n1. build_installer.ps1 produces dist\\installer\\AgentDesk-Setup.exe from a clean checkout.\n2. Default install lands in C:\\Program Files\\AgentDesk; the window opens from the Start menu; data goes to %LOCALAPPDATA%\\AgentDesk.\n3. Changing the folder in setup works. Installing to a non-admin folder works without elevation.\n4. Uninstall removes the program; data stays unless ticked.\n5. Report what was actually tested (install, launch, uninstall) and the installer size. Note that the no-window pythonw check from task 013 is still outstanding.",
+      "commit": "4a3b997",
+      "branch": "auto/012",
+      "finished": "2026-10-16T14:57:54"
+    },
+    "018": {
+      "title": "Export and import projects (to git, or to an offline file)",
+      "status": "done",
+      "started": "2026-10-16T14:59:01",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00526196,
+          "turns": 10,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3661,
+            "cache_read": 59416,
+            "cache_write": 12179
+          },
+          "at": "2026-10-16T14:59:25"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.8323956,
+          "turns": 26,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 48,
+            "output": 37210,
+            "cache_read": 1575461,
+            "cache_write": 75574
+          },
+          "at": "2026-10-16T15:07:17"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "GOAL: Add project export/import in two forms: (1) offline .zip; (2) git: commit the same content into `.agentdesk/` (or a user-named config repo) and push via the 016 git panel confirmation. Import creates a project from a zip, or clones/pulls a repo/folder. Also add CLI `export <project> <file>` and `import-file <file>`. Keep the existing `import` command (`__main__.py` ~150, 175) unchanged.\n\nWORK IN THE ISOLATED CLONE, NOT the live checkout C:\\Users\\kochurin.a\\AgentDesk. Never touch the live `data/`. Tests use a temp AGENTDESK_HOME (tests/conftest.py sets it before agentdesk imports). Run from repo root: `python -m pytest tests` (use PYTHONDONTWRITEBYTECODE=1 and -p no:cacheprovider; __pycache__ is tracked). Git tests use a local bare repo.\n\nFILES:\n- agentdesk/core.py: `Project` dataclass (160-182: slug, dir, cfg; `repo`, `tasks_dir`, `path(name)`); `projects()`/`project()` (185-199) read `DATA/projects/<slug>/project.toml`; `_project_text`/`_project_cfg`/`_write_project` (271-281); `add_project` (366); `load_tasks`/`add_task` (435-463); `keep_notes` (808); `NeedsLocalGit` (206); `repo_state` (218). Add `export_project`, `import_project` (zip + folder variants) and `manifest.json` (format version, project name, exported-at, app version). Use `core.FROZEN`/`_data_home()` for data paths.\n- agentdesk/server.py: `do_POST` (745). Add `POST /api/projects/<p>/export`, `POST /api/projects/import`. Git routes live under the 016 `core.git_*` helpers; mutating routes need `confirm: true` and are refused while `runner(p).running()`.\n- agentdesk/web/index.html: Export/Import buttons per project, Import on the project list, name-clash and repo-path/clone-URL dialogs.\n- Tests: new file in tests/ (see test_local_git.py for local-repo patterns).\n\nINCLUDE: project.toml config, tasks/, notes.md, state.json, reports/, chat history, per-project settings. Optional \"include logs\" adds agentdesk.log.\nEXCLUDE ALWAYS: account logins/keys/tokens/credential files, worktrees. On import, repo path is set locally (user picks path or clone URL); account is picked from local accounts or left unset.\n\nCONSTRAINTS:\n- Import never overwrites: on name clash return a new-name request (UI) or refuse (CLI).\n- Zip import rejects: paths escaping the project folder (zip-slip), unknown manifest format versions, oversize files (set a limit and test it).\n- Git export never force-pushes and never changes remotes; push goes through the 016 confirmation. Pull/push use the first remote (origin preferred).\n- Chat history stored under the project; check it contains no account refs/keys before export.\n- Automated workers cannot run `git remote` commands.\n\nDONE WHEN:\n1. Export then import (zip, and via a local bare repo) into a fresh temp AGENTDESK_HOME recreates tasks, notes, reports and state.\n2. A test scans the export for the account/key values and fails if any appear.\n3. Zip-slip, oversize, bad-version and name-clash tests pass.\n4. `python -m pytest tests` passes (about 30s).\n5. Report back: files changed, test output, and any part you could not verify (e.g. UI dialogs, which need a manual check).",
+      "commit": "d952234",
+      "branch": "auto/018",
+      "finished": "2026-10-16T15:08:03"
+    },
+    "019": {
+      "title": "Auto-runner: automatic queue management for every project (app-wide)",
+      "status": "done",
+      "started": "2026-10-16T15:08:49",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.004465400000000001,
+          "turns": 5,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2391,
+            "cache_read": 40930,
+            "cache_write": 11730
+          },
+          "at": "2026-10-16T15:09:09"
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.8160068,
+          "turns": 33,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 60,
+            "output": 26389,
+            "cache_read": 2155662,
+            "cache_write": 84008
+          },
+          "at": "2026-10-16T15:13:44"
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "TASK 019 — Auto-runner (app-wide, no model calls). Work ONLY in an isolated clone of the repo (e.g. a fresh clone of C:\\Users\\kochurin.a\\AgentDesk into a new temp dir), with a temp AGENTDESK_HOME. Never edit or write the live checkout or its data/. Do not run `git remote` commands. Run tests from the clone root as `python -m pytest tests` (conftest sets AGENTDESK_HOME). Use port 8799 for any dashboard test. Do not start real worker runs: fake the run starter in tests.\n\nGOAL: every project (existing and new) is managed by a background loop in the dashboard server, one pass ~every 30 s:\n1. Start next: if no run is going for the project and a pending task has all dependencies done, start it via the same path as run_next (server.py ~line 349). One run per project.\n2. Stale recovery: task `working` whose runner pid is gone (check project runner.pid / runner(p).running(), server.py ~92) → set to pending, last_failure \"worker exited unexpectedly (code N)\" when known. Example: exit 129 left task 008 stuck.\n3. One automatic retry for crash/kill/infrastructure end (not failed gate, not task-level failure). After that, stop and flag.\n4. Skip when core.usage_paused(acct) is set (core.py ~636); never start when the project has a pending approval.\n5. Flag, never act: failed gates (run_gates ~568), repeated failures, merge conflicts, done tasks whose branch is unmerged and unreviewed (task 015 merge state). Flags show in a \"Needs attention\" list (count badge; reason, task id, button to open report/log) and are appended to the project log.\n6. Never merge, push, delete branches or change remotes automatically.\n\nPURE FUNCTIONS in core.py (testable with fake state): next_startable, recover_stale, classify_failure, attention_items.\n\nSETTINGS: settings.toml [autorunner] enabled=true, interval_s=30, retry_crashed=1 (DEFAULT_SETTINGS string ~line 42; settings() ~112). Per-project override in project config via _project_cfg/_write_project (~271-285) — write nothing per-project unless the user changes it. A project with no override is enabled. add_project (~366) must not write autorunner keys.\n\nAPI: GET /api/attention; POST /api/projects/<p>/autorunner (per-project on/off; also a global toggle). Status string visible in UI: \"Auto: on\" / \"paused: usage limit\" / \"waiting: needs attention\".\n\nLOOP: start in server.py main() (~902) only in the single-instance server-owning process (reuse existing single-instance logic); no double starts after restart. QUIT event exists (server.py) — the loop should stop on it.\n\nUI: agentdesk/web/index.html — per-project toggle, global toggle, status, Needs attention list.\n\nCONSTRAINTS: no model/API calls from the loop; it only reads state and checks pids. Mutating POST routes need confirm:true where the existing pattern does. Don't break the existing run_next path.\n\nTESTS (tests/): unit tests for the four pure functions with fake state; a test that a freshly added project (add_project) is auto-managed with defaults and writes no per-project autorunner keys; a test that retry happens once then flags; a test that gate failures and unmerged done branches produce attention items and no merge/push is called. Full pytest must pass.\n\nDONE WHEN: with two projects and a queue, tasks start in sequence without clicks (demonstrated via fake starter); killed run recovered and retried once, then flagged; new project managed with no setup (tested); gate failures and unmerged branches appear under Needs attention; nothing merged or pushed. Report exactly what was tested and what was not (e.g. real worker runs and live dashboard not exercised).",
+      "commit": "31cb177",
+      "branch": "auto/019",
+      "finished": "2026-10-16T15:14:14"
+    },
+    "006": {
+      "title": "Chat Planner mode: plan first, start work after approval",
+      "status": "done",
+      "started": "2026-10-16T19:43:30",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00496609,
+          "turns": 4,
+          "error": false,
+          "tokens": {
+            "input": 4,
+            "output": 2121,
+            "cache_read": 23029,
+            "cache_write": 16254
+          },
+          "at": "2026-10-16T15:27:35",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.006585560000000001,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 2805,
+            "cache_read": 72216,
+            "cache_write": 20200
+          },
+          "at": "2026-10-16T19:43:49",
+          "usage_before": 25.0,
+          "usage_after": 25.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "cost_usd": 3.1503587,
+          "turns": 51,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 66,
+            "output": 64383,
+            "cache_read": 3660532,
+            "cache_write": 141246
+          },
+          "at": "2026-10-16T19:57:01",
+          "usage_before": 25.0,
+          "usage_after": 62.0,
+          "usage_used_pct": 37.0
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "cost_usd": 3.5586189,
+          "turns": 13,
+          "error": false,
+          "attempt": 2,
+          "tokens": {
+            "input": 14,
+            "output": 5238,
+            "cache_read": 1129221,
+            "cache_write": 9700
+          },
+          "at": "2026-10-16T19:59:00",
+          "usage_before": 62.0,
+          "usage_after": 65.0,
+          "usage_used_pct": 3.0
+        }
+      ],
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "Goal: add a third chat mode, \"planner\", beside assistant and coworker. Full spec is task 006 (tasks/006-chat-planner-mode.md in data/projects/agentdesk). Summary: the user describes work; the planner (read-only tools Read/Glob/Grep plus propose_plan, update_plan, cancel_plan) writes a plan of ordered tasks (goal, files, tier, depends) as draft task files. The chat shows a plan card with Approve and start / Edit / Cancel, reusing the approval card from task 003. Approve turns drafts into real tasks and starts the queue as \"Run all\", and the chat reports progress and blocked tasks. A Stop button uses stop_run without approval. The planner never edits repo code, never pushes, and reports blocked tasks without rewriting the plan.\n\nFiles:\n- agentdesk/server.py: class Chat (line ~308); the tool definitions around queue_status (~463) and run_all (~481) are the pattern to copy; chat(p) at ~680; Runner/runner() at 49/93; attention_all ~972 for surfacing blocked items.\n- agentdesk/core.py: Task and load_tasks (~722-745) globs only tasks/*.md, so a tasks/drafts/ subfolder is excluded by default; verify, and make sure next_startable (~1073) and any \"Run all\" path can't see drafts. chat_settings (~553), chat_mode/set_chat_mode (~578-595; the test for coworker persistence is in tests/test_chat.py ~246). DEFAULT_SETTINGS holds the [chat.*] defaults; data/settings.toml needs [chat.planner] added (model sonnet, effort medium, budget_usd 2.0) without changing existing user values.\n- agentdesk/web/index.html: mode toggle in the chat header, plan card, progress in chat. This file is mixed CRLF; edit it byte-wise with Python open(...,'rb'), never a text-mode rewrite. The placeholder/working logic in send() is a reference.\n- README.md: the modes section (~line 96-120), add planner.\n\nConstraints:\n- Drafts must never be started by Run next, Run all, or the auto-runner before approval. One approved plan per project at a time.\n- Budget per message from [chat.planner] budget_usd; the account usage pause (pause_at_utilization) applies and the chat says so when paused.\n- Coworker's permission rules are the model: same guard rules as workers, no publishing.\n- Tests: use a temp AGENTDESK_HOME or monkeypatch core.DATA; never touch the live app on port 8765; keep data/ intact (don't rewrite the user's project.toml or settings). Full pytest run is about 30 s. Live test only with a tiny request.\n- Model memory cost is not counted in chat_usage.json (existing decision).\n\nDone when: the mode toggles and persists in project.toml; a request writes draft files (marked draft, not runnable) and a plan card appears; nothing runs before Approve; after Approve, tasks run in dependency order and the chat shows progress; Cancel deletes the drafts; Edit updates the draft plan. Tests cover draft exclusion from the queue, approval start, and cancel, and the existing suite still passes.",
+      "last_failure": null,
+      "crashes": 0,
+      "commit": "35c144f",
+      "branch": "auto/006",
+      "finished": "2026-10-16T19:59:16"
+    },
+    "009": {
+      "title": "Persist assistant chat history to disk",
+      "status": "done",
+      "started": "2026-10-16T15:39:46",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00418896,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2300,
+            "cache_read": 39216,
+            "cache_write": 11217
+          },
+          "at": "2026-10-16T15:40:06",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "mechanical",
+          "model": "haiku",
+          "cost_usd": 0.017686020000000004,
+          "turns": 17,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 24,
+            "output": 10444,
+            "cache_read": 384172,
+            "cache_write": 41467
+          },
+          "at": "2026-10-16T15:42:17",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        }
+      ],
+      "tier": "mechanical",
+      "why": "set in the task file",
+      "brief": "Goal: persist the assistant chat transcript per project to data/projects/<slug>/chat.json so it survives a server restart. Only the visible transcript is restored. Do not restore the SDK session.\n\nEnvironment rule (owner): do all work in the isolated container's cloned test app, not the live checkout C:\\Users\\kochurin.a\\AgentDesk and not its data/. Use a temp AGENTDESK_HOME for any run. Do not run git remote commands.\n\nFiles (line numbers are approximate, from the current checkout):\n- agentdesk/server.py\n  - Chat.__init__, ~241-252: self.history = [] (add the load here, or in chat()).\n  - Chat.ask, ~484-499: appends the user message at 486 and the assistant message at 498. Save after each append.\n  - Chat.reset, ~501-514: clears history unless keep_history=True. Delete or empty chat.json when history is cleared. A mode switch (keep_history) keeps the file.\n  - chat(p), ~543-547: creates Chat per slug in CHATS. Loading here is fine, since it runs per project on first use.\n  - _ask / chat_usage.json write, ~472: leave unchanged.\n- agentdesk/core.py ~548: Project.save() shows the temp-file-then-replace pattern to copy. Use self.p.path(\"chat.json\").\n- tests/test_chat.py: fixture `chat` at ~32-36 builds server.Chat(server.LOOP, project). The `project` fixture is in conftest.\n\nSteps:\n1. Load: if chat.json exists and parses as a list, set self.history to it. Missing, unreadable, or non-list gives []. Never raise.\n2. Save: after each append in ask(), write the full list as UTF-8, ensure_ascii=False, to a temp file in the same directory, then os.replace it over chat.json.\n3. Reset: when history is cleared, remove or empty chat.json.\n4. Entry shape stays {\"role\",\"text\"}, plus \"tools\" and \"cost\" for assistant entries.\n\nConstraints:\n- Do not change can_use_tool / permission() rules.\n- Do not change the frontend.\n- Do not change chat_usage.json behaviour.\n- Keep the mode-switch path (keep_history=True) intact.\n\nDone when:\n- A new test in tests/test_chat.py writes a history via ask-equivalent appends (or direct save), builds a new Chat for the same project dir, and checks the history reloads. Use tmp_path or the project fixture. Also test reset clears the file, and that corrupted JSON gives an empty history.\n- python -m pytest tests/test_chat.py passes, and the full suite passes (about 30s).\n- Report the diff summary and the test output. Note any place where the approach differs from this brief and why.",
+      "commit": "062cd24",
+      "branch": "auto/009",
+      "finished": "2026-10-16T15:43:09"
+    },
+    "010": {
+      "title": "Assistant chat remembers key points across restarts",
+      "status": "done",
+      "started": "2026-10-16T15:43:24",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00531229,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2458,
+            "cache_read": 39869,
+            "cache_write": 16347
+          },
+          "at": "2026-10-16T15:43:45",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.2974557,
+          "turns": 23,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 28,
+            "output": 9005,
+            "cache_read": 562612,
+            "cache_write": 37687
+          },
+          "at": "2026-10-16T15:46:20",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: the Assistant chat keeps a short running memory across server restarts. Add per-project `chat_memory.md` (plain Markdown, sections: Decisions, Facts about the project, Open questions, User preferences; capped at about 1500 words). Keep it separate from `chat.json`, which is display-only and never sent to the model.\n\nFiles:\n- agentdesk/server.py\n  - `CHAT_PROMPT` (~line 111) and `Chat._assistant_options()` (~375): the system prompt is built here.\n  - `Chat._client()` (~401) and `_close()` (~412): session creation. Inject memory here so each new session gets the latest content.\n  - `Chat._ask()` (~423-478): where the reply is produced. It runs on the SDK loop. The `generation` counter (~252, ~466) guards against stale sessions.\n  - `Chat.ask()` (~484): holds `self.lock`, appends history, and returns the answer. The memory update belongs after the reply is saved to `chat.json`, inside this lock.\n  - `Chat.reset()` (~501): clears history, the session, and now memory.\n  - Use `self.p.path(\"chat_memory.md\")` for storage. Write via a temp file, then replace.\n- tests/test_chat.py: the `chat` fixture (~33) and `start()`/`wait_pending()` helpers.\n\nConstraints:\n- No CLAUDE.md or AGENTS.md was found at the repo root. Follow the existing style in server.py.\n- The memory-update call must use no tools and must not touch `permission()` or `can_use_tool`. Use the chat model setting or haiku. Use a one-shot, tool-free call; do not reuse the chat session.\n- The updater's input is the old memory plus the last user and assistant messages. Its output is the full updated memory in the fixed format. Reject an empty reply, a reply missing the section headings, or one over the cap after one retry. Keep the old memory in each of those cases.\n- Never store secrets or file contents. Only key facts.\n- Log failures and keep the chat working. A failed update must not change the reply shown.\n- The updater's cost stays out of `chat_usage.json`, so note in the report that it is not counted.\n- Inject memory under a heading like \"What you remember from earlier conversations\" when the session is created.\n- After `reset()`, both files are empty and the next session has no memory.\n- A session recreated after an error gets the same memory.\n\nDone when:\n- Unit tests in tests/test_chat.py cover: memory injected into the system prompt; memory written after an `ask` (mock the model call); reset clears memory; a failing or malformed update keeps the old memory and the chat still answers.\n- Run the full pytest suite (about 30s). Do not start a real server on 8765.\n- Note in the report that the real restart check (tell a fact, restart, ask) is manual and was not run.",
+      "commit": "1eb49c5",
+      "branch": "auto/010",
+      "finished": "2026-10-16T15:49:27"
+    },
+    "014": {
+      "title": "Bash approval card in the chat doesn't close after the answer",
+      "status": "done",
+      "started": "2026-10-16T15:56:50",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00585816,
+          "turns": 9,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3477,
+            "cache_read": 62716,
+            "cache_write": 14778
+          },
+          "at": "2026-10-16T15:50:07",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.14632599999999998,
+          "turns": 13,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 18,
+            "output": 3601,
+            "cache_read": 266208,
+            "cache_write": 20828
+          },
+          "at": "2026-10-16T15:52:48",
+          "usage_before": 52.0,
+          "usage_after": 52.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.0038418199999999997,
+          "turns": 8,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 3430,
+            "cache_read": 47142,
+            "cache_write": 6221
+          },
+          "at": "2026-10-16T15:57:14",
+          "usage_before": 84.0,
+          "usage_after": 84.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.1678326,
+          "turns": 11,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 20,
+            "output": 4784,
+            "cache_read": 282143,
+            "cache_write": 22849
+          },
+          "at": "2026-10-16T15:59:02",
+          "usage_before": 84.0,
+          "usage_after": 87.0,
+          "usage_used_pct": 3.0
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "GOAL (task 014): a Bash/PowerShell approval card in the chat must disappear after Allow once / Always allow / Deny, with the command running once (Allow) or not running (Deny), and with no second prompt. A card whose request already ended (timeout, reset) must disappear on the next poll.\n\nLIKELY CAUSE (read-only, verify before fixing): in agentdesk/web/index.html, `answer()` (~line 530-534) sets `pendingKey = \"\"` and then calls `pollPending()`. When the server's list is now empty, `key` is also \"\" (line 517), so the guard at line 518 (`if (key === pendingKey) return;`) returns early and the DOM is never cleared. Later polls also see \"\" === \"\" and return, so the stale card stays until a new approval arrives. Confirm this in the clone (e.g. Allow the last card and watch #pending). The 404 path (server.py ~1068, \"that request isn't waiting any more\") goes through the same early return, so it hits the same bug.\n\nFILES:\n- agentdesk/web/index.html ~513-538: pollPending, answer. The re-render must also run when the list becomes empty. Keep the typing-safe behaviour (no re-render when the id set is unchanged).\n- agentdesk/server.py ~177-221: class Approvals (ask, pending, resolve, deny_all). ask removes the item in `finally`. ~246: Chat creates Approvals(loop). ~256-: Chat.permission, where Bash/PowerShell go through core.command_allowed and core.guard_denied. ~1068: the pending endpoint with 404.\n- tests/: test_chat.py and conftest.py. Extend the existing approval-queue tests (allow once, always allow, deny, timeout). Check whether any test covers the empty-list case.\n\nCONSTRAINTS:\n- Work only in an isolated cloned test app. Never touch the live app, its data/, or port 8765. Use a temp AGENTDESK_HOME.\n- Do not weaken approval rules: nothing runs before Allow; Deny and timeout still deny.\n- Do not change core.guard_denied or the allow-list format.\n- Do not run git remote commands (blocked for workers).\n- Tests: from tests/, run `PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider`. A full run takes about 30 s.\n- The JS is not covered by the Python tests. If you add a pure-Python test of the endpoint, say so. For the UI fix, state how you checked it (browser run or manual steps).\n\nDONE WHEN:\n1. Reproduced in the clone: a Bash card, then Allow once → card gone, command runs once. Deny → card gone, command does not run. Always allow → card gone, and the same prefix no longer asks.\n2. A card whose request has ended (timeout or reset) disappears on the next poll.\n3. A test covers the stuck-card case and fails before the fix. The full pytest run passes.\n4. Report: root cause, files changed, and what was tested, including what was not testable (the JS path).",
+      "last_failure": "worker exited unexpectedly",
+      "crashes": 1,
+      "commit": "e514501",
+      "branch": "auto/014",
+      "finished": "2026-10-16T15:59:53"
+    },
+    "020": {
+      "title": "Animated working indicator in chat while the assistant answers",
+      "status": "done",
+      "started": "2026-10-16T19:35:28",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00572545,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2504,
+            "cache_read": 30185,
+            "cache_write": 19012
+          },
+          "at": "2026-10-16T19:35:43",
+          "usage_before": 19.0,
+          "usage_after": 19.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "mechanical",
+          "model": "haiku",
+          "cost_usd": 0.012561989999999999,
+          "turns": 8,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 14,
+            "output": 7271,
+            "cache_read": 175169,
+            "cache_write": 34342
+          },
+          "at": "2026-10-16T19:36:44",
+          "usage_before": 19.0,
+          "usage_after": 19.0,
+          "usage_used_pct": null
+        }
+      ],
+      "tier": "mechanical",
+      "why": "set in the task file",
+      "brief": "Task 020: animated working indicator in the chat placeholder bubble (agentdesk/web/index.html only; do not touch agentdesk/server.py or the chat API).\n\nCurrent code:\n- index.html ~61-68: `.msg` / `.msg.assistant` / `.msg .cost` CSS rules. Add new rules in the same style.\n- index.html ~475-491: `addMsg(role, text, meta)` builds the bubble with `md(text)` via innerHTML. Returns the div.\n- index.html ~492-499: `send()`. Line 495 creates the placeholder `addMsg(\"assistant\", \"…\")` and captures `forProject = cur`. Line 496 awaits `api(/api/p/${cur}/chat)`, calls `wait.remove()`, then adds the reply only if `forProject === cur`. Line 497 on error sets `wait.textContent = \"Error: \" + e`. Line 498 re-enables send and calls `refreshAll()`.\n\nBuild:\n1. CSS: three dots (spans) with a keyframe pulse/bounce, plus a small elapsed counter. Use the existing class-naming style (e.g. `.working`, `.working i`). Wrap the animation in `@media (prefers-reduced-motion: reduce)` so it is static or disabled.\n2. In send(): replace the \"…\" with the dots and a counter text such as \"working… Ns\". Start a `setInterval` (1 s) that updates the counter from a start timestamp.\n3. Clear the interval in every exit path: the success path after `wait.remove()`, and the catch path. The catch path currently overwrites textContent, so the indicator must be gone there.\n4. Project switch: if the user switches project while waiting, the bubble must not remain visible in the new view and the timer must stop. Find the project-switch code that clears or reloads `#msgs` and confirm it. The timer must still be cleared even if the bubble was removed from the DOM. Simplest approach: clear the timer when `forProject !== cur` is seen, or when the bubble is detached.\n5. Keep the send button disabled while waiting and keep the error text on failure.\n\nConstraints:\n- Plain HTML/CSS/JS, no new dependencies.\n- index.html has mixed CRLF/CR line endings. Edit it byte-wise (for example a targeted replace that preserves the other bytes). A text-mode rewrite turns the whole file into a diff. Check `git diff --stat` afterwards and confirm the diff is small.\n- Build the indicator with DOM APIs or escaped text, not raw innerHTML with user content.\n- JS here has no automated tests. The only check is the source-text test in tests/test_chat.py, if any.\n\nDone when:\n- `python -m pytest tests/test_chat.py -q` passes (a full run takes about 30 s).\n- The diff is limited to CSS plus send()/addMsg() and any project-switch handling.\n- Manual review: the dots and counter appear on send; success removes the timer and shows the reply; error shows \"Error: …\" with no timer left; switching project mid-request leaves no indicator and no interval running.\n- Report what you could not verify in the browser.",
+      "commit": "33ccf5a",
+      "branch": "auto/020",
+      "finished": "2026-10-16T19:39:35"
+    },
+    "021": {
+      "title": "Chat: Coworker button covers Planner; idle chat shows working and Stop does nothing",
+      "status": "done",
+      "started": "2026-10-20T09:29:15",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.00648431,
+          "turns": 6,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2457,
+            "cache_read": 33271,
+            "cache_write": 22671
+          },
+          "at": "2026-10-20T09:29:30",
+          "usage_before": 73.0,
+          "usage_after": 73.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "cost_usd": 0.2581227,
+          "turns": 12,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 20,
+            "output": 6012,
+            "cache_read": 298614,
+            "cache_write": 41940
+          },
+          "at": "2026-10-20T09:31:44",
+          "usage_before": 73.0,
+          "usage_after": 73.0,
+          "usage_used_pct": 0.0
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Task 021, two chat-panel bugs in the AgentDesk dashboard.\n\nPART 1: Mode buttons overlap (agentdesk/web/index.html).\n- The header is `section > h3` (line ~48, flex, gap 8px, padding 10px 14px). It holds the `<span class=\"seg\" id=\"modeSeg\">` (Assistant/Coworker/Planner buttons, ~line 331), `#coworkBadge` (line ~332, long text \"Coworker: full access, no approvals\"), `#chatModel`, a `.spacer`, and the \"New chat\" button (~line 333).\n- CSS: `.seg` at line ~74, `.seg button` at ~75 (padding 3px 10px). Check `.badge` and `.spacer` rules too.\n- Fix so all three mode buttons are fully visible and clickable at default width. Let the header wrap, or let the badge and model text shrink or truncate (ellipsis, min-width:0, flex-shrink). Do not rename modes. Keep `showMode()` (~line 592) working; it toggles `.on` via `$(\"modeSeg\").children`.\n\nPART 2: Idle chat shows \"working…\"; Stop does nothing.\n- Frontend: `showLive(s)` (~line 580) shows `#liveBar` when `s.chat_live && s.chat_busy`. `interruptChat()` (~line 579) POSTs `/api/p/<cur>/chat/interrupt`.\n- Server agentdesk/server.py, class Chat (~line 403 onward). `busy` is set at 913 (AssistantMessage, in `_live_event`), 1006 (`_live_send`), 1105/1107/1115 (ask path), and cleared at 908 (session_state_changed idle), 943 (`_live_result`), 982 (`_pump` finally), 1101, 1127. The background-turn path is around 913. The reset path is around 1089-1140. `interrupt()` (~line 1024) returns False early when `not self.busy`, so Stop silently does nothing. `/state` exposes `chat_busy` at ~line 1515 and `chat_idle_s` at ~883.\n- Trace every transition and find a path that leaves `busy` True after the turn ends (for example, an AssistantMessage after the result, or an exception path that skips the clear). Make `busy` False whenever no turn is running.\n- Stop: if the bar is shown, Stop must end it, so clear `busy` and hide the bar in the interrupt path. Stop must always give feedback through `self.note(...)`. When idle, it should say something like \"Nothing to stop: no reply is running.\" and must not show the bar.\n\nCONSTRAINTS: Don't change Coworker/Planner behaviour beyond these fixes. Don't alter the budget or memory logic. Don't touch cost accounting. Use the write rules in the project notes for shared files. index.html is CRLF throughout: edit it byte-wise with Python (open(...,'rb')), and never do a text-mode rewrite. Run `pytest tests` only, not the data folder. Tests that call server.main() must not start real work.\n\nDONE WHEN:\n(a) All three mode buttons are clickable in the header at normal width (check the CSS, and optionally a width check).\n(b) After a reply completes, the bar is hidden and /state reports chat_busy false. Add a test for the reset of the busy flag, using the existing test patterns and patching where needed.\n(c) Stop during a real turn interrupts it and clears the bar. Stop when idle shows no bar and leaves a note.\n(d) Tests added or updated; `pytest tests` passes.",
+      "commit": "c24b446",
+      "branch": "auto/021",
+      "finished": "2026-10-20T09:33:01"
+    },
+    "022": {
+      "title": "Task detail view: prompt → orchestrator handoff → agent work → agent report",
+      "status": "done",
+      "started": "2026-10-20T11:04:29",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "cost_usd": 0.01059695,
+          "turns": 14,
+          "error": false,
+          "tokens": {
+            "input": 14,
+            "output": 4535,
+            "cache_read": 144955,
+            "cache_write": 32596
+          },
+          "at": "2026-10-20T11:04:59",
+          "usage_before": 74.0,
+          "usage_after": 74.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "cost_usd": 2.1615704,
+          "turns": 52,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 88,
+            "output": 40861,
+            "cache_read": 2781520,
+            "cache_write": 98423
+          },
+          "at": "2026-10-20T11:12:19",
+          "usage_before": 74.0,
+          "usage_after": 76.0,
+          "usage_used_pct": 2.0
+        }
+      ],
+      "tier": "hard",
+      "why": "Changes span the task endpoint, the run-recording path in core.py (route/work), a new per-task activity log, and a UI restructure of showDetail with collapse state and no-op re-render rules. Involves design choices about what to record and how to keep polling from resetting the panel.",
+      "brief": "GOAL: Task 022. Rework the task detail panel so clicking a task shows, in order, collapsible sections: (1) Prompt = tasks/<id>.md body; (2) Orchestrator handoff = tier, model, effort, router `why`, the brief given to the worker, depends, branch/worktree, and each run (tier/model/attempt/when); (3) Agent work = readable timeline of the worker run (tool calls, files touched, commands, checks, turns, tokens, cost, failures/retries); (4) Agent report = reports/<id>.md rendered. Done tasks: report open, others collapsed. Empty states: \"not started yet\", etc.\n\nFILES\n- agentdesk/server.py ~1822-1828: GET /api/p/<slug>/task/<id>. Returns body, brief, report only. Extend it (or add a sibling /activity route) with the handoff fields and activity.\n- agentdesk/server.py ~1507-1519 project_state(): run entries are already in /state; reuse, don't duplicate.\n- agentdesk/core.py ~762-780 Store (log writes agentdesk.log per project; save uses write_atomic). ~1613-1649 route() appends a \"router\" run; ~1652-1705 work() appends worker runs (tier, model, attempt, turns, tokens, cost, usage window), logs attempts and checks, and loops over client.receive_response(). ~1392 attention_items.\n- agentdesk/web/index.html ~505-520 pickTask/showDetail. detailCache is fetched once per selection, and innerHTML is only replaced when the HTML string changes (dataset.h). ~493 calls showDetail(false) on every refresh. Keep that rule; use <details> with open state kept across re-renders, and only refetch when the task's status or run count changes.\n- No per-run transcript is stored today. Effort is not recorded on runs. The router's and worker's tool calls are not recorded. Only state.json runs and agentdesk.log lines exist.\n\nRECORDING: Add an append-only per-task file, data/projects/<slug>/runs/<id>.jsonl, written from the SDK message loop in route() and work(). Record compact events: tool_use (name, short input summary, file path for Edit/Write), tool_result errors, text snippets capped, checks run and their pass/fail, retries, network retries, and the result. Cap sizes. Record effort on each run entry. Decide and state whether runs/ belongs in core.export_files (allow-list, ~core.py 1820) and note the choice.\n\nCONSTRAINTS\n- Repo CLAUDE.md/AGENTS.md not found; follow README and existing code style.\n- index.html is CRLF/mixed: edit byte-wise with Python open(...,'rb'), never text-mode rewrite. Keep the whole diff to the panel code.\n- Write shared files with core.write_atomic. The dashboard reads state.json while runs write it.\n- Escape all user/model text (esc()). Don't let the timeline or report break layout (pre-wrap, max height with scroll).\n- Tests: the only JS check is a source-text test. Add Python tests for the endpoint shape, the jsonl writer, the empty states (no runs, no report), and the export decision. Test helpers patch core.DATA. Don't trigger real runs; server.main() tests must not start loops.\n\nDONE WHEN: `pytest tests` passes; GET returns handoff/activity/report for a finished task and empty states for a pending one; the panel keeps scroll and open sections across polls with no state change; the new jsonl is written during a (mocked) run.",
+      "commit": "d76aac8",
+      "branch": "auto/022",
+      "finished": "2026-10-20T11:13:39"
+    },
+    "023": {
+      "title": "Orchestrator speed: skip router when tier set, cache load_tasks, lazy SDK import",
+      "status": "done",
+      "started": "2026-10-22T18:03:26",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "effort": null,
+          "cost_usd": 0.007752810000000001,
+          "turns": 8,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 3310,
+            "cache_read": 41361,
+            "cache_write": 26568
+          },
+          "at": "2026-10-22T18:03:47",
+          "usage_before": 2.0,
+          "usage_after": 2.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.48975769999999996,
+          "turns": 32,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 60,
+            "output": 15333,
+            "cache_read": 1474074,
+            "cache_write": 47148
+          },
+          "at": "2026-10-22T18:08:22",
+          "usage_before": 2.0,
+          "usage_after": 3.0,
+          "usage_used_pct": 1.0
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Task 023: cheaper, faster orchestrator. No behaviour change. Repo: C:\\Users\\kochurin.a\\AgentDesk.\n\nFiles are CRLF (core.py, server.py). Edit byte-wise (Python open(...,'rb')/'wb') or keep CRLF; a text-mode rewrite makes whole-file diffs.\n\n1. Router skip. core.py route() (~1701-1743) always calls the model, then at ~1740 overrides the tier if task.tier is in TIER_ORDER. Instead, if task.tier in TIER_ORDER at the top of route(), return {\"tier\": task.tier, \"why\": \"set in the task file\", \"brief\": task.body} without calling query(). Keep the act.add(\"routed\", ...) event on that path too. Check the plan-only path plan_tasks() (~1895-1904) still works: it reads plan[\"brief\"] and plan[\"tier\"]. Remove the now-dead override at ~1740 only if it is unreachable.\n\n2. load_tasks cache. core.py load_tasks() (~797-812) re-reads and parses every tasks/*.md. Add a module-level cache keyed by path, storing (mtime_ns, size) and the parsed Task or a skip marker (draft or invalid). Keep the draft skip and the KeyError/TOMLDecodeError skip. Files added, removed or changed must show up on the next call. add_task (~815) must be visible immediately. Stat-based keying covers this, but also drop entries whose file no longer exists. Return fresh copies: dataclasses.replace(t, depends=list(t.depends), crates=list(t.crates)). Callers mutate task.crates. Guard the cache with a threading.Lock if the server calls it from threads (check server.py).\n\n3. Lazy SDK import. core.py line 31 and server.py line 26 import claude_agent_sdk at module top. core.py already imports it lazily at lines 61 and 331. Defer the top-level import until first use. A small accessor such as _sdk() that imports and caches, or imports inside the functions that use the names, both work. Names in use: ClaudeSDKClient, ClaudeAgentOptions, AssistantMessage, ResultMessage, PermissionResultAllow/Deny, query, plus others. Grep both files for isinstance uses and make sure each one still resolves. Before you change anything, grep tests/ for monkeypatch of SDK names on core or server, since patching them lazily will break. Leave agentdesk.spec unchanged. It collects claude_agent_sdk via collect_all, so PyInstaller still works.\n\nTests: run `pytest tests` (not bare pytest). All 174 must pass. Add tests for (1) route() skipping the model when tier is set, with query() patched to fail if called, and (2) load_tasks cache: an edit, an add and a delete each show up, and mutating a returned task's crates does not affect the next call.\n\nReport cold start before and after. Use `python -X importtime` or a timer around the import chain up to the server being ready. Check run_agentdesk.py for the real entry point.",
+      "commit": "937777b",
+      "branch": "auto/023",
+      "finished": "2026-10-22T18:09:38"
+    },
+    "024": {
+      "title": "Git window redesign: connect to a repo, pick account, pull requests, push",
+      "status": "done",
+      "started": "2026-10-22T18:09:42",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "effort": null,
+          "cost_usd": 0.00572585,
+          "turns": 7,
+          "error": false,
+          "tokens": {
+            "input": 6,
+            "output": 2726,
+            "cache_read": 50075,
+            "cache_write": 17247
+          },
+          "at": "2026-10-22T18:09:58",
+          "usage_before": 3.0,
+          "usage_after": 3.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 3.7930129000000004,
+          "turns": 52,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 90,
+            "output": 78023,
+            "cache_read": 5274088,
+            "cache_write": 147125
+          },
+          "at": "2026-10-22T18:24:44",
+          "usage_before": 3.0,
+          "usage_after": 17.0,
+          "usage_used_pct": 14.0
+        }
+      ],
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "GOAL: Rework the dashboard Git window (task 024) in AgentDesk (Windows, PowerShell; repo C:\\Users\\kochurin.a\\AgentDesk). Features: (1) show origin URL and connect/change it via `git remote set-url` / `add`, choosing from `gh repo list <owner> --json nameWithOwner,url,isPrivate --limit 100` or pasting a URL/owner/name; confirm before applying; show errors verbatim. (2) List gh accounts (`gh auth status --json hosts` or parse), mark active, switch with `gh auth switch -u <user>`; store chosen account per project in project.toml as [git] account = \"...\". Run push/pull/PR as that account (switch first, or GH_TOKEN from `gh auth token -u <user>` in child env only; never log/return/store tokens). Show which account an operation used. Missing or logged-out gh gives a clear message with the command to run, not a crash. (3) Push: keep existing behaviour; set upstream when missing. (4) PRs: `gh pr list --json number,title,headRefName,baseRefName,author,url,state,isDraft`; create PR (title, body, draft checkbox, `gh pr create`); open URL; checks summary via `gh pr view --json statusCheckRollup` if cheap. No merge. (5) All git/gh calls off the event loop, windowless, with timeouts; cache gh lists ~5 s, refresh on demand.\n\nFILES:\n- agentdesk/core.py ~1085-1195: `_g()` (1087), `run()` helper, `git_remote` (1092), `git_status` (1108), `git_fetch` (1140), `git_merge` (1147), `git_pull` (1173), `git_push` (1182). Keep signatures and return shape {ok, message}. Windows no-window flag pattern at lines 75, 234, 1073.\n- agentdesk/server.py ~1838 (GET /git -> git_status) and ~1916-1931 (POST /git/<act>: fetch/merge/pull/push). Existing routes must stay compatible; add new routes beside them. Run blocking work in a thread (check how the server already offloads).\n- agentdesk/web/index.html: gitLoad() ~402, action POST ~404, gitShow(). Frontend follows the app's existing language for labels.\n- tests/test_git_panel.py, tests/test_local_git.py: existing tests to keep green.\n- Project config: see how p.cfg / project.toml is loaded in core.py; write it with core.write_atomic / core.replace_file.\n\nCONSTRAINTS:\n- Line endings: core.py, server.py and index.html are CRLF. Patch them byte-wise (open(...,'rb')/'wb' in Python), or the diff explodes.\n- No auto-actions: changing the remote, creating PRs and pushing require an explicit click plus confirm.\n- Never print or persist tokens. Redact in errors too.\n- Read README.md and CHANGELOG.md for conventions; there is no CLAUDE.md or AGENTS.md at the root.\n- If you add a new per-project file, register it in the export lists (_EXPORT_TOP / _EXPORT_DIRS) per project notes.\n- Run gh and git through subprocess with timeouts and CREATE_NO_WINDOW on Windows.\n\nTESTS: unit-test the pure parts with subprocess mocked: gh JSON parsing (accounts, repo list, PRs, checks), account switch command construction, remote URL validation (accept https/ssh/owner/name forms, reject shell-meta and leading '-'). Run `pytest tests` (not bare pytest); all must pass.\n\nDONE WHEN: pytest tests passes; the Git window shows the remote, accounts, repos, PRs, and push/PR actions with confirm; existing fetch/merge/pull/push still work; the report includes manual steps to try it (start the dashboard, open the Git window for a project, and so on).",
+      "commit": "1c22cb1",
+      "branch": "auto/024",
+      "finished": "2026-10-22T18:26:11"
+    },
+    "025": {
+      "title": "Chat: make message text copyable (select, Ctrl+C, copy button)",
+      "status": "done",
+      "started": "2026-10-22T18:26:13",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "effort": null,
+          "cost_usd": 0.00633288,
+          "turns": 10,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3548,
+            "cache_read": 76828,
+            "cache_write": 17204
+          },
+          "at": "2026-10-22T18:26:36",
+          "usage_before": 18.0,
+          "usage_after": 18.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.1023317,
+          "turns": 6,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 10,
+            "output": 3268,
+            "cache_read": 128250,
+            "cache_write": 14130
+          },
+          "at": "2026-10-22T18:28:21",
+          "usage_before": 18.0,
+          "usage_after": 21.0,
+          "usage_used_pct": 3.0
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Task 025: make chat message text copyable in agentdesk/web/index.html (WebView2 via pywebview).\n\nFindings from reading (verify before relying on them):\n- refresh()/refreshOnce() (~l.423-445) re-renders #msgs only when chatFor !== cur (project switch). Otherwise it calls fetchNotes() (~l.674), which appends. So ordinary polling does NOT replace existing bubbles. The only wipe is the project-switch branch at ~l.438 (`$(\"msgs\").innerHTML = \"\"`). Check fetchNotes and any code that rewrites an existing .msg before adding a guard.\n- addMsg (l.584-602) builds each bubble with div.innerHTML = md(text), then appends .call <details> for tools and a .cost div. The pending bubble is `wait` in send() (l.603+): it holds .working dots and a label, and its timer is cleared in finally and stops on `!wait.isConnected`.\n- CSS: .msg at l.67 (white-space: pre-wrap). No user-select rule appeared in grep, so nothing is explicitly blocking selection. Grep again for user-select, pointer-events, oncontextmenu and -webkit-user-select across index.html and agentdesk/__main__.py (pywebview window options) before deciding the cause.\n\nDo:\n1. CSS: `.msg, .msg * { user-select: text; -webkit-user-select: text; }`, and keep buttons user-select:none. Add a small .copy button to each message (only if it has text). Add a copy button to each .call pre (outside <summary>, so clicking doesn't toggle the details).\n2. Copy handler: plain text only. Use the raw `text` for messages (store it on the element, e.g. dataset or a closure), and textContent for tool blocks. navigator.clipboard.writeText inside try; on failure, fall back to a hidden textarea + select() + document.execCommand('copy'). Show \"copied\" for about 1.5 s by changing the label.\n3. Keep the pending bubble as is. Don't change polling cadence.\n4. Only if the source check shows a real blocker, change __main__.py. Don't change it speculatively.\n\nFiles: agentdesk/web/index.html is CRLF throughout. Edit it byte-wise with Python open(...,'rb')/'wb' (replace \\r\\n-aware), never a text-mode rewrite. Note any new lines must also use \\r\\n.\n\nTest: tests/test_chat.py ~l.475-480 does source-text checks on index.html (read_text). Add a similar check (e.g. the copy helper and user-select rule exist). Run `pytest tests` (not bare pytest). All must pass.\n\nDone when: `pytest tests` passes; index.html diff is only the intended lines with CRLF intact (check with a byte count of bare \\n); manual check in the real window: select text in a bubble, Ctrl+C pastes it; right-click copy works; copy button gives plain text; the selection survives a poll (wait ~10 s with the chat open); \"copied\" shows.",
+      "commit": "d56bca2",
+      "branch": "auto/025",
+      "finished": "2026-10-22T18:29:49"
+    },
+    "026": {
+      "title": "Per-project MCP servers for workers (project.toml [mcp.*])",
+      "status": "done",
+      "started": "2026-10-22T18:30:13",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "effort": null,
+          "cost_usd": 0.006326190000000001,
+          "turns": 10,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3258,
+            "cache_read": 76339,
+            "cache_write": 17764
+          },
+          "at": "2026-10-22T18:30:33",
+          "usage_before": 21.0,
+          "usage_after": 21.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.2114263,
+          "turns": 11,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 18,
+            "output": 6904,
+            "cache_read": 305626,
+            "cache_write": 27866
+          },
+          "at": "2026-10-22T18:32:58",
+          "usage_before": 21.0,
+          "usage_after": 23.0,
+          "usage_used_pct": 2.0
+        }
+      ],
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: let a project give its workers optional extra MCP servers from project.toml `[mcp.<name>]` (first use: code-graph-mcp for Sintec.PDF). Do not edit any project's own project.toml.\n\nFiles (agentdesk/core.py, CRLF may apply; check before editing):\n- `Project` class ~L516 (`p.cfg` parsing). Add a parser for `[mcp.*]` returning only valid entries: command (str), args (list of str), env (str->str), enabled (bool, default false), roles (subset of worker/router, default [\"worker\"]).\n- `options(p, **kw)` ~L2065: currently just builds ClaudeAgentOptions. Add role-aware mcp_servers injection here (or a helper it calls), passing `{name: {\"type\":\"stdio\",\"command\":...,\"args\":[...],\"env\":{...}}}`. Merge with any mcp_servers already in kw. Do not put mcp__<name>__* in allowed_tools unless the role's list already lists it; router (`route()` ~L2174, allowed_tools Read/Grep/Glob) gets MCP only if roles includes \"router\".\n- `work()` ~L2221: worker options, `can_use_tool=guard(wt)` at ~L2228. Verify guard (~L1998) does not deny mcp__ tools (it currently only checks shell commands and edit tools, so it should allow them; confirm and add a test or explicit comment).\n- Windows: when spawning, resolve `npx` via shutil.which (gives npx.cmd). Do this in the config→options conversion.\n- Cwd: the server's cwd must be the worktree `wt`, so it must be set per-worker, not from the project config. Pass cwd through the stdio config if the SDK supports it, otherwise document it.\n- Index dir `.code-graph/` in the worktree: `commit()` ~L2287 runs `git add -A`. Ensure `.code-graph/` is never committed there (e.g. add `:(exclude).code-graph` pathspec or unstage it after add). Also check `.git/info/exclude`: in a linked worktree `.git` is a file, so writing to `<wt>/.git/info/exclude` is wrong; use the common git dir (`git rev-parse --git-common-dir`) if the tool's exclude is not enough.\n\nConstraints: invalid or missing config must never break a run; log one line via store.log and skip that server. Config keys absent = behaviour unchanged. Do not add network calls in tests. Don't touch the SDK lazy-loading rule: call `_load_sdk()` before using SDK names in new code.\n\nDocs: short \"MCP servers\" section in README.md and an entry in CHANGELOG.md (both at repo root).\n\nTests: add tests for config → options conversion (roles, enabled flag, invalid entries skipped, Windows npx resolution via monkeypatched shutil.which, router excluded by default, allowed_tools untouched unless listed). Also a test that guard allows an mcp__ tool name.\n\nDone when: `pytest tests` (not bare pytest) passes; `git diff` shows only core.py, README.md, CHANGELOG.md and the test file(s); no `.code-graph/` content gets staged in a test commit.",
+      "commit": "ba833ed",
+      "branch": "auto/026",
+      "finished": "2026-10-22T18:35:45"
+    },
+    "027": {
+      "title": "Disk hygiene: watch build/worktree sizes, auto-clean stale artifacts",
+      "status": "done",
+      "started": "2026-10-22T18:35:53",
+      "runs": [
+        {
+          "tier": "router",
+          "model": "haiku",
+          "effort": null,
+          "cost_usd": 0.006410860000000001,
+          "turns": 10,
+          "error": false,
+          "tokens": {
+            "input": 8,
+            "output": 3564,
+            "cache_read": 76066,
+            "cache_write": 17134
+          },
+          "at": "2026-10-22T18:36:16",
+          "usage_before": 25.0,
+          "usage_after": 25.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 4.974191600000001,
+          "turns": 57,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 88,
+            "output": 102585,
+            "cache_read": 6425096,
+            "cache_write": 204588
+          },
+          "at": "2026-10-22T18:53:38",
+          "usage_before": 25.0,
+          "usage_after": 38.0,
+          "usage_used_pct": 13.0
+        }
+      ],
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "Goal: add disk hygiene to AgentDesk per the task 027 spec (measure per-project target dirs, worktrees and data dir; background cache; dashboard 'Disk' section; [hygiene] config; guarded cleanup actions; tests). Do not change project.toml automatically.\n\nRelevant code (repo C:\\Users\\kochurin.a\\AgentDesk):\n- agentdesk/core.py\n  - `DATA` (~l.128) and `settings()` (~l.278): settings.toml loader and deep-merge; reuse for app-wide `[hygiene]` defaults.\n  - `Project` (l.516): `.dir`, `.cfg`, `.repo`, `.tasks_dir`, `.path(name)`. `projects()` (l.541) lists projects.\n  - `autorunner_cfg()` (l.1759) and `AUTO_DEFAULTS` (l.1756): model the `[hygiene]` resolver on this (code defaults < settings.toml < project.toml), with validation that never raises.\n  - `run_gates()` (l.1741): gate env comes from `p.cfg[\"gates\"][\"env\"]`; read CARGO_TARGET_DIR and CARGO_INCREMENTAL there.\n  - Worktrees: `p.cfg[\"repo\"][\"worktrees\"]`; task worktree `<worktrees>/<task.id>` (~l.1682); cowork at `<worktrees>/cowork` (~l.1696). Run timeline: `runs/<id>.jsonl` (`core.Activity`).\n  - `write_atomic` / `replace_file` (l.599/612): use for any shared state write.\n  - Lazy SDK: call `_load_sdk()` before touching SDK names.\n- agentdesk/server.py: `autorun_loop` (l.1734) and its thread start (~l.2216-2219). Add a hygiene loop in the same style (QUIT.wait, try/except with log_error). Measurement runs in a worker thread and caches results for ~5 min; request handlers only read the cache. Add a GET route for the disk report and a POST for clean (dry-run/apply).\n- agentdesk/web/index.html: per-project 'Disk' line with breakdown, warning when over threshold, 'Clean up' button (shows a dry-run preview first).\n\nConstraints:\n- core.py, server.py and index.html are all CRLF. Patch byte-wise (open 'rb'), never text-mode rewrite.\n- Measure with os.scandir, no per-file stat storms; never follow symlinks/junctions (check reparse points on Windows).\n- Deletion: only inside configured locations; require CACHEDIR.TAG, .rustc_info.json, or a `target*` name; never touch non-target dirs. Skip if a run is active for the project, or if psutil (or PowerShell Get-CimInstance on Windows) shows cargo/rustc/rustup with a cmdline or cwd inside the dir; if that check fails, skip. Read-only files and long paths need handling (`\\\\?\\` prefix or onerror chmod). Windowless subprocesses.\n- Worktree removal: `git worktree remove --force` + prune, only for done+merged tasks or a gone branch. Delete auto/* branches only when merged into base. Never push.\n- Default auto=false (dry-run). Config errors are logged, never crash.\n- Log every action with bytes freed to agentdesk.log.\n- Note from earlier tasks: the worker guard blocks `git remote` in shell, so tests set remotes via subprocess helper.\n\nTests: tests/ with tmp_path fixtures only, no real large dirs. Cover the size walker, mtime trimming, refusal of non-target and out-of-project paths, skip while a process uses the dir (mock), dry-run vs apply, config validation. Run `pytest tests` (not bare pytest). Report how to try by hand (dashboard Disk section, dry-run first).\n\nDone when: tests pass, dry-run reports the current ~190 GB breakdown without deleting, and apply on a fixture target dir frees the reported bytes.",
+      "commit": "d054308",
+      "branch": "auto/027",
+      "finished": "2026-10-22T18:55:21"
+    },
+    "028": {
+      "title": "In-app updater: \"Update\" button pulling the installer from GitHub Releases",
+      "status": "done",
+      "started": "2026-10-23T09:23:44",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: the installed app can update itself with one button.\nToday: no updater exists. Version is agentdesk/__version__ (core.py ~line 250 exposes it via a version-info dict). Installers are built by release.ps1/build_installer.ps1 as AgentDesk-Setup-x.y.z.exe. Repo: janmaslovitz/agentdesk (public).\nDo:\n1. core.py: check_update() -> GET https://api.github.com/repos/janmaslovitz/agentdesk/releases/latest (urllib, short timeout, no auth, User-Agent set); compare the tag (vX.Y.Z) with __version__ as numeric tuples; pick the asset named AgentDesk-Setup*.exe. Cache result ~1h; never block startup, never raise (offline = \"unknown\").\n2. download_update(): stream the asset to a fresh temp dir, verify size (and sha256 if a .sha256 asset/digest is present), return path. Only https://github.com / objects.githubusercontent.com URLs allowed.\n3. server.py endpoints: GET /api/update (current, latest, available, notes) and POST /api/update/install (download in background with progress, then launch the installer detached, e.g. with silent flags if the installer supports them - check installer/ - and exit the app so files can be replaced). Refuse while a worker run is active unless confirmed. Only when core.FROZEN (installed build); in dev mode just report.\n4. UI (agentdesk/web): small \"Update available v X\" badge/button in the header, with progress and an error message; checks once at start in the background (setting in settings.toml to disable).\n5. Tests for version comparison, asset selection, URL allow-list, and that failures are swallowed. Run `pytest tests`. Add a CHANGELOG \"Unreleased\" entry. Do NOT run release.ps1 or push.\nDone when: tests pass and with a mocked release response the button appears and triggers the install flow.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.2565426,
+          "turns": 11,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 22,
+            "output": 10346,
+            "cache_read": 364772,
+            "cache_write": 29071
+          },
+          "at": "2026-10-23T09:26:51",
+          "usage_before": 6.0,
+          "usage_after": 7.0,
+          "usage_used_pct": 1.0
+        }
+      ],
+      "commit": "fe68aaa",
+      "branch": "auto/028",
+      "finished": "2026-10-23T09:28:34"
+    },
+    "029": {
+      "title": "Per-task tool-call stats (incl. mcp__*) in state and reports",
+      "status": "done",
+      "started": "2026-10-23T09:28:44",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: measure how useful optional MCP servers (code-graph) are. Today nothing counts tool calls per task.\nDo: in core.py, where worker messages/tool_use blocks are processed (see activity events near line ~2268 and the worker run loop), count tool calls per task by tool name, with MCP calls (names starting mcp__) grouped per server. Also record turns, cost and duration if not already stored. Save to state.json entry as `tool_stats` {total, by_tool, mcp: {server: n}} and append a one-line \"Tools: ...\" summary to reports/<id>.md. Accumulate across retries/runs of the same task (keep per-run list `runs_stats` if simple). Show nothing new in the UI beyond, optionally, a small line in the task detail if trivial.\nConstraints: never break a run on stats errors (swallow + log); no network in tests; use `pytest tests`; add tests for counting and MCP grouping; CHANGELOG Unreleased entry. Don't push or release.\nDone when: tests pass and a mocked run produces tool_stats in state.json.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.15381730000000002,
+          "turns": 9,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 12,
+            "output": 4668,
+            "cache_read": 167776,
+            "cache_write": 22529
+          },
+          "at": "2026-10-23T09:30:58",
+          "usage_before": 7.0,
+          "usage_after": 7.0,
+          "usage_used_pct": 0.0
+        }
+      ],
+      "commit": "9eaea41",
+      "branch": "auto/029",
+      "finished": "2026-10-23T09:32:48"
+    },
+    "030": {
+      "title": "Dashboard: Git panel 50% width + compact Build panel beside it; Build picks tasks per version with checkboxes",
+      "status": "done",
+      "started": "2026-10-23T09:46:45",
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "Goal: re-layout and simplify the Git and Build sections of the project page.\nWhere: agentdesk/web/index.html (Git section ~L364-386, Build section ~L387-392, JS buildShow/buildLoad/buildGo ~L470-494), core.py BuildJob/build_job (~L3246) and build endpoints in server.py (~L2006, ~L2108), tests in tests/.\n\n1. Layout: Git section takes 50% of the page width; the Build section sits in the other 50% in the same row, compact so it doesn't add height (collapse the log into a <details> or a small fixed-height scroll box; keep headline buttons small). On narrow windows (<900px) they stack. Keep all existing Git functions working unchanged.\n\n2. Build redesign (clearer): \n - A \"Version\" selector: the existing release tags (vX.Y.Z, newest first) plus a \"New build (next)\" entry that proposes the next patch version from CHANGELOG/__version__ and lets the user edit it. The selected version is the build's current target.\n - A checklist of finished tasks (state.json status done, with branch auto/<id>): checkbox + id + title + merged/unmerged badge. Tasks already contained in the selected base ref are shown checked+disabled (\"already in\"). Tasks finished since the last tag are checked by default; \"Select all / none\" links.\n - \"Build\" button: creates (or resets) an integration branch/worktree `build/<version>` from the base branch, merges the checked unmerged auto/<id> branches into it (stop and report clearly on a conflict, leaving base and the task branches untouched), then runs the existing build command on that worktree. Never modifies the base branch or pushes. Keep \"Clean + rebuild\", Stop, Open folder, custom build as they are (compact, in a small menu if needed).\n - Show a short result line: version, tasks included, success/failure, link to open the folder. Remember the last selection per project (data file, not git).\n - The list refreshes when a task finishes (as the Needs attention/queue refresh does); no extra polling load - reuse the existing poll, and don't poll the build log unless a build runs.\n3. API: GET /api/p/<slug>/build returns also `versions` and `tasks` (id,title,merged,in_base,default_checked); POST build accepts `version` and `tasks` (list of ids, validated against known done tasks). Invalid input -> 400 with a message.\n4. Tests for: task listing (merged/in-base flags), selection validation, integration-branch creation with a clean merge and with a conflict (base untouched), API validation. Use `pytest tests`. CHANGELOG Unreleased entry. README build section update.\nConstraints: don't break existing build flow for projects with a build command in project.toml; no secrets; don't push or release. Done when tests pass and the page renders (check HTML structure, no JS syntax errors - e.g. run the script through node --check if available).",
+      "runs": [
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 2.6648684000000005,
+          "turns": 51,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 68,
+            "output": 45100,
+            "cache_read": 3597659,
+            "cache_write": 130340
+          },
+          "at": "2026-10-23T09:56:27",
+          "usage_before": 10.0,
+          "usage_after": 14.0,
+          "usage_used_pct": 4.0
+        }
+      ],
+      "commit": "3a83d6a",
+      "branch": "auto/030",
+      "finished": "2026-10-23T09:58:50"
+    },
+    "031": {
+      "title": "macOS and Linux builds attached to GitHub releases (GitHub Actions)",
+      "status": "done",
+      "started": "2026-10-23T10:35:16",
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "Goal: every release tag (v*) gets Windows, macOS and Linux downloads on its GitHub Release, built by CI (we can't cross-build from the Windows dev machine).\nToday: Windows only. build_exe.ps1 + agentdesk.spec (PyInstaller) -> dist/AgentDesk, build_installer.ps1 (Inno Setup) -> AgentDesk-Setup-x.y.z.exe, release.ps1/tools/release.py bump+tag. Source install for mac/linux exists (install.sh, agentdesk.sh). Window = pywebview, tray = pystray, claude-agent-sdk bundles the CLI.\nDo:\n1. Read agentdesk.spec / build_exe.ps1 and make the spec cross-platform (no Windows-only paths/icons/hiddenimports unguarded; .ico only on win32, .icns optional on darwin). Add build_unix.sh that runs PyInstaller from a venv and packs: Linux -> AgentDesk-<ver>-linux-x86_64.tar.gz, macOS -> AgentDesk-<ver>-macos-<arch>.zip (a .app bundle if simple, else the folder). Version read from agentdesk/__init__.py.\n2. .github/workflows/release.yml: on push of tag v*, matrix [ubuntu-22.04 (also install webkit2gtk/gtk libs pywebview needs), macos-latest, windows-latest]; run `pytest tests` once (ubuntu), build each, and attach assets to the release for the tag (create it if missing, notes from CHANGELOG section of that version via a small script in tools/). Windows job keeps the existing installer name AgentDesk-Setup-<ver>.exe (install Inno Setup via choco) - the in-app updater picks AgentDesk-Setup*.exe, so do not rename it. Also add workflow_dispatch to rebuild a given tag. Use only official actions pinned by major version; no secrets beyond GITHUB_TOKEN.\n3. Fix platform assumptions found while doing this (server.py/core.py: paths, creationflags, os.startfile, shell=PowerShell uses) only where they break the packaged app on Linux/macOS; keep Windows behaviour identical. The in-app updater stays Windows-only: on mac/linux the update badge should just link to the release page (small change in update_status/UI, with a test).\n4. README: short \"Downloads\" section (Windows installer, macOS zip, Linux tar.gz, note that macOS builds are unsigned: right-click Open) and how CI releases work. CHANGELOG Unreleased entry.\n5. Tests: what can be tested offline (spec/script syntax check, version extraction, release-notes extraction from CHANGELOG, updater link on non-Windows). `pytest tests` must pass on Windows.\nConstraints: don't push, don't tag, don't run the workflow; we can't verify the CI here, so keep it simple and say in your report exactly what is untested. YAML must be valid (parse it with python yaml if available).",
+      "runs": [
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 2.5600382999999995,
+          "turns": 52,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 80,
+            "output": 49944,
+            "cache_read": 3411815,
+            "cache_write": 109765
+          },
+          "at": "2026-10-23T10:44:43",
+          "usage_before": 23.0,
+          "usage_after": 28.0,
+          "usage_used_pct": 5.0
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 2.7944916999999996,
+          "turns": 6,
+          "error": false,
+          "attempt": 2,
+          "tokens": {
+            "input": 10,
+            "output": 2817,
+            "cache_read": 650927,
+            "cache_write": 5986
+          },
+          "at": "2026-10-23T10:49:26",
+          "usage_before": 28.0,
+          "usage_after": 29.0,
+          "usage_used_pct": 1.0
+        }
+      ],
+      "last_failure": "[ 77%]\n.........F\n================================== FAILURES ===================================\n___________________________ test_build_unix_script ____________________________\n\n    def test_build_unix_script():\n        text = (ROOT / \"build_unix.sh\").read_text(encoding=\"utf-8\")\n        assert text.startswith(\"#!/usr/bin/env bash\") and \"set -euo pipefail\" in text\n        assert \"tools/release.py current\" in text  # the version comes from agentdesk/__init__.py\n        assert 'AgentDesk-$version-linux-$arch.tar.gz' in text and 'AgentDesk-$version-macos-$arch.zip' in text\n        bash = shutil.which(\"bash\")\n        if bash is None:\n            pytest.skip(\"no bash to syntax-check build_unix.sh\")\n        r = subprocess.run([bash, \"-n\", \"-\"], input=text.replace(\"\\r\\n\", \"\\n\"), capture_output=True, text=True)\n>       assert r.returncode == 0, r.stderr\nE       AssertionError: \nE       assert 1 == 0\nE        +  where 1 = CompletedProcess(args=['C:\\\\WINDOWS\\\\system32\\\\bash.EXE', '-n', '-'], returncode=1, stdout='?\\x04>\\x044\\x04A\\x048\\x04A...\\x00o\\x00>\\x00\"\\x00 \\x004\\x04;\\x04O\\x04 \\x00C\\x04A\\x04B\\x040\\x04=\\x04>\\x042\\x04:\\x048\\x04.\\x00\\n\\x00\\n\\x00', stderr='').returncode\n\ntests\\test_release_ci.py:76: AssertionError\n=========================== short test summary info ===========================\nFAILED tests/test_release_ci.py::test_build_unix_script - AssertionError: \n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 297 passed in 120.45s (0:02:00)",
+      "commit": "70f6343",
+      "branch": "auto/031",
+      "finished": "2026-10-23T10:51:40"
+    },
+    "032": {
+      "title": "Rework Export/Import dialogs: export to GitHub branch, Browse buttons, alignment",
+      "status": "done",
+      "started": "2026-10-23T12:11:17",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: redo the Export and Import dialogs (agentdesk/web/index.html: #dExport, #dImport; JS exportZip/exportGit/importProject; backend core.export_to_git / import_project, server.py import_route and export route).\n\n1. NEW: export the project to GitHub as a SEPARATE BRANCH of the project's own repo (e.g. `agentdesk-export/<slug>`), not into the working branch. Implement in core (e.g. export_to_branch): use a temporary git worktree or plumbing so the user's checkout/current branch and uncommitted changes are never touched; commit the export files (same content as export_files/_manifest, under .agentdesk/ or at the branch root - pick one, document it) onto that branch, create or update it (fast-forward only, never force). Optional push of that branch to `origin` (-u), only with confirm=true like the existing git push flow. Report branch name, commit, pushed or not. Importing from that branch (clone URL + branch) should work too if cheap. Keep the existing .zip export and the commit-into-.agentdesk mode working (maybe as a mode selector: Zip / Git folder / GitHub branch).\n2. REPLACE manual path typing with a Browse button (native folder/file picker via the desktop window if available - check how the app window is created, e.g. pywebview create_file_dialog through a js_api or a server endpoint; fall back to the plain text field when no native window, e.g. in a browser). Apply to: export config repo folder, import source folder, import repo folder. Keep the field editable.\n3. FIX BUG: the placeholders `C:\\path\\to\\repo` are written unescaped in HTML, so `\\t` and `\\r` became real tab/newline characters (see lines ~184-196). Use plain placeholders without backslashes problems.\n4. FIX alignment/layout: consistent label/input/button widths, group sections with headings and spacing, input+Browse on one row, buttons aligned right in a footer row, no overflow, readable status message area. Check both dialogs at the app's default window size and a narrow one, in light/dark if the theme supports it.\n\nConstraints: no new heavy dependencies; Windows first. Add tests in tests/test_export_import.py for the branch export (checkout and current branch untouched, no force, repeat export with no changes makes no commit). Run `pytest tests` (not bare pytest). Done = tests pass, dialogs reworked, summary of what changed in the report.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.3513445,
+          "turns": 22,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 18,
+            "output": 13086,
+            "cache_read": 380113,
+            "cache_write": 45532
+          },
+          "at": "2026-10-23T12:14:47",
+          "usage_before": 46.0,
+          "usage_after": 47.0,
+          "usage_used_pct": 1.0
+        }
+      ],
+      "tool_stats": {
+        "total": 21,
+        "by_tool": {
+          "Grep": 4,
+          "Bash": 3,
+          "Read": 5,
+          "Edit": 9
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 21,
+          "by_tool": {
+            "Grep": 4,
+            "Bash": 3,
+            "Read": 5,
+            "Edit": 9
+          },
+          "mcp": {},
+          "turns": 22,
+          "cost_usd": 0.3513445,
+          "duration_ms": 208600,
+          "tier": "standard",
+          "attempt": 1
+        }
+      ],
+      "commit": "0e3d38d",
+      "branch": "auto/032",
+      "finished": "2026-10-23T12:17:19"
+    },
+    "033": {
+      "title": "Server 1/4: headless server mode (no GUI) with LAN bind",
+      "status": "done",
+      "started": "2026-10-23T16:23:39",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Part 1 of the AgentDesk Server (Debian, headless, LAN). Overall design: a gateway process authenticates users and reverse-proxies each user to their OWN AgentDesk instance (separate process, own AGENTDESK_HOME data folder); an admin cabinet manages users/projects. Agents/workers run server-side. This task is only the foundation.\n\nDo: add `python -m agentdesk serve` (also entry point `agentdesk-server`) that runs the dashboard server with NO pywebview/pystray/browser import at all (must work on Linux without a display and without those packages; lazy-import them elsewhere if needed), configurable `--host` (default 127.0.0.1), `--port`, `--data` (sets AGENTDESK_HOME before core is imported, see core._data_home), logs to stdout/journald, clean shutdown on SIGTERM/SIGINT, pid file optional. Server.py currently hardcodes 127.0.0.1 (main(), answers(), the Handler's origin/host checks and any DNS-rebinding / CSRF protections): make the allowed Host/Origin configurable (`--allowed-host`, defaults derived from host/port) so the UI works when opened as http://192.168.x.x:8765 but still rejects foreign origins. SAFETY: refuse to bind a non-loopback address unless `--trust-proxy-auth` / a flag `--auth-token-file` is given (a shared secret every request must carry as header X-AgentDesk-Gateway-Token, compared in constant time); that is how the gateway (task 2) will talk to instances. Without the flag, binding to 0.0.0.0 must fail with a clear message.\nAlso: Linux paths in core (git, claude CLI lookup, no Windows-only calls like creationflags/CREATE_NO_WINDOW, no LOCALAPPDATA assumption) - audit and fix so the whole core runs on Debian; check subprocess usage in core.py and server.py. Tests: pytest tests (not bare pytest); add tests for the host/origin rules, the token check, the refusal to bind publicly. CHANGELOG under Unreleased. Done = tests pass and `python -m agentdesk serve --port 0`-style start works in a test.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.3672175,
+          "turns": 13,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 24,
+            "output": 13018,
+            "cache_read": 537805,
+            "cache_write": 45728
+          },
+          "at": "2026-10-23T16:28:43",
+          "usage_before": 16.0,
+          "usage_after": 17.0,
+          "usage_used_pct": 1.0
+        }
+      ],
+      "tool_stats": {
+        "total": 12,
+        "by_tool": {
+          "Bash": 12
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 12,
+          "by_tool": {
+            "Bash": 12
+          },
+          "mcp": {},
+          "turns": 13,
+          "cost_usd": 0.3672175,
+          "duration_ms": 301264,
+          "tier": "standard",
+          "attempt": 1
+        }
+      ],
+      "commit": "bd94a0d",
+      "branch": "auto/033",
+      "finished": "2026-10-23T16:32:10"
+    },
+    "034": {
+      "title": "Server 2/4: gateway with login, users, sessions and per-user instances",
+      "status": "done",
+      "started": "2026-10-23T16:32:41",
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "Part 2 of the AgentDesk Server. Needs task 1 (`agentdesk serve` with --host/--port/--data and the gateway-token header).\n\nBuild `agentdesk/gateway/` (new package, stdlib only if possible; threaded HTTP server like server.py) started by `python -m agentdesk gateway` (listens on a LAN address, default 0.0.0.0:8080 configurable in `<server-home>/server.toml`):\n- User store `<server-home>/users.json` (atomic durable writes like core.write_json): username, role (admin|user), password hash (hashlib.scrypt with per-user salt, constant-time compare), disabled flag, created time, `home` (the user's data folder `<server-home>/users/<username>/`), assigned project slugs/accounts. Never log or return hashes.\n- Login page (plain HTML, no external assets) at /login, POST sets a random session cookie (HttpOnly, SameSite=Strict, Secure when TLS), server-side session table with expiry, logout, brute-force throttle per user+IP, CSRF protection for state-changing calls (token or Origin check).\n- After login: proxy EVERYTHING else (/, /api/*, static, chat polling, uploads/downloads incl. export zip, streaming responses) to that user's own instance. Instances: the gateway starts `python -m agentdesk serve --host 127.0.0.1 --port <free port> --data <user home> --auth-token-file <secret>` lazily per user, supervises/restarts them, stops idle ones after a configurable time (runs in progress must keep the instance alive), and sends the shared token header. Instance ports bind to loopback only. Users must never reach another user's instance or data: enforce by session->instance mapping only, never by a client-supplied id.\n- Optional OS isolation: if `run_as_users = true` in server.toml, start the instance via `sudo -n -u agentdesk-<username>` / systemd-run (document, don't require).\n- Optional TLS (`tls_cert`, `tls_key` in server.toml) for the gateway listener.\n- Audit log of logins/failed logins/user changes (`<server-home>/audit.log`).\nTests (pytest tests): password hashing, login/logout/session expiry, throttle, isolation (user A cannot read user B's data through the proxy), proxy passes through POST bodies/binary, instance lifecycle with a fake instance. CHANGELOG under Unreleased. Keep dependencies out of requirements unless unavoidable.",
+      "runs": [
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 2.975696499999999,
+          "turns": 57,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 74,
+            "output": 66471,
+            "cache_read": 3069602,
+            "cache_write": 128968
+          },
+          "at": "2026-10-23T16:46:54",
+          "usage_before": 17.0,
+          "usage_after": 22.0,
+          "usage_used_pct": 5.0
+        }
+      ],
+      "tool_stats": {
+        "total": 56,
+        "by_tool": {
+          "PowerShell": 13,
+          "Read": 9,
+          "Grep": 5,
+          "Edit": 20,
+          "Write": 9
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 56,
+          "by_tool": {
+            "PowerShell": 13,
+            "Read": 9,
+            "Grep": 5,
+            "Edit": 20,
+            "Write": 9
+          },
+          "mcp": {},
+          "turns": 57,
+          "cost_usd": 2.975696499999999,
+          "duration_ms": 848907,
+          "tier": "hard",
+          "attempt": 1
+        }
+      ],
+      "commit": "08e8974",
+      "branch": "auto/034",
+      "finished": "2026-10-23T16:49:17"
+    },
+    "035": {
+      "title": "Server 3/4: admin cabinet (users, projects, instances)",
+      "status": "done",
+      "started": "2026-10-23T16:49:45",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Part 3 of the AgentDesk Server. Needs the gateway (task 2). Add an admin cabinet served by the gateway at /admin (role admin only, server-side check on every route; a normal user gets 403):\n- Users: list, create (username, role, initial password), reset password, disable/enable, delete (with a confirm; deleting data is a separate explicit checkbox, default keeps the data folder), change own password for every user at /account.\n- Projects per user: list each user's projects (read via the user's instance API or its data folder), create a project for a user from a git URL (clone on the server) or an uploaded .zip export (reuse core.import_project / clone_for_import), remove a project, show size on disk.\n- Claude accounts: admin defines accounts (API key via key_env / config_dir login) in the server settings and assigns them to users; users cannot see keys. Never display secrets.\n- Instances: status (running/idle/stopped, port, uptime, active runs), start/stop/restart, view the instance log tail; server health (disk free, version).\n- Audit log viewer (read-only, last N).\nUI: same visual style as the dashboard (agentdesk/web), plain HTML/JS, consistent alignment, works at narrow widths, light/dark like the dashboard. Add a link \"Admin\" in the gateway chrome for admins only (small top bar injected by the gateway, don't fork index.html). Tests for authorization of every admin route and for the user/project operations. CHANGELOG under Unreleased.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 1.2096976000000004,
+          "turns": 34,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 60,
+            "output": 54495,
+            "cache_read": 2370171,
+            "cache_write": 106841
+          },
+          "at": "2026-10-23T17:00:13",
+          "usage_before": 22.0,
+          "usage_after": 24.0,
+          "usage_used_pct": 2.0
+        }
+      ],
+      "tool_stats": {
+        "total": 33,
+        "by_tool": {
+          "Bash": 26,
+          "Read": 3,
+          "Write": 3,
+          "TaskStop": 1
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 33,
+          "by_tool": {
+            "Bash": 26,
+            "Read": 3,
+            "Write": 3,
+            "TaskStop": 1
+          },
+          "mcp": {},
+          "turns": 34,
+          "cost_usd": 1.2096976000000004,
+          "duration_ms": 626751,
+          "tier": "standard",
+          "attempt": 1
+        }
+      ],
+      "commit": "0c0cd08",
+      "branch": "auto/035",
+      "finished": "2026-10-23T17:03:01"
+    },
+    "036": {
+      "title": "Server 4/4: console tool, Debian package, systemd, docs",
+      "status": "done",
+      "started": "2026-10-23T17:03:12",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Part 4 of the AgentDesk Server. Needs tasks 1-3.\n- Console admin tool `agentdesk-server` (python -m agentdesk server ...): `init` (creates server-home, server.toml with sensible defaults, first admin interactively or via --admin-password-file), `user add|list|passwd|disable|delete`, `status`, `config get|set` (host, port, tls, idle timeout, run_as_users), `doctor` (checks git, claude CLI present and logged in, ports, permissions, disk). All usable over SSH with no browser.\n- Debian packaging: a `packaging/debian/` build script producing `agentdesk-server_<ver>_all.deb` (or amd64 with a bundled venv, pick the simplest that works offline-ish: dpkg-deb with a venv in /opt/agentdesk-server created in postinst from bundled wheels or pip), dedicated system user `agentdesk`, state in /var/lib/agentdesk-server, config /etc/agentdesk-server/server.toml, logs via journald, systemd unit `agentdesk-server.service` (Restart=on-failure, hardening: NoNewPrivileges, ProtectSystem, PrivateTmp where compatible with spawning git/claude), example nginx/Caddy TLS reverse proxy snippet, firewall note for LAN. Dependencies listed: python3 (>=3.10), git, nodejs/npm note for the claude CLI. Do not require pywebview/pystray on the server.\n- GitHub Actions: add a job to .github/workflows/release.yml that builds the .deb on ubuntu and attaches it to the release (look at how the existing mac/linux jobs attach files; keep the previously fixed attach step behaviour).\n- Docs: README section \"Server (Debian, headless)\": install, init, first login, adding users/projects, updating, backup of /var/lib/agentdesk-server, security notes (LAN only, put TLS in front, no public internet exposure), troubleshooting. CHANGELOG under Unreleased.\nTests for the CLI commands (user add/list/passwd on a temp server-home) and for the packaging script's file layout if feasible without dpkg. Do NOT bump the version or tag.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.9926375000000002,
+          "turns": 29,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 46,
+            "output": 49714,
+            "cache_read": 1607333,
+            "cache_write": 83594
+          },
+          "at": "2026-10-23T17:11:34",
+          "usage_before": 24.0,
+          "usage_after": 29.0,
+          "usage_used_pct": 5.0
+        }
+      ],
+      "tool_stats": {
+        "total": 28,
+        "by_tool": {
+          "Bash": 21,
+          "Write": 3,
+          "Edit": 4
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 28,
+          "by_tool": {
+            "Bash": 21,
+            "Write": 3,
+            "Edit": 4
+          },
+          "mcp": {},
+          "turns": 29,
+          "cost_usd": 0.9926375000000002,
+          "duration_ms": 499895,
+          "tier": "standard",
+          "attempt": 1
+        }
+      ],
+      "commit": "f034fc0",
+      "branch": "auto/036",
+      "finished": "2026-10-23T17:14:42"
+    },
+    "037": {
+      "title": "Server hardening: enforce assignments, 0700 perms, file lock, verify spawned instance",
+      "status": "done",
+      "started": "2026-10-23T17:14:54",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Follow-up from the security review of the gateway (agentdesk/gateway/). Check first what part 3 (admin cabinet) already did and do only what is missing:\n(a) per-user `projects` and `accounts` assignments are stored but the proxy/instances do NOT enforce them: a user's instance must only see/use the Claude accounts assigned to it (write only those into that instance's settings.toml; never other users' keys or secrets), and project assignments must match what exists in the user's home.\n(b) POSIX: chmod 0700 on every `users/<name>` folder and on server-home secrets (users.json, secret/token files, audit.log 0600).\n(c) users.json writes are safe across processes (CLI + gateway): a file lock (fcntl on POSIX, msvcrt on Windows) around load-modify-save.\n(d) after `_spawn` of an instance (instances.py), verify the listener on the chosen port really is our child before routing traffic or sending the gateway token: child pid alive AND an authenticated request with the gateway token answers as AgentDesk (e.g. /api/busy); otherwise kill/retry on another port.\n(e) a login throttle regression test with parallel guesses (threads) proving at most max_failures password checks pass the throttle.\nTests: pytest tests. CHANGELOG under Unreleased. Do not bump the version.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.47605,
+          "turns": 27,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 40,
+            "output": 15588,
+            "cache_read": 1072723,
+            "cache_write": 53145
+          },
+          "at": "2026-10-23T17:20:57",
+          "usage_before": 29.0,
+          "usage_after": 30.0,
+          "usage_used_pct": 1.0
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.49843809999999994,
+          "turns": 2,
+          "error": false,
+          "attempt": 2,
+          "tokens": {
+            "input": 4,
+            "output": 260,
+            "cache_read": 141961,
+            "cache_write": 1396
+          },
+          "at": "2026-10-23T17:22:34",
+          "usage_before": 30.0,
+          "usage_after": 30.0,
+          "usage_used_pct": null
+        },
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 1.2865682999999999,
+          "turns": 39,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 56,
+            "output": 16134,
+            "cache_read": 1859013,
+            "cache_write": 73953
+          },
+          "at": "2026-10-23T17:30:52",
+          "usage_before": 30.0,
+          "usage_after": 32.0,
+          "usage_used_pct": 2.0
+        }
+      ],
+      "tool_stats": {
+        "total": 65,
+        "by_tool": {
+          "Bash": 27,
+          "Read": 18,
+          "Monitor": 2,
+          "Grep": 4,
+          "Edit": 14
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 26,
+          "by_tool": {
+            "Bash": 16,
+            "Read": 8,
+            "Monitor": 2
+          },
+          "mcp": {},
+          "turns": 27,
+          "cost_usd": 0.47605,
+          "duration_ms": 361418,
+          "tier": "standard",
+          "attempt": 1
+        },
+        {
+          "total": 1,
+          "by_tool": {
+            "Bash": 1
+          },
+          "mcp": {},
+          "turns": 2,
+          "cost_usd": 0.49843809999999994,
+          "duration_ms": 5315,
+          "tier": "standard",
+          "attempt": 2
+        },
+        {
+          "total": 38,
+          "by_tool": {
+            "Bash": 10,
+            "Read": 10,
+            "Grep": 4,
+            "Edit": 14
+          },
+          "mcp": {},
+          "turns": 39,
+          "cost_usd": 1.2865682999999999,
+          "duration_ms": 388467,
+          "tier": "hard",
+          "attempt": 1
+        }
+      ],
+      "last_failure": "  print(f\"removed {args.name} (data folder kept: {store.user_home(args.name)})\")\n            elif args.action == \"role\":\n                store.set_role(args.name, args.role, by)\n                print(f\"{args.name} is now {args.role}\")\n            elif args.action == \"assign\":\n                cur = store.get(args.name)\n                if cur is None:\n                    raise KeyError(f\"no user {args.name!r}\")\n                projects = args.project if args.clear else cur[\"projects\"] + args.project\n                accounts = args.account if args.clear else cur[\"accounts\"] + args.account\n                u = store.assign(args.name, projects, accounts, by)\n                print(f\"{args.name}: projects {u['projects']}, accounts {u['accounts']}\")\n        except (KeyError, ValueError, RuntimeError) as e:\n>           raise SystemExit(f\"agentdesk gateway: {e.args[0] if e.args else e}\")\nE           SystemExit: agentdesk gateway: no such project in erin's home: p1\n\nagentdesk\\gateway\\cli.py:97: SystemExit\n---------------------------- Captured stdout call -----------------------------\nadded erin (admin), data folder C:\\Users\\kochurin.a\\AppData\\Local\\Temp\\pytest-of-kochurin.a\\pytest-270\\test_user_cli0\\users\\erin\n=========================== short test summary info ===========================\nFAILED tests/test_gateway.py::test_user_cli - SystemExit: agentdesk gateway: ...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 195 passed in 102.49s (0:01:42)",
+      "commit": "57a8ac0",
+      "branch": "auto/037",
+      "finished": "2026-10-23T17:33:54"
+    },
+    "038": {
+      "title": "Server reliability: systemd watchdog, boot recovery, health, log rotation",
+      "status": "done",
+      "started": "2026-10-23T18:06:14",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Make the headless server survive crashes, hangs and reboots without a human. Check what parts 1-4 already did and do only what is missing.\n1. systemd watchdog: gateway and every instance call sd_notify (pure-python via NOTIFY_SOCKET, no new dependency; no-op when not under systemd): READY=1 after listening, WATCHDOG=1 pings from a thread that only pings when an in-process self-check passes (request loop answers a loopback /gateway/health, user store readable, disk not full). Unit: WatchdogSec=60, Restart=always, RestartSec=3, StartLimitIntervalSec generous, Type=notify (or notify with fallback), After=network-online.target, enabled at install. A hung (not crashed) gateway must get restarted.\n2. Boot / crash recovery at gateway and instance start: remove stale pid files and lock files whose process is gone (check pid AND start time/cmdline so a reused pid is not trusted), mark tasks left in `working`/running state with no live process as crashed via the existing core.recover_stale, retry per the auto-runner settings, finish half-written data files (existing corrupt-file fallback), prune orphan git worktrees (`git worktree prune`) and half-created ones. Chats that were mid-turn at the crash show \"interrupted by a restart\" instead of \"working\".\n3. Auto-resume: after a reboot the auto-runner continues queues of users whose instances were active before (record \"was active\" in the user's data; instances start lazily or eagerly per config `autostart_instances = true`), respecting the usage-limit pause.\n4. Health: `/gateway/health` (no auth, no secrets) returns ok + version + per-instance up/down counts; `agentdesk-server status` and `doctor` show them; a stuck child process guard: kill claude/git children of a run that exceeded a hard timeout (configurable) or whose parent died (process groups, kill on instance shutdown); disk-space guard (refuse to start runs under N GB free, log loudly).\n5. Logs: rotate agentdesk.log, runner.log, audit.log, gateway/instance logs by size (keep N), so the disk never fills; journald for the service output.\n6. Graceful shutdown on SIGTERM (systemd stop/reboot): stop accepting, let running workers finish their current step or checkpoint them so recovery in 2 works; time-bounded (TimeoutStopSec).\nTests: simulate stale pid/lock files, orphan `working` tasks, a hung self-check (watchdog not pinged), log rotation, SIGTERM handling where portable. CHANGELOG under Unreleased. Document in docs/SERVER.md (reboot behaviour, how to check `systemctl status`, `journalctl -u agentdesk-server`). Do not bump the version.",
+      "last_failure": "= <ssl.SSLSocket [closed] fd=-1, family=2, type=1, proto=0>, len = 131072\nbuffer = <memory at 0x0000018C8C717DC0>\n\n    def read(self, len=1024, buffer=None):\n        \"\"\"Read up to LEN bytes and return them.\n        Return zero-length string on EOF.\"\"\"\n    \n        self._checkClosed()\n        if self._sslobj is None:\n            raise ValueError(\"Read on closed or unwrapped SSL socket.\")\n        try:\n            if buffer is not None:\n>               return self._sslobj.read(len, buffer)\n                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE               ConnectionResetError: [WinError 10054] Удаленный хост принудительно разорвал существующее подключение\n\n..\\..\\..\\..\\..\\..\\AppData\\Local\\Python\\pythoncore-3.14-64\\Lib\\ssl.py:1138: ConnectionResetError\n---------------------------- Captured stdout call -----------------------------\nAgentDesk gateway: no users yet. Add one: python -m agentdesk gateway --home C:\\Users\\kochurin.a\\AppData\\Local\\Temp\\pytest-of-kochurin.a\\pytest-296\\test_tls_listener_secure_cooki0\\srv user add NAME --admin\nAgentDesk gateway listening on https://127.0.0.1:59484  (home: C:\\Users\\kochurin.a\\AppData\\Local\\Temp\\pytest-of-kochurin.a\\pytest-296\\test_tls_listener_secure_cooki0\\srv)\n=========================== short test summary info ===========================\nFAILED tests/test_gateway.py::test_tls_listener_secure_cookie - ConnectionRes...\n!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!\n1 failed, 197 passed in 122.47s (0:02:02)",
+      "crashes": 2,
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.0761192,
+          "turns": 5,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 10,
+            "output": 1148,
+            "cache_read": 130883,
+            "cache_write": 12798
+          },
+          "at": "2026-10-23T18:10:42",
+          "usage_before": 40.0,
+          "usage_after": 40.0,
+          "usage_used_pct": 0.0
+        },
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.1523272,
+          "turns": 6,
+          "error": false,
+          "attempt": 2,
+          "tokens": {
+            "input": 12,
+            "output": 1708,
+            "cache_read": 223920,
+            "cache_write": 9178
+          },
+          "at": "2026-10-23T18:22:59",
+          "usage_before": 40.0,
+          "usage_after": 41.0,
+          "usage_used_pct": 1.0
+        }
+      ],
+      "tool_stats": {
+        "total": 9,
+        "by_tool": {
+          "Bash": 9
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 4,
+          "by_tool": {
+            "Bash": 4
+          },
+          "mcp": {},
+          "turns": 5,
+          "cost_usd": 0.0761192,
+          "duration_ms": 262499,
+          "tier": "standard",
+          "attempt": 1
+        },
+        {
+          "total": 5,
+          "by_tool": {
+            "Bash": 5
+          },
+          "mcp": {},
+          "turns": 6,
+          "cost_usd": 0.1523272,
+          "duration_ms": 614161,
+          "tier": "standard",
+          "attempt": 2
+        }
+      ],
+      "commit": "b78bd47",
+      "branch": "auto/038",
+      "finished": "2026-10-23T18:26:31"
+    },
+    "039": {
+      "title": "Server disk budget: quotas per user, build/package cache management, hard limits (512 GB host)",
+      "status": "done",
+      "started": "2026-10-23T18:26:38",
+      "tier": "hard",
+      "why": "set in the task file",
+      "brief": "The AgentDesk server host has a hard 512 GB disk shared by all users, so builds, worktrees and package caches must be managed strictly so nothing bloats. Today agentdesk/hygiene.py is per-project and cargo-centred (target dirs, worktrees, logs; auto=false by default). Extend it to a SERVER-wide budget, reusing hygiene's safety rules (never follow symlinks, never delete outside configured locations or while a run uses the folder, refuse when unsure). Check what earlier server tasks already did.\n1. Server budget in server.toml: `disk_total_gb` (default 512), `disk_reserve_gb` (free space that must always remain, default 40), soft limit (e.g. 80% -> warn + auto-clean), hard limit (e.g. 92% -> refuse to start runs/clones/imports/uploads, with a clear message in UI/CLI; running work is not killed). Measure with a background, cached walker (never in request path), also report real filesystem usage (shutil.disk_usage) since other things use the disk.\n2. Per-user quotas: `quota_gb` default plus per-user override (admin cabinet + `agentdesk-server user quota`). Count the user's home: repos, worktrees, build targets, caches, chats, logs. Over quota -> that user's new runs/clones are refused, auto-clean for their data first; show usage bars in the user's dashboard header (small) and the admin cabinet (per-user table, sortable, with top consumers).\n3. Build artifact policy (defaults ON on the server, unlike the desktop): auto clean stale target/build dirs (cargo target, node_modules of finished worktrees if reproducible, python venv/.pytest_cache/__pycache__, dist/build, gradle/maven build dirs) by age and by size caps per project; finished/merged worktrees removed after N hours (keep branches); at most K concurrent worktrees per project; remove half-created worktrees. Generalise the cargo-only code via a small registry of \"build kinds\" (markers + paths + safe-to-delete rules) rather than copy-paste; keep cargo behaviour and tests intact.\n4. Package/dependency caches shared across users where it is safe, to avoid N copies: set per-instance env so CARGO_HOME registry/git, npm cache, pip cache, uv cache, go mod cache, gradle cache point at ONE server-wide cache dir (`<server-home>/cache/<tool>`) with size caps and LRU/age pruning (cargo-cache style by atime/mtime; `npm cache clean`/`pip cache purge` equivalents only inside that dir) and per-tool caps in server.toml. Shared caches must be content-addressed tools only (do not share a mutable build target between users). Option to hardlink-dedupe identical files in the cache. Make CARGO_TARGET_DIR optionally per-user shared across that user's worktrees of one project to cut duplication, with a cap.\n5. Git object bloat: `git gc --auto`/prune for repos on a schedule (low priority, off-peak, never during a run), shallow/partial clone option when importing from URL (`clone_depth` setting, `--filter=blob:none` option), warn for large files committed by agents (> N MB) in the report.\n6. Logs/chats/exports: cap sizes (hook into the log rotation from the reliability task), exports/imports temp dirs (`<server-home>/imports`, upload spool) cleaned after use and after 24 h, upload size limit enforced.\n7. Visibility and safety: admin cabinet \"Storage\" page: totals, per-user, per-project, per-cache, what the next auto-clean would delete (dry-run list) and a button to run it; audit-log every automatic deletion (what, how many bytes). A dry-run mode (`agentdesk-server clean --dry-run`) and `doctor` warnings when above soft limit.\nTests (pytest tests): quota/limit logic with fake sizes, refusal at hard limit, clean never touches anything outside configured roots or active runs, cache pruning in a temp dir, worktree cap, symlink safety. CHANGELOG under Unreleased; document in docs/SERVER.md (sizing guide for 512 GB, defaults, how to tune). Do not bump the version.",
+      "runs": [
+        {
+          "tier": "hard",
+          "model": "opus",
+          "effort": "high",
+          "cost_usd": 8.523410300000002,
+          "turns": 122,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 156,
+            "output": 145124,
+            "cache_read": 16190092,
+            "cache_write": 297732
+          },
+          "at": "2026-10-23T18:50:33",
+          "usage_before": 41.0,
+          "usage_after": 47.0,
+          "usage_used_pct": 6.0
+        }
+      ],
+      "tool_stats": {
+        "total": 121,
+        "by_tool": {
+          "Bash": 45,
+          "Read": 21,
+          "Grep": 2,
+          "Write": 7,
+          "Edit": 45,
+          "ToolSearch": 1
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 121,
+          "by_tool": {
+            "Bash": 45,
+            "Read": 21,
+            "Grep": 2,
+            "Write": 7,
+            "Edit": 45,
+            "ToolSearch": 1
+          },
+          "mcp": {},
+          "turns": 122,
+          "cost_usd": 8.523410300000002,
+          "duration_ms": 1432680,
+          "tier": "hard",
+          "attempt": 1
+        }
+      ],
+      "commit": "35e655f",
+      "branch": "auto/039",
+      "finished": "2026-10-23T18:53:50"
+    },
+    "040": {
+      "title": "Split builds: desktop App vs headless Server",
+      "status": "done",
+      "started": "2026-10-23T18:53:58",
+      "tier": "standard",
+      "why": "set in the task file",
+      "brief": "Goal: AgentDesk ships as two separate products sharing one core: (A) desktop App (Windows: window, tray, AgentDesk.exe + installer) and (B) headless Server (Linux: serve.py + agentdesk/gateway + console tool + deb/systemd). Today both live in one package and one dependency set.\nDo (check what earlier tasks 033-039 already did, only add what is missing):\n1. pyproject.toml: base dependencies = core only; extras `app` (pywebview, tray libs from requirements*.txt) and `server`. Headless install must not pull GUI libs. Keep `pip install .` working.\n2. Headless entry points (serve.py, gateway, console tool) must import without any GUI module. Add a test that imports them with GUI modules blocked (sys.modules poisoning) and passes.\n3. Build scripts: build_exe.ps1 / build_installer.ps1 / agentdesk.spec build only the App; packaging/debian/build_deb.py builds only the Server. Make sure the PyInstaller spec excludes gateway/server-only code that is not needed, and the deb excludes GUI code/deps. Separate artifact names and version stamps (AgentDesk-Setup-x.y.z.exe, agentdesk-server_x.y.z_*.deb).\n4. release.ps1 and any CI: separate targets (app, server, both), clear usage text.\n5. README/CHANGELOG: short section 'Two products' explaining which to use when.\nConstraints: no behaviour change at runtime; run `pytest tests` (not bare pytest) and keep all tests green. Done when both build paths are independent and the new import-isolation test passes.",
+      "runs": [
+        {
+          "tier": "standard",
+          "model": "sonnet",
+          "effort": "medium",
+          "cost_usd": 0.6516111000000001,
+          "turns": 41,
+          "error": false,
+          "attempt": 1,
+          "tokens": {
+            "input": 74,
+            "output": 17249,
+            "cache_read": 2230172,
+            "cache_write": 63925
+          },
+          "at": "2026-10-23T19:00:13",
+          "usage_before": 47.0,
+          "usage_after": 47.0,
+          "usage_used_pct": null
+        }
+      ],
+      "tool_stats": {
+        "total": 40,
+        "by_tool": {
+          "Bash": 31,
+          "Read": 1,
+          "Edit": 5,
+          "Grep": 1,
+          "Write": 1,
+          "Monitor": 1
+        },
+        "mcp": {}
+      },
+      "runs_stats": [
+        {
+          "total": 40,
+          "by_tool": {
+            "Bash": 31,
+            "Read": 1,
+            "Edit": 5,
+            "Grep": 1,
+            "Write": 1,
+            "Monitor": 1
+          },
+          "mcp": {},
+          "turns": 41,
+          "cost_usd": 0.6516111000000001,
+          "duration_ms": 373539,
+          "tier": "standard",
+          "attempt": 1
+        }
+      ],
+      "commit": "8ed96e6",
+      "branch": "auto/040",
+      "finished": "2026-10-23T19:03:39"
+    }
+  },
+  "spent_usd": 56.9786,
+  "budget_base": 56.327,
+  "tokens": {
+    "input": 2178,
+    "output": 1252935,
+    "cache_read": 82972679,
+    "cache_write": 3363694
+  }
+}

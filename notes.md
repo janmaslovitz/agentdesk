@@ -1,0 +1,107 @@
+# Notes for agents working on AgentDesk (durable facts; finished tasks append here)
+- (001) Quick and final checks run `python -m pytest`, which isn't in `requirements.txt`; install it with `pip install pytest`. Tests are in `tests/`.
+- (001) Dashboard PID is in `data/dashboard.pid`; each project's last dashboard-started run PID is in `<project>/runner.pid`.
+- (001) `stop` avoids `taskkill /T` on the dashboard so detached runs survive.
+- (002) pytest isn't in requirements.txt; tests live in `tests/` and patch `core.DATA` (read from `AGENTDESK_HOME` at import).
+- (002) NOTES: `core.add_project(..., local_git=True)` is the only path that runs `git init`; `core.NeedsLocalGit` signals setup is needed.
+- (003) Tests: `pip install pytest`, then `python -m pytest -q` in `tests/`; `tests/conftest.py` sets a temp AGENTDESK_HOME before import and has a scratch-repo `project` fixture. Live tests: drive the server with Python urllib, because the worker guard blocks `curl -d`.
+- (003) Chat permissions live in `server.Chat.permission` and `Approvals`; custom tools are `server.Chat.tools()` (MCP server "agentdesk", names `mcp__agentdesk__*`), and `server.run_args()` builds the run command lines. Haiku loads them through ToolSearch, which must stay allowed.
+- (003) `project.toml` helpers are in core.py: `chat_mode`/`set_chat_mode`, `allowed_commands`/`allow_command`/`command_allowed`, `chat_settings(mode)`. Coworker currently falls back to Assistant behaviour in `Chat._client`.
+- (004) The Claude CLI's `total_cost_usd` is a running total for the session (even after resuming it), while `max_budget_usd` counts only the current process; so the Coworker uses a fresh process per message.
+- (004) The CLI approves read-only commands without calling `can_use_tool`; only a PreToolUse hook sees every call (the Coworker has one, the worker `core.guard` doesn't).
+- (004) `__pycache__/*.pyc` files are tracked in git; run tests with `PYTHONDONTWRITEBYTECODE=1 ... -p no:cacheprovider` or restore them afterwards.
+- (005) `tests/conftest.py` sets a temp `AGENTDESK_HOME` before agentdesk is imported; run tests from the repo root as `python -m pytest tests`.
+- (005) `server.open_window` returns False on any failure, and `main` then opens the browser.
+- (RULE, owner) All work on the current app is done in an isolated container with a cloned test app, never on the live app (`C:\Users\kochurin.a\AgentDesk`, `data/`). Workers and tests must use the clone and a temp `AGENTDESK_HOME`; the live checkout and its `data/` are only changed by the user.
+- (013) The SDK spawns the CLI via `subprocess_cli.anyio.open_process`. `core._hide_sdk_console()` adds `CREATE_NO_WINDOW` on Windows by swapping that module's `anyio` name for a proxy.
+- (013) Avoid the `ClaudeSDKClient(transport=...)` option: it skips the SDK's option and flag handling.
+- (013) The end-to-end no-window check in a real pythonw session is still outstanding.
+- (007) Account json `reading` = {utilization (0–1), at, source}; run entries `usage_*` are percent points; `core.usage_gate(acct)` is the pause check.
+- (007) Automatic source: only the SDK RateLimitEvent, often null; the manual value is the reliable fallback.
+- (015) Merged main for 013 and 007 lives only in the clone `%TEMP%\ad015clone`; the live checkout still needs the user's go-ahead.
+- (015) 007 added a `usage_max_age_min = 30` line to `data/settings.toml`; the usage endpoint is `POST /api/accounts/<name>/usage`.
+- (015) `git remote` commands are blocked for automated workers.
+- (008) Build with `.\build_exe.ps1` (venv `.venv-build`, spec `agentdesk.spec`, entry `run_agentdesk.py`); the frozen exe uses `core.FROZEN`, so data goes to `AGENTDESK_HOME` or `data\` next to the exe.
+- (008) Shell state resets between Bash calls, so `AGENTDESK_HOME` comes back each time. Unset it in the same call when testing the data-next-to-exe rule.
+- (008) Desktop shortcut creation is untested; use a non-default port such as `--port 8799` when testing so the live dashboard on 8765 isn't touched.
+- (011) No dashboard Quit button exists in the code; `QUIT` (a threading.Event in server.py) is what tray Quit sets, and `main()` watches it.
+- (011) Tray is optional (`requirements-tray.txt`) and only used in the server-owning process; a full pytest run takes about 30s.
+- (016) Git panel helpers are `core.git_*`. Mutating routes need `confirm: true` and are refused while `runner(p).running()`.
+- (016) Merge only works from a clean base-branch checkout, and pull and push use the first remote (origin preferred).
+- (016) The `git` panel loads once per project switch and after its own actions, not on the poll.
+- (017) Build state lives in `<project>/build/` (`src/` worktree, `build.log`, `status.json`). The status values are idle, running, ok, failed and stopped.
+- (017) Build routes are under `/api/p/<p>/build[/stop|/open]`. Start and stop need `confirm:true`; `open` does not.
+- (012) Frozen data rule is in `core._data_home()`: `AGENTDESK_HOME`, else `data` next to the exe if it exists, else `%LOCALAPPDATA%\AgentDesk`.
+- (012) Inno Setup 6 is installed per-user (`%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe`). The installer is about 109 MB because it carries the SDK's bundled `claude.exe`. A full build takes several minutes.
+- (012) The AgentDesk exe has no port option and the live app holds 8765, so the window and tray cannot be checked until that is freed. The default Program Files install needs a manual UAC run.
+- (018) Export is an allow-list in `core.export_files` (files listed in `_EXPORT_TOP`, `_EXPORT_DIRS`, `chat*.json`); a new per-project file must be added there to be exported.
+- (018) Export format version is `core.EXPORT_FORMAT` = 1; import size limits are `core.MAX_FILE_BYTES` and `core.MAX_TOTAL_BYTES`.
+- (018) Tests that need a second `AGENTDESK_HOME` monkeypatch `core.DATA`; `core.DATA` is the only data-path source.
+- (019) Auto-runner state lives in each task's state.json entry as `crashes`; `reviewed` and `merge` are optional flags that `attention_items` reads, and task 015 should set them.
+- (019) Tests that call `server.main()` must not trigger real starts: the loop waits an interval before its first pass, and `QUIT` is set on exit.
+- (009) `chat.json` stores the full assistant entry (`text`, `tools`, `cost`, `model`, `tokens`), not only `tools` and `cost`.
+- (009) `Chat.load_history()` runs in `Chat.__init__`, so each project loads its transcript on first `chat(p)` use. `reset()` deletes `chat.json`; `reset(keep_history=True)` keeps it.
+- (009) A restart during an in-flight answer leaves a saved user message with no reply. Nothing repairs this on load.
+- (010) `chat_memory.md` is separate from the display-only `chat.json`; `Chat.update_memory` runs inside `ask()`'s lock and goes through the module-level `server.memory_call`, which tests patch.
+- (010) NOTES: Memory-update cost is deliberately not counted in `chat_usage.json`.
+- (010) NOTES: The restart check was never run, so the memory has not been tested against the real model.
+- (014) `index.html` has mixed CRLF/CR line endings; edit it byte-wise, because a text-mode rewrite turns the whole file into a diff.
+- (014) JS in `index.html` has no automated tests; the new test only checks the source text.
+- (020) The chat placeholder bubble is built in `send()` in `agentdesk/web/index.html` with `.working` dots and a 1 s counter; its timer is cleared in `finally` and stops on project switch via `!wait.isConnected`.
+- (020) NOTES: `refresh()` in index.html clears `#msgs` when `chatFor !== cur`, which is what detaches an in-flight placeholder.
+- (020) NOTES: index.html is CRLF throughout; edit it byte-wise with Python (`open(...,'rb')`), since text-mode rewrites produce whole-file diffs.
+- (006) Planner drafts live in `<project>/plan.json` plus `tasks/drafts/*.md` (`status = "draft"`); `core.load_tasks` skips both, and only the user approves (`POST /api/p/<slug>/plan/approve|cancel|start|stop|close`).
+- (006) Write shared project files with `core.write_atomic` / `core.replace_file`: on Windows a rename onto a file someone is reading fails, and the dashboard and plan watcher read `state.json` while runs write it.
+- (006) `server.AUTONOMOUS = ("coworker", "planner")` share the per-message budget and the usage pause. Progress notes are chat history items with `kind="progress"` and a `seq`; the page fetches them when `/state` shows a higher `chat_seq`.
+- (021) `Chat.auto_turn` marks busy set only by an unprompted CLI message; `settle()` / `is_busy()` clear it after 45s of silence with no tool call running.
+- (021) `Chat.interrupt()` always notes and clears `busy`, including when idle.
+- (022) Per-task run timeline: `core.Activity(p, id, role)` appends to `runs/<id>.jsonl`; `core.read_activity()` reads it; runs/ is exported only with include_logs.
+- (022) Run entries in state.json now carry `effort`; `server.task_row()` builds each task's row for both /state and `server.task_detail()` (GET /api/p/<slug>/task/<id>).
+- (022) `tool_summary`/`result_text` now live in core (server.py keeps aliases); core.py, server.py and index.html are all CRLF, so patch them byte-wise.
+- (023) SDK names in core/server are lazy: call `_load_sdk()` before using any SDK name in new code; `from agentdesk.core import <SDKName>` still works via module `__getattr__`.
+- (023) NOTES: `core.load_tasks` is cached by (mtime_ns, size) and returns copies; write tasks through files, tests that rewrite a file within the same size/mtime tick should bump the mtime.
+- (024) `core._git_auth(p, url)` gives git network commands the project's gh account through `-c credential.helper=` plus a helper that reads `AGENTDESK_GIT_TOKEN` from the child's environment; `core._gh()` runs gh windowless with `GH_TOKEN` in the child environment only.
+- (024) `[git] account` in project.toml is per computer: `_portable_toml` and `_localize_toml` drop it on export/import.
+- (024) The worker guard blocks `git remote ...` commands, so tests set remotes through the `g()` helper (subprocess), not the shell.
+- (026) SDK `McpStdioServerConfig` has no cwd; the server inherits `options(cwd=...)`, so the worktree is the cwd for workers.
+- (026) Pass `role="worker"` or `role="router"` to `core.options()` for MCP injection; callers that omit `role` get no MCP servers.
+- (027) Disk hygiene is in `agentdesk/hygiene.py` (settings `core.hygiene_cfg` / `HYGIENE_DEFAULTS`); dashboard reads `/api/p/<slug>/disk` from the cache only, and cleanup runs in a background job (`hygiene.start_clean`).
+- (027) The worker guard blocks any shell command whose text contains "git branch -D" (even inside a heredoc); patch docs via a script file or the Edit tool, and writes outside the worktree are refused.
+- (027) psutil is not installed: on Windows, process checks use PowerShell Get-CimInstance (no working folders), so an unexplained running cargo blocks deleting target dirs.
+- (028) Installer launch uses `cmd /c "<setup>.exe /VERYSILENT … & start AgentDesk.exe"`. `AgentDesk.iss` has no silent-mode relaunch of its own.
+- (028) The updater needs the release to have an `AgentDesk-Setup*.exe` asset; adding a `.sha256` asset enables checksum verification.
+- (028) `server.py` defines `QUIT` twice. The later one (near `start_tray`) is the one `main()` watches.
+- (029) `tool_stats` and `runs_stats` are per-task entries in state.json, filled in `work()` by `Activity.take_stats()` and `merge_tool_stats()`.
+- (029) Router tool calls are not counted, only the worker's.
+- (030) Versioned builds use branch `build/<version>` checked out in the existing build folder `<project>/build/src`; the last choice is in `<project>/build/selection.json`. `core.build_plan` / `core.check_build_selection` supply the list and the validation.
+- (030) `GET /api/p/<slug>/build?lite=1` skips the version/task git calls; the UI uses it only while a build runs.
+- (030) The task list needs `state.json` entries with status `done` and an existing `auto/<id>` branch; tasks run outside AgentDesk's own state (e.g. 020+ here) won't appear.
+- (031) On Windows, `bash` on PATH can be System32's WSL launcher, which fails when no distro is installed; tests needing bash should use Git's bash (`tests/test_release_ci.py::working_bash`).
+- (031) Release CI is `.github/workflows/release.yml` (tag push or manual run with a tag; draft → assets → publish); macOS/Linux builds come from `bash build_unix.sh`, and `tools/release.py notes <ver>` gives the release notes.
+- (031) Off Windows the updater links to the release page (`update_status` `link_only`/`page`, `POST /api/update/open`); the packaged app's default data folder is `core.user_data_dir()`.
+- (032) Branch export puts files at the branch root and never touches the checkout. The clone-by-branch import goes through `clone_for_import(..., branch=)`.
+- (032) `/api/pick` only works in the pywebview window, via the module global `server._WINDOW`; in a browser it returns `available: false`.
+- (032) Two tests (diverged remote, import from the branch) run the real git push and clone against a local bare repo.
+- (033) Gateway auth: instances started with `--auth-token-file` need the header `X-AgentDesk-Gateway-Token` on every request. The gateway must also be listed via `--allowed-host`, since it forwards the browser's Host and Origin.
+- (033) `server.GUARD` is the module-level `Guard` (default is loopback only); tests that change it must restore it.
+- (033) `serve.py` must not import `core` until after `--data` is applied (`serve.prescan_data`).
+- (034) The gateway (`python -m agentdesk gateway`) has user, CSRF and session info at `GET /gateway/me` (CSRF header `X-AgentDesk-CSRF`) and no admin web page for users yet; users are managed with `gateway user ...` (`agentdesk/gateway/cli.py`, `UserStore` in `users.py`).
+- (034) Instances are started with `--trust-proxy-auth` and receive `X-AgentDesk-User: <username>`; the user records' `projects`/`accounts` assignments are stored but not enforced yet.
+- (034) `GET /api/busy` in `server.py` decides whether an idle instance may be stopped; add new kinds of long-running work there.
+- (035) The gateway never imports `core`. Anything that needs a user's projects runs `python -m agentdesk.gateway.projtool` with that user's `AGENTDESK_HOME` and reads one JSON line from stdout.
+- (035) Server-wide Claude accounts live in `<server-home>/accounts.json` and are synced into the user's `settings.toml` between `# >>> agentdesk-gateway accounts` markers. Assigned accounts replace the built-in list, so the default account disappears once any are assigned.
+- (035) Admin routes are handled by `admin.dispatch()`, called in `Handler.route()` after the CSRF check and before the proxy.
+- (036) `AGENTDESK_SERVER_CONFIG` overrides the `server.toml` path. The gateway service is `python -m agentdesk gateway`, the headless instance command is `agentdesk-serve`, and the admin tool is `agentdesk-server`.
+- (036) `run_as_users` (sudo) conflicts with the unit's `NoNewPrivileges=true`; it needs a systemd drop-in with `NoNewPrivileges=false`.
+- (036) The `.deb` is built with `python3 packaging/debian/build_deb.py`; use `--stage-only DIR` to build just the file tree without `dpkg-deb`.
+- (037) `users.file_lock` is not re-entrant: never nest `UserStore._locked()` (e.g. don't call `assign()` inside `_change()`), or it deadlocks.
+- (037) Login and password checks must call `Throttle.begin()` (reserves the attempt) and then `success()`; don't go back to `blocked_for()` + `failure()`.
+- (037) `app.CREDENTIAL_ENV` lists the Claude credential variables removed from instance environments unless an assigned account's `key_env` names them.
+- (038) The reliability work (watchdog, recovery, health, guards, log rotation) is all in place; see `docs/SERVER.md`.
+- (038) `test_tls_listener_secure_cookie` can fail on Windows under load with a connection reset. If it recurs, look at how the gateway accepts connections under load.
+- (039) On a server, `<user home>/server-policy.json` (written by the gateway, read via `core.server_policy()` / `core.disk_gate()`) carries the refuse/allow decision, hygiene defaults (above `settings.toml`, below `project.toml`), cache env and clone options. Instances append deletions to `<user home>/storage-audit.jsonl`, which the gateway moves into `audit.log`.
+- (039) Safe-delete and size-walk helpers now live in `agentdesk/fsutil.py` (`hygiene` re-imports them). Build kinds are `hygiene.BUILD_KINDS`; new `[hygiene]` keys: `artifacts`, `worktree_ttl_hours`, `max_worktrees`, `git_gc_hours`, `offpeak_hours`, `large_file_mb`.
+- (039) `agentdesk.gateway.projtool clean --dry-run|--apply` runs hygiene for every project of one user and is the path the gateway and CLI use to clean; storage settings are flat `server.toml` keys from `storage.DEFAULTS`, merged into `gateway/config.DEFAULTS`.
+- (040) Core deps live in `requirements-core.txt` and `pyproject.toml`; a test keeps them in step. GUI deps go only in `requirements.txt`, `requirements-tray.txt` and the `app` extra.
+- (040) Server-only modules (`gateway`, `serve`, `storage`) are excluded from the PyInstaller spec via `SERVER_ONLY`. A new server-only module must be added there, and the `.deb` must not ship GUI assets.
+- (040) Heredocs in the Bash tool mangle `\b` into a backspace character; use the Edit tool for Windows paths.

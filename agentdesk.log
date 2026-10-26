@@ -1,0 +1,426 @@
+[10-16 09:37:25] dashboard: started run agentdesk 001 (pid 17292)
+[10-16 09:37:43] 001: routed to standard (set in the task file)
+[10-16 09:44:58] dashboard: started run agentdesk 001 (pid 19088)
+[10-16 09:45:30] 001: routed to standard (set in the task file)
+[10-16 09:45:30] 001: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\001 on auto/001 from main
+[10-16 09:45:34] 001: standard (sonnet, medium) attempt 1
+[10-16 09:49:32]   gate: python -m pytest -q -x
+[10-16 09:49:32] 001: checks failed
+[10-16 09:49:32] 001: standard (sonnet, medium) attempt 2
+[10-16 09:50:12]   gate: python -m pytest -q -x
+[10-16 09:50:16] 001: done at 02bf5ef
+[10-16 09:50:16] run finished: 1 task(s); project total 0.47 USD
+[10-16 09:53:31] dashboard: started run agentdesk 002 (pid 2408)
+[10-16 09:53:59] 002: routed to standard (set in the task file)
+[10-16 09:53:59] 002: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\002 on auto/002 from main
+[10-16 09:54:02] 002: standard (sonnet, medium) attempt 1
+[10-16 09:54:58]   gate: python -m pytest -q -x
+[10-16 09:55:01] 002: done at cc47e40
+[10-16 09:55:01] run finished: 1 task(s); project total 0.67 USD
+[10-16 09:55:40] dashboard: started run agentdesk 003 (pid 21756)
+[10-16 09:56:05] 003: routed to hard (set in the task file)
+[10-16 09:56:05] 003: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\003 on auto/003 from main
+[10-16 09:56:09] 003: hard (opus, high) attempt 1
+[10-16 10:05:38]   gate: python -m pytest -q -x
+[10-16 10:05:43] 003: done at b16f6da
+[10-16 10:05:43] run finished: 1 task(s); project total 3.72 USD
+[10-16 10:08:08] dashboard: started run agentdesk (pid 15232)
+[10-16 10:08:34] 004: routed to hard (set in the task file)
+[10-16 10:08:34] 004: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\004 on auto/004 from auto/003
+[10-16 10:08:38] 004: hard (opus, high) attempt 1
+[10-16 10:22:28]   gate: python -m pytest -q -x
+[10-16 10:22:39] 004: done at a5cb13b
+[10-16 10:23:00] 005: routed to standard (set in the task file)
+[10-16 10:23:00] 005: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\005 on auto/005 from auto/001
+[10-16 10:23:03] 005: standard (sonnet, medium) attempt 1
+[10-16 10:28:36] dashboard: started run agentdesk (pid 23164)
+[10-16 10:28:56] 005: routed to standard (set in the task file)
+[10-16 10:29:00] 005: standard (sonnet, medium) attempt 1
+[10-16 10:30:18]   gate: python -m pytest -q -x
+[10-16 10:30:23] 005: done at 433bc60
+[10-16 10:30:23] stopping before 006: usage limit 93% reached the pause threshold
+[10-16 10:30:23] run finished: 1 task(s); project total 7.55 USD
+[10-16 11:02:15] dashboard: started run agentdesk 013 (pid 23456)
+[10-16 11:02:34] 013: routed to standard (set in the task file)
+[10-16 11:02:35] 013: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\013 on auto/013 from main
+[10-16 11:02:38] 013: standard (sonnet, medium) attempt 1
+[10-16 11:03:39]   gate: python -m pytest -q -x
+[10-16 11:04:09] 013: done at 6112299
+[10-16 11:04:09] run finished: 1 task(s); project total 7.65 USD
+[10-16 11:05:17] dashboard: started run agentdesk 007 (pid 19292)
+[10-16 11:05:39] 007: routed to standard (set in the task file)
+[10-16 11:05:40] 007: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\007 on auto/007 from main
+[10-16 11:05:43] 007: standard (sonnet, medium) attempt 1
+[10-16 14:15:35] dashboard: started run agentdesk 007 (pid 9420)
+[10-16 14:15:54] 007: routed to standard (set in the task file)
+[10-16 14:15:58] 007: standard (sonnet, medium) attempt 1
+[10-16 14:17:16] dashboard: started run agentdesk 007 (pid 19564)
+[10-16 14:17:35] 007: routed to standard (set in the task file)
+[10-16 14:17:39] 007: standard (sonnet, medium) attempt 1
+[10-16 14:20:09]   gate: python -m pytest -q -x
+[10-16 14:20:40] 007: done at 5c0886c
+[10-16 14:20:40] run finished: 1 task(s); project total 8.03 USD
+[10-16 14:21:05] dashboard: started run agentdesk 015 (pid 11664)
+[10-16 14:21:30] 015: routed to standard (set in the task file)
+[10-16 14:21:30] 015: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\015 on auto/015 from auto/013
+[10-16 14:21:34] 015: standard (sonnet, medium) attempt 1
+[10-16 14:22:50]   gate: python -m pytest -q -x
+[10-16 14:23:19] 015: done at 6112299
+[10-16 14:23:19] run finished: 1 task(s); project total 8.15 USD
+[10-16 14:23:28] dashboard: started run agentdesk 008 (pid 18680)
+[10-16 14:23:55] 008: routed to standard (set in the task file)
+[10-16 14:23:55] 008: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\008 on auto/008 from auto/015
+[10-16 14:23:59] 008: standard (sonnet, medium) attempt 1
+[10-16 14:24:40] chat: coworker worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\cowork on auto/cowork
+[10-16 14:31:18] dashboard: started run agentdesk 008 (pid 19264)
+[10-16 14:31:45] 008: routed to standard (set in the task file)
+[10-16 14:31:49] 008: standard (sonnet, medium) attempt 1
+[10-16 14:35:26]   gate: python -m pytest -q -x
+[10-16 14:35:56] 008: done at ff3d6a6
+[10-16 14:35:56] run finished: 1 task(s); project total 8.34 USD
+[10-16 14:36:08] dashboard: started run agentdesk 011 (pid 19404)
+[10-16 14:36:33] 011: routed to standard (set in the task file)
+[10-16 14:36:33] 011: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\011 on auto/011 from main
+[10-16 14:36:37] 011: standard (sonnet, medium) attempt 1
+[10-16 14:39:35]   gate: python -m pytest -q -x
+[10-16 14:40:10] 011: done at 58b009d
+[10-16 14:40:10] run finished: 1 task(s); project total 8.49 USD
+[10-16 14:40:22] dashboard: started run agentdesk 016 (pid 3876)
+[10-16 14:40:47] 016: routed to standard (set in the task file)
+[10-16 14:40:47] 016: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\016 on auto/016 from auto/015
+[10-16 14:40:51] 016: standard (sonnet, medium) attempt 1
+[10-16 14:43:31]   gate: python -m pytest -q -x
+[10-16 14:44:12] 016: done at 5e39860
+[10-16 14:44:12] run finished: 1 task(s); project total 8.84 USD
+[10-16 14:44:30] dashboard: started run agentdesk 017 (pid 9128)
+[10-16 14:44:54] 017: routed to standard (set in the task file)
+[10-16 14:44:55] 017: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\017 on auto/017 from auto/016
+[10-16 14:44:58] 017: standard (sonnet, medium) attempt 1
+[10-16 14:49:55]   gate: python -m pytest -q -x
+[10-16 14:50:37] 017: done at 2d2839e
+[10-16 14:50:37] run finished: 1 task(s); project total 9.29 USD
+[10-16 14:50:48] dashboard: started run agentdesk 012 (pid 8272)
+[10-16 14:51:09] 012: routed to standard (set in the task file)
+[10-16 14:51:10] 012: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\012 on auto/012 from auto/011
+[10-16 14:51:13] 012: standard (sonnet, medium) attempt 1
+[10-16 14:57:24]   gate: python -m pytest -q -x
+[10-16 14:57:54] 012: done at 4a3b997
+[10-16 14:57:54] run finished: 1 task(s); project total 9.90 USD
+[10-16 14:59:01] dashboard: started run agentdesk 018 (pid 18724)
+[10-16 14:59:26] 018: routed to standard (set in the task file)
+[10-16 14:59:26] 018: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\018 on auto/018 from auto/016
+[10-16 14:59:30] 018: standard (sonnet, medium) attempt 1
+[10-16 15:07:18]   gate: python -m pytest -q -x
+[10-16 15:08:03] 018: done at d952234
+[10-16 15:08:03] run finished: 1 task(s); project total 10.74 USD
+[10-16 15:08:48] dashboard: started run agentdesk 019 (pid 9420)
+[10-16 15:09:09] 019: routed to standard (set in the task file)
+[10-16 15:09:09] 019: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\019 on auto/019 from auto/015
+[10-16 15:09:13] 019: standard (sonnet, medium) attempt 1
+[10-16 15:13:44]   gate: python -m pytest -q -x
+[10-16 15:14:14] 019: done at 31cb177
+[10-16 15:14:14] run finished: 1 task(s); project total 11.56 USD
+[10-16 15:25:29] needs attention: 012 (unmerged): done, branch auto/012 is not merged and not reviewed
+[10-16 15:25:29] dashboard: started run agentdesk 006 (pid 13460)
+[10-16 15:25:29] auto-runner: started 006
+[10-16 15:25:30] stopping before 006: usage unknown — enter it under Accounts
+[10-16 15:25:30] run finished: 0 task(s); project total 11.56 USD
+[10-16 15:26:14] dashboard: started run agentdesk 006 (pid 19480)
+[10-16 15:26:14] auto-runner: started 006
+[10-16 15:26:15] stopping before 006: usage unknown — enter it under Accounts
+[10-16 15:26:15] run finished: 0 task(s); project total 11.56 USD
+[10-16 15:27:16] dashboard: started run agentdesk 006 (pid 4628)
+[10-16 15:27:16] auto-runner: started 006
+[10-16 15:27:36] 006: routed to hard (set in the task file)
+[10-16 15:27:38] 006: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\006 on auto/006 from auto/004
+[10-16 15:27:41] 006: hard (opus, high) attempt 1
+[10-16 15:29:19] needs attention: 015 (unmerged): done, branch auto/015 is not merged and not reviewed
+[10-16 15:32:54] auto-runner: 006 was working but its run is gone; set back to pending (worker exited unexpectedly)
+[10-16 15:32:58] needs attention: 012 (unmerged): done, branch auto/012 is not merged and not reviewed
+[10-16 15:32:58] dashboard: started run agentdesk 006 (pid 5368)
+[10-16 15:32:58] auto-runner: started 006 (retry after crash)
+[10-16 15:39:45] auto-runner: 006 was working but its run is gone; set back to pending (worker exited unexpectedly)
+[10-16 15:39:46] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: worker exited unexpectedly
+[10-16 15:39:46] needs attention: 012 (unmerged): done, branch auto/012 is not merged and not reviewed
+[10-16 15:39:46] dashboard: started run agentdesk 009 (pid 4524)
+[10-16 15:39:46] auto-runner: started 009
+[10-16 15:40:06] 009: routed to mechanical (set in the task file)
+[10-16 15:40:06] 009: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\009 on auto/009 from main
+[10-16 15:40:10] 009: mechanical (haiku) attempt 1
+[10-16 15:42:17]   gate: python -m pytest -q -x
+[10-16 15:43:09] 009: done at 062cd24
+[10-16 15:43:09] run finished: 1 task(s); project total 11.59 USD
+[10-16 15:43:23] needs attention: 009 (unmerged): done, branch auto/009 is not merged and not reviewed
+[10-16 15:43:23] dashboard: started run agentdesk 010 (pid 9552)
+[10-16 15:43:23] auto-runner: started 010
+[10-16 15:43:45] 010: routed to standard (set in the task file)
+[10-16 15:43:45] 010: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\010 on auto/010 from auto/009
+[10-16 15:43:49] 010: standard (sonnet, medium) attempt 1
+[10-16 15:46:20]   gate: python -m pytest -q -x
+[10-16 15:49:27] 010: done at 1eb49c5
+[10-16 15:49:27] run finished: 1 task(s); project total 11.89 USD
+[10-16 15:49:38] needs attention: 010 (unmerged): done, branch auto/010 is not merged and not reviewed
+[10-16 15:49:38] dashboard: started run agentdesk 014 (pid 15504)
+[10-16 15:49:38] auto-runner: started 014
+[10-16 15:50:07] 014: routed to standard (set in the task file)
+[10-16 15:50:08] 014: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\014 on auto/014 from main
+[10-16 15:50:12] 014: standard (sonnet, medium) attempt 1
+[10-16 15:52:49]   gate: python -m pytest -q -x
+[10-16 15:56:48] auto-runner: 014 was working but its run is gone; set back to pending (worker exited unexpectedly)
+[10-16 15:56:49] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: worker exited unexpectedly
+[10-16 15:56:49] needs attention: 009 (unmerged): done, branch auto/009 is not merged and not reviewed
+[10-16 15:56:49] needs attention: 010 (unmerged): done, branch auto/010 is not merged and not reviewed
+[10-16 15:56:49] needs attention: 012 (unmerged): done, branch auto/012 is not merged and not reviewed
+[10-16 15:56:49] dashboard: started run agentdesk 014 (pid 20708)
+[10-16 15:56:49] auto-runner: started 014 (retry after crash)
+[10-16 15:57:14] 014: routed to standard (set in the task file)
+[10-16 15:57:18] 014: standard (sonnet, medium) attempt 1
+[10-16 15:59:02]   gate: python -m pytest -q -x
+[10-16 15:59:53] 014: done at e514501
+[10-16 15:59:53] run finished: 1 task(s); project total 12.21 USD
+[10-16 15:59:57] needs attention: 014 (unmerged): done, branch auto/014 is not merged and not reviewed
+[10-16 16:19:27] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: worker exited unexpectedly
+[10-16 16:19:27] needs attention: 009 (unmerged): done, branch auto/009 is not merged and not reviewed
+[10-16 16:19:27] needs attention: 010 (unmerged): done, branch auto/010 is not merged and not reviewed
+[10-16 16:19:27] needs attention: 012 (unmerged): done, branch auto/012 is not merged and not reviewed
+[10-16 16:19:27] needs attention: 014 (unmerged): done, branch auto/014 is not merged and not reviewed
+[10-16 16:28:18] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: worker exited unexpectedly
+[10-16 16:28:18] needs attention: 009 (unmerged): done, branch auto/009 is not merged and not reviewed
+[10-16 16:28:18] needs attention: 010 (unmerged): done, branch auto/010 is not merged and not reviewed
+[10-16 16:28:18] needs attention: 012 (unmerged): done, branch auto/012 is not merged and not reviewed
+[10-16 16:28:18] needs attention: 014 (unmerged): done, branch auto/014 is not merged and not reviewed
+[10-16 19:35:27] dashboard: started run agentdesk 020 (pid 11160)
+[10-16 19:35:27] auto-runner: started 020
+[10-16 19:35:44] 020: routed to mechanical (set in the task file)
+[10-16 19:35:44] 020: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\020 on auto/020 from main
+[10-16 19:35:45] 020: mechanical (haiku) attempt 1
+[10-16 19:36:44]   gate: python -m pytest -q -x
+[10-16 19:39:35] 020: done at 33ccf5a
+[10-16 19:39:35] run finished: 1 task(s); project total 12.23 USD
+[10-16 19:40:06] needs attention: 020 (unmerged): done, branch auto/020 is not merged and not reviewed
+[10-16 19:43:29] dashboard: started run agentdesk 006 (pid 13528)
+[10-16 19:43:50] 006: routed to hard (set in the task file)
+[10-16 19:43:51] 006: hard (opus, high) attempt 1
+[10-16 19:57:01]   gate: python -m pytest -q -x
+[10-16 19:57:40] 006: checks failed
+[10-16 19:57:40] 006: hard (opus, high) attempt 2
+[10-16 19:57:57] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-16 19:59:00]   gate: python -m pytest -q -x
+[10-16 19:59:16] 006: done at 35c144f
+[10-16 19:59:16] run finished: 1 task(s); project total 18.95 USD
+[10-16 19:59:33] needs attention: 006 (unmerged): done, branch auto/006 is not merged and not reviewed
+[10-16 20:23:31] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 00:33:57] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 12:45:30] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 14:01:20] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 14:05:46] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 14:25:30] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 14:33:14] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-17 14:49:40] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-19 10:01:08] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-20 09:27:43] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-20 09:29:14] dashboard: started run agentdesk 021 (pid 20476)
+[10-20 09:29:14] auto-runner: started 021
+[10-20 09:29:30] 021: routed to standard (set in the task file)
+[10-20 09:29:30] 021: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\021 on auto/021 from main
+[10-20 09:29:31] 021: standard (sonnet, medium) attempt 1
+[10-20 09:31:44]   gate: python -m pytest -q -x
+[10-20 09:33:01] 021: done at c24b446
+[10-20 09:33:01] run finished: 1 task(s); project total 19.21 USD
+[10-20 09:33:15] needs attention: 021 (unmerged): done, branch auto/021 is not merged and not reviewed
+[10-20 11:01:27] needs attention: 006 (repeated): crashed 2 times; auto-retry used up: tate.tmp')
+[10-20 11:04:28] dashboard: started run agentdesk 022 (pid 21000)
+[10-20 11:04:28] auto-runner: started 022
+[10-20 11:04:59] 022: routed to hard (Changes span the task endpoint, the run-recording path in core.py (route/work), a new per-task activity log, and a UI restructure of showDetail with collapse state and no-op re-render rules. Involves design choices about what to record and how to keep polling from resetting the panel.)
+[10-20 11:04:59] 022: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\022 on auto/022 from main
+[10-20 11:05:00] 022: hard (opus, high) attempt 1
+[10-20 11:12:19]   gate: python -m pytest -q -x
+[10-20 11:13:39] 022: done at d76aac8
+[10-20 11:13:39] run finished: 1 task(s); project total 21.38 USD
+[10-20 11:14:00] needs attention: 022 (unmerged): done, branch auto/022 is not merged and not reviewed
+[10-22 18:03:26] dashboard: started run agentdesk 023 (pid 16548)
+[10-22 18:03:47] 023: routed to standard (set in the task file)
+[10-22 18:03:47] 023: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\023 on auto/023 from main
+[10-22 18:03:48] 023: standard (sonnet, medium) attempt 1
+[10-22 18:08:22]   gate: python -m pytest -q -x
+[10-22 18:09:38] 023: done at 937777b
+[10-22 18:09:38] run finished: 1 task(s); project total 21.88 USD
+[10-22 18:09:41] needs attention: 023 (unmerged): done, branch auto/023 is not merged and not reviewed
+[10-22 18:09:41] dashboard: started run agentdesk 024 (pid 15164)
+[10-22 18:09:41] auto-runner: started 024
+[10-22 18:09:59] 024: routed to hard (set in the task file)
+[10-22 18:09:59] 024: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\024 on auto/024 from auto/023
+[10-22 18:10:00] 024: hard (opus, high) attempt 1
+[10-22 18:24:44]   gate: python -m pytest -q -x
+[10-22 18:26:11] 024: done at 1c22cb1
+[10-22 18:26:11] run finished: 1 task(s); project total 25.68 USD
+[10-22 18:26:12] needs attention: 024 (unmerged): done, branch auto/024 is not merged and not reviewed
+[10-22 18:26:12] dashboard: started run agentdesk 025 (pid 6072)
+[10-22 18:26:12] auto-runner: started 025
+[10-22 18:26:37] 025: routed to standard (set in the task file)
+[10-22 18:26:37] 025: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\025 on auto/025 from auto/024
+[10-22 18:26:38] 025: standard (sonnet, medium) attempt 1
+[10-22 18:28:21]   gate: python -m pytest -q -x
+[10-22 18:29:49] 025: done at d56bca2
+[10-22 18:29:49] run finished: 1 task(s); project total 25.79 USD
+[10-22 18:30:12] needs attention: 025 (unmerged): done, branch auto/025 is not merged and not reviewed
+[10-22 18:30:12] dashboard: started run agentdesk 026 (pid 7704)
+[10-22 18:30:12] auto-runner: started 026
+[10-22 18:30:34] 026: routed to standard (set in the task file)
+[10-22 18:30:34] 026: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\026 on auto/026 from auto/025
+[10-22 18:30:35] 026: standard (sonnet, medium) attempt 1
+[10-22 18:32:58]   gate: python -m pytest -q -x
+[10-22 18:35:45] 026: done at ba833ed
+[10-22 18:35:45] run finished: 1 task(s); project total 26.01 USD
+[10-22 18:35:53] dashboard: started run agentdesk 027 (pid 11580)
+[10-22 18:36:13] needs attention: 026 (unmerged): done, branch auto/026 is not merged and not reviewed
+[10-22 18:36:16] 027: routed to hard (set in the task file)
+[10-22 18:36:16] 027: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\027 on auto/027 from auto/024
+[10-22 18:36:17] 027: hard (opus, high) attempt 1
+[10-22 18:53:38]   gate: python -m pytest -q -x
+[10-22 18:55:21] 027: done at d054308
+[10-22 18:55:21] run finished: 1 task(s); project total 30.99 USD
+[10-22 18:55:44] needs attention: 027 (unmerged): done, branch auto/027 is not merged and not reviewed
+[10-23 09:23:44] dashboard: started run agentdesk 028 (pid 25304)
+[10-23 09:23:44] auto-runner: started 028
+[10-23 09:23:44] 028: routed to standard (set in the task file)
+[10-23 09:23:44] 028: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\028 on auto/028 from main
+[10-23 09:23:46] 028: standard (sonnet, medium) attempt 1
+[10-23 09:26:51]   gate: python -m pytest -q -x
+[10-23 09:28:34] 028: done at fe68aaa
+[10-23 09:28:34] run finished: 1 task(s); project total 31.24 USD
+[10-23 09:28:44] dashboard: started run agentdesk 029 (pid 20020)
+[10-23 09:28:44] auto-runner: started 029
+[10-23 09:28:44] 029: routed to standard (set in the task file)
+[10-23 09:28:44] 029: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\029 on auto/029 from main
+[10-23 09:28:46] 029: standard (sonnet, medium) attempt 1
+[10-23 09:29:14] needs attention: 028 (unmerged): done, branch auto/028 is not merged and not reviewed
+[10-23 09:30:58]   gate: python -m pytest -q -x
+[10-23 09:32:48] 029: done at 9eaea41
+[10-23 09:32:48] run finished: 1 task(s); project total 31.40 USD
+[10-23 09:33:14] needs attention: 029 (unmerged): done, branch auto/029 is not merged and not reviewed
+[10-23 09:46:45] dashboard: started run agentdesk 030 (pid 27168)
+[10-23 09:46:45] auto-runner: started 030
+[10-23 09:46:45] 030: routed to hard (set in the task file)
+[10-23 09:46:45] 030: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\030 on auto/030 from main
+[10-23 09:46:46] 030: hard (opus, high) attempt 1
+[10-23 09:56:27]   gate: python -m pytest -q -x
+[10-23 09:58:50] 030: done at 3a83d6a
+[10-23 09:58:50] run finished: 1 task(s); project total 34.06 USD
+[10-23 09:59:15] needs attention: 030 (unmerged): done, branch auto/030 is not merged and not reviewed
+[10-23 10:35:16] dashboard: started run agentdesk 031 (pid 23708)
+[10-23 10:35:16] auto-runner: started 031
+[10-23 10:35:16] 031: routed to hard (set in the task file)
+[10-23 10:35:17] 031: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\031 on auto/031 from main
+[10-23 10:35:18] 031: hard (opus, high) attempt 1
+[10-23 10:44:43]   gate: python -m pytest -q -x
+[10-23 10:46:44] 031: checks failed
+[10-23 10:46:44] 031: hard (opus, high) attempt 2
+[10-23 10:49:26]   gate: python -m pytest -q -x
+[10-23 10:51:40] 031: done at 70f6343
+[10-23 10:51:40] run finished: 1 task(s); project total 39.42 USD
+[10-23 10:52:17] needs attention: 031 (unmerged): done, branch auto/031 is not merged and not reviewed
+[10-23 11:20:59] needs attention: 031 (unmerged): done, branch auto/031 is not merged and not reviewed
+[10-23 12:11:16] dashboard: started run agentdesk 032 (pid 21532)
+[10-23 12:11:17] 032: routed to standard (set in the task file)
+[10-23 12:11:17] 032: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\032 on auto/032 from main
+[10-23 12:11:18] 032: standard (sonnet, medium) attempt 1
+[10-23 12:14:47]   gate: python -m pytest -q -x
+[10-23 12:17:19] 032: done at 0e3d38d
+[10-23 12:17:19] run finished: 1 task(s); project total 39.77 USD
+[10-23 12:17:50] needs attention: 032 (unmerged): done, branch auto/032 is not merged and not reviewed
+[10-23 16:23:38] dashboard: started run agentdesk 033 (pid 5916)
+[10-23 16:23:38] auto-runner: started 033
+[10-23 16:23:39] 033: routed to standard (set in the task file)
+[10-23 16:23:40] 033: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\033 on auto/033 from main
+[10-23 16:23:42] 033: standard (sonnet, medium) attempt 1
+[10-23 16:28:44]   gate: python -m pytest -q -x
+[10-23 16:32:10] 033: done at bd94a0d
+[10-23 16:32:10] run finished: 1 task(s); project total 40.14 USD
+[10-23 16:32:41] dashboard: started run agentdesk 034 (pid 14824)
+[10-23 16:32:41] auto-runner: started 034
+[10-23 16:32:41] 034: routed to hard (set in the task file)
+[10-23 16:32:41] 034: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\034 on auto/034 from auto/033
+[10-23 16:32:45] 034: hard (opus, high) attempt 1
+[10-23 16:46:54]   gate: python -m pytest -q -x
+[10-23 16:49:17] 034: done at 08e8974
+[10-23 16:49:17] run finished: 1 task(s); project total 43.11 USD
+[10-23 16:49:45] needs attention: 034 (unmerged): done, branch auto/034 is not merged and not reviewed
+[10-23 16:49:45] dashboard: started run agentdesk 035 (pid 26548)
+[10-23 16:49:45] auto-runner: started 035
+[10-23 16:49:45] 035: routed to standard (set in the task file)
+[10-23 16:49:45] 035: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\035 on auto/035 from auto/034
+[10-23 16:49:47] 035: standard (sonnet, medium) attempt 1
+[10-23 17:00:13]   gate: python -m pytest -q -x
+[10-23 17:03:01] 035: done at 0c0cd08
+[10-23 17:03:01] run finished: 1 task(s); project total 44.32 USD
+[10-23 17:03:12] dashboard: started run agentdesk 036 (pid 6608)
+[10-23 17:03:12] 036: routed to standard (set in the task file)
+[10-23 17:03:13] 036: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\036 on auto/036 from auto/035
+[10-23 17:03:14] 036: standard (sonnet, medium) attempt 1
+[10-23 17:03:20] needs attention: 035 (unmerged): done, branch auto/035 is not merged and not reviewed
+[10-23 17:11:34]   gate: python -m pytest -q -x
+[10-23 17:14:42] 036: done at f034fc0
+[10-23 17:14:42] run finished: 1 task(s); project total 45.31 USD
+[10-23 17:14:53] needs attention: 036 (unmerged): done, branch auto/036 is not merged and not reviewed
+[10-23 17:14:54] dashboard: started run agentdesk 037 (pid 29600)
+[10-23 17:14:54] auto-runner: started 037
+[10-23 17:14:54] 037: routed to standard (set in the task file)
+[10-23 17:14:54] 037: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\037 on auto/037 from auto/036
+[10-23 17:14:55] 037: standard (sonnet, medium) attempt 1
+[10-23 17:20:57]   gate: python -m pytest -q -x
+[10-23 17:22:34] 037: checks failed
+[10-23 17:22:34] 037: standard (sonnet, medium) attempt 2
+[10-23 17:22:34]   gate: python -m pytest -q -x
+[10-23 17:24:17] 037: checks failed
+[10-23 17:24:22] 037: escalating to hard
+[10-23 17:24:23] 037: hard (opus, high) attempt 1
+[10-23 17:30:52]   gate: python -m pytest -q -x
+[10-23 17:33:54] 037: done at 57a8ac0
+[10-23 17:33:54] run finished: 1 task(s); project total 47.58 USD
+[10-23 17:33:54] needs attention: 037 (unmerged): done, branch auto/037 is not merged and not reviewed
+[10-23 17:33:54] dashboard: started run agentdesk 038 (pid 17516)
+[10-23 17:33:54] auto-runner: started 038
+[10-23 17:33:55] 038: routed to standard (set in the task file)
+[10-23 17:33:55] 038: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\038 on auto/038 from auto/037
+[10-23 17:33:56] 038: standard (sonnet, medium) attempt 1
+[10-23 17:57:04] auto-runner: 038 was working but its run is gone; set back to pending (worker exited unexpectedly)
+[10-23 17:57:04] needs attention: 035 (unmerged): done, branch auto/035 is not merged and not reviewed
+[10-23 17:57:04] needs attention: 036 (unmerged): done, branch auto/036 is not merged and not reviewed
+[10-23 17:57:04] needs attention: 037 (unmerged): done, branch auto/037 is not merged and not reviewed
+[10-23 17:57:04] dashboard: started run agentdesk 038 (pid 21208)
+[10-23 17:57:04] auto-runner: started 038 (retry after crash)
+[10-23 17:57:04] 038: routed to standard (set in the task file)
+[10-23 17:57:34] auto-runner: 038 was working but its run is gone; set back to pending (worker exited unexpectedly (code 1))
+[10-23 17:57:34] needs attention: 038 (repeated): crashed 2 times; auto-retry used up: worker exited unexpectedly (code 1)
+[10-23 18:02:14] needs attention: 035 (unmerged): done, branch auto/035 is not merged and not reviewed
+[10-23 18:02:14] needs attention: 036 (unmerged): done, branch auto/036 is not merged and not reviewed
+[10-23 18:02:14] needs attention: 037 (unmerged): done, branch auto/037 is not merged and not reviewed
+[10-23 18:02:14] needs attention: 038 (repeated): crashed 2 times; auto-retry used up: worker exited unexpectedly (code 1)
+[10-23 18:06:13] dashboard: started run agentdesk 038 (pid 13188)
+[10-23 18:06:14] 038: routed to standard (set in the task file)
+[10-23 18:06:19] 038: standard (sonnet, medium) attempt 1
+[10-23 18:10:42]   gate: python -m pytest -q -x
+[10-23 18:12:45] 038: checks failed
+[10-23 18:12:45] 038: standard (sonnet, medium) attempt 2
+[10-23 18:12:48] needs attention: 038 (repeated): crashed 2 times; auto-retry used up: = <ssl.SSLSocket [closed] fd=-1, family=2, type=1, proto=0>, len = 131072
+[10-23 18:22:59]   gate: python -m pytest -q -x
+[10-23 18:26:31] 038: done at b78bd47
+[10-23 18:26:31] run finished: 1 task(s); project total 47.80 USD
+[10-23 18:26:38] dashboard: started run agentdesk --max 1 (pid 12008)
+[10-23 18:26:38] 039: routed to hard (set in the task file)
+[10-23 18:26:39] 039: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\039 on auto/039 from auto/038
+[10-23 18:26:40] 039: hard (opus, high) attempt 1
+[10-23 18:26:49] needs attention: 038 (unmerged): done, branch auto/038 is not merged and not reviewed
+[10-23 18:50:33]   gate: python -m pytest -q -x
+[10-23 18:53:50] 039: done at 35e655f
+[10-23 18:53:50] run finished: 1 task(s); project total 56.33 USD
+[10-23 18:53:57] dashboard: started run agentdesk --max 1 (pid 15368)
+[10-23 18:53:58] 040: routed to standard (set in the task file)
+[10-23 18:53:58] 040: worktree C:\Users\kochurin.a\AgentDesk\data\projects\agentdesk\worktrees\040 on auto/040 from auto/039
+[10-23 18:54:00] 040: standard (sonnet, medium) attempt 1
+[10-23 18:54:19] needs attention: 039 (unmerged): done, branch auto/039 is not merged and not reviewed
+[10-23 19:00:14]   gate: python -m pytest -q -x
+[10-23 19:03:39] 040: done at 8ed96e6
+[10-23 19:03:39] run finished: 1 task(s); project total 56.98 USD
+[10-23 19:03:50] needs attention: 040 (unmerged): done, branch auto/040 is not merged and not reviewed

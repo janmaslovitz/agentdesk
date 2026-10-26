@@ -1,0 +1,20 @@
+chat_mode = "coworker"
+name = "AgentDesk"
+
+[repo]
+base = "main"
+copy_into_worktree = []
+co_author = "Co-Authored-By: Claude <noreply@anthropic.com>"
+
+[gates]
+quick = ["python -m pytest -q -x"]
+final = ["python -m pytest -q"]
+max_feedback_chars = 6000
+timeout_s = 3600
+
+[gates.env]
+
+[chat]
+allowed_commands = ["git"]
+
+[git]
