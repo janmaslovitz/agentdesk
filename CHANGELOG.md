@@ -5,6 +5,14 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- `install-server.sh`: one-command Server install on Debian / Ubuntu (apt packages, latest `.deb` from GitHub or `--deb FILE`,
+  Python packages with index fallback and retries, service start, optional first admin). README: restricted-network and API-key sections.
+
+### Fixed
+- `agentdesk-server doctor` no longer warns "claude CLI not found" when the CLI bundled in claude-agent-sdk is there.
+- `.deb` postinst: tries every pip index several times (a loaded mirror can answer with nothing and pip reports a bogus conflict).
+
 
 ## 1.5.3 - 2026-10-26
 

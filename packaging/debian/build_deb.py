@@ -187,15 +187,26 @@ case "$1" in
     echo "$OPT/app" > "$SITE/agentdesk-app.pth"
     [ -r /etc/default/agentdesk-server ] && . /etc/default/agentdesk-server && export PIP_INDEX_URL PIP_PROXY
     ok=0
-    if [ -d "$OPT/wheels" ] && "$OPT/venv/bin/python" -m pip install --quiet --no-index --find-links "$OPT/wheels" \\
-         -r "$OPT/requirements-server.txt"; then
+    PIPI="$OPT/venv/bin/python -m pip install --quiet --no-cache-dir --disable-pip-version-check"
+    REQ="$OPT/requirements-server.txt"
+    if [ -d "$OPT/wheels" ] && $PIPI --no-index --find-links "$OPT/wheels" -r "$REQ"; then
       ok=1
-    elif "$OPT/venv/bin/python" -m pip install --quiet --disable-pip-version-check --timeout 60 --retries 5 -r "$OPT/requirements-server.txt"; then
-      ok=1
-    elif "$OPT/venv/bin/python" -m pip install --quiet --disable-pip-version-check --timeout 60 --retries 5 \
-           --index-url https://mirror.yandex.ru/pypi/web/simple/ -r "$OPT/requirements-server.txt"; then
-      ok=1  # pypi.org unreachable (hosts that only see the Yandex mirrors): the Yandex PyPI mirror
     fi
+    # Indexes in order: PIP_INDEX_URL from /etc/default (if set), pypi.org (fails fast when blocked), then the Yandex
+    # mirror (hosts that only see the Yandex mirrors). A mirror under load sometimes answers a package with nothing
+    # and pip reports a bogus 'conflicting dependencies': every index is tried several times, each try keeps what
+    # was installed before, so the next one goes on from there.
+    for idx in "${PIP_INDEX_URL:-}" "https://pypi.org/simple/" "https://mirror.yandex.ru/pypi/web/simple/"; do
+      [ "$ok" = 1 ] && break
+      n=4; [ "$idx" = "https://pypi.org/simple/" ] && n=1
+      i=0
+      while [ "$i" -lt "$n" ] && [ "$ok" != 1 ]; do
+        i=$((i+1))
+        if [ -n "$idx" ]; then t="--index-url $idx"; else t=""; fi
+        if [ -z "$idx" ] && [ -z "${PIP_INDEX_URL:-}" ]; then continue 2; fi
+        if $PIPI --timeout 20 --retries 2 $t -r "$REQ"; then ok=1; fi
+      done
+    done
     if [ "$ok" != 1 ]; then
       echo "agentdesk-server: could not install the Python packages (no network?)." >&2
       echo "  Retry later with: sudo apt install --reinstall ./agentdesk-server_*.deb" >&2

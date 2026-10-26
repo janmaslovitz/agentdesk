@@ -436,7 +436,32 @@ user could read another user's files on disk; the gateway itself never lets one 
 For a Debian / Ubuntu machine without a desktop (needs Python 3.11+, systemd). The `.deb` from the GitHub Release
 installs the gateway of the previous section as a service, with the console tool `agentdesk-server`.
 
-**Install.**
+**One command** (as root, internet access to GitHub; installs apt packages, the `.deb`, the Python packages, starts the service):
+
+```
+curl -fsSL https://raw.githubusercontent.com/janmaslovitz/agentdesk/main/install-server.sh | sudo sh -s -- --admin alice
+```
+
+No GitHub from the server? Download `agentdesk-server_X.Y.Z_all.deb` from the Release on another machine, `scp` it over and run
+`sudo sh install-server.sh --deb ./agentdesk-server_X.Y.Z_all.deb` (the script is in the repository; `scp` it too).
+
+**Restricted network.** The Python packages come from pypi.org, and if it is blocked from the Yandex mirror
+(`mirror.yandex.ru/pypi/web/simple/`), with retries (a mirror under load can answer a package with nothing, and pip then
+prints a bogus "conflicting dependencies"; the installer simply tries again). Your own index or proxy: set `PIP_INDEX_URL` /
+`PIP_PROXY` in `/etc/default/agentdesk-server` and run `sudo apt install --reinstall ./agentdesk-server_*.deb`. apt itself
+needs one reachable Debian mirror (`/etc/apt/sources.list`); `https://mirror.yandex.ru/debian/` and `.../debian-security/`
+work from Russian networks. The `claude` CLI is bundled in `claude-agent-sdk`: no Node.js needed. The agents need outbound
+HTTPS to `api.anthropic.com`.
+
+**Claude access: API-key account.** Keys are never stored in the cabinet, only the *name of an environment variable*:
+1. Put the key in the service environment: `echo 'ANTHROPIC_API_KEY_TEAM=sk-ant-...' | sudo tee -a /etc/default/agentdesk-server`
+   (the file is root-only: `sudo chmod 600 /etc/default/agentdesk-server`), then `sudo systemctl restart agentdesk-server`.
+2. In `/admin` > *Claude accounts*: kind *API key*, a name (e.g. `team`), variable name `ANTHROPIC_API_KEY_TEAM`.
+3. Assign the account to the users who may use it (the user's card in `/admin`, or `agentdesk-server`/gateway `gateway user assign NAME --account team`).
+Only the key of an account assigned to a user reaches that user's instance. Or a subscription login instead:
+`sudo -u agentdesk -H /opt/agentdesk-server/venv/lib/python3*/site-packages/claude_agent_sdk/_bundled/claude auth login`.
+
+**Install (step by step).**
 
 ```
 sudo apt install ./agentdesk-server_X.Y.Z_all.deb      # pulls python3, python3-venv, git; postinst builds /opt/agentdesk-server/venv

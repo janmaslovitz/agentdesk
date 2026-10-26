@@ -422,6 +422,19 @@ def cmd_clean(home: Path, args) -> None:
         sm.scan()
 
 
+def bundled_claude() -> str | None:
+    """The claude CLI that ships inside claude-agent-sdk (AgentDesk uses it; no npm needed), or None."""
+    try:
+        import importlib.util
+        spec = importlib.util.find_spec("claude_agent_sdk")
+    except (ImportError, ValueError):
+        return None
+    if not spec or not spec.origin:
+        return None
+    p = Path(spec.origin).parent / "_bundled" / ("claude.exe" if os.name == "nt" else "claude")
+    return str(p) if p.is_file() else None
+
+
 def cmd_doctor(home: Path, _args) -> int:
     bad = 0
 
@@ -434,13 +447,13 @@ def cmd_doctor(home: Path, _args) -> int:
     line("ok" if v >= (3, 11) else "FAIL", f"python {v.major}.{v.minor}.{v.micro}" + ("" if v >= (3, 11) else " (3.11 or newer needed)"))
     git = shutil.which("git")
     line("ok" if git else "FAIL", f"git: {git or 'not found (apt install git)'}")
-    claude = shutil.which("claude")
+    claude = shutil.which("claude") or bundled_claude()
     if claude:
         line("ok", f"claude CLI: {claude}")
         ok, why = claude_login_hint()
         line("ok" if ok else "WARN", f"claude login: {why}" + ("" if ok else " (run `claude` once as this user and sign in, or use an API-key account)"))
     else:
-        line("WARN", "claude CLI not found (npm install -g @anthropic-ai/claude-code; needs nodejs/npm)")
+        line("WARN", "claude CLI not found (pip install claude-agent-sdk in the server venv, or npm install -g @anthropic-ai/claude-code)")
     try:
         cfg = config.load(home)
     except SystemExit as e:
