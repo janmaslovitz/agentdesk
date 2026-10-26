@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.5.5 - 2026-10-26
+
 ### Changed
 - Import is a short wizard (.zip / git URL / folder in the desktop window) with required fields marked, progress, cancel and an
   inline name-clash field; folder paths and Browse are hidden in a browser. The project folder is derived from the repo or
