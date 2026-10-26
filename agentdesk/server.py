@@ -2262,6 +2262,19 @@ def is_loopback(host: str) -> bool:
 
 # ----------------------------------------------------------------------------- http
 
+def repo_dir_for_import(d: dict, upload: Path | None) -> Path:
+    """A fresh, empty code folder under <data>/repos for an import that named none, derived from the source."""
+    export_name = ""
+    if upload and not str(d.get("new_name") or "").strip():
+        try:
+            export_name = str(core._read_zip(upload)[0].get("project") or "")
+        except Exception:
+            pass
+    return core.make_import_dir(core.import_folder_name(
+        str(d.get("new_name") or ""), str(d.get("repo_url") or d.get("source_url") or ""),
+        str(d.get("filename") or ""), export_name))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -2300,6 +2313,7 @@ class Handler(BaseHTTPRequestHandler):
         (`source`) or a git URL to clone (`source_url`). Never overwrites: a taken name asks for a new one."""
         upload = None
         cloned = None
+        auto_repo = None
         gate = core.disk_gate()
         if gate:  # the server's disk budget / this user's quota: no new clones, imports or uploads
             if "zip" in (self.headers.get("Content-Type") or ""):
@@ -2327,8 +2341,9 @@ class Handler(BaseHTTPRequestHandler):
                 upload = Path(tmp)
                 d = query
             repo = str(d.get("repo") or "").strip()
-            if not repo:
-                return {"ok": False, "message": "choose the repository folder on this computer"}
+            if not repo:  # AgentDesk picks the code folder: <data>/repos/<project name>
+                auto_repo = repo_dir_for_import(d, upload)
+                repo = str(auto_repo)
             if d.get("repo_url"):  # clone the code repo into `repo` first (must be a new/empty folder)
                 if core.repo_state(repo) != "plain" or (Path(repo).exists() and any(Path(repo).iterdir())):
                     return {"ok": False, "message": f"{repo} already exists and is not empty; choose a new folder to clone into"}
@@ -2340,12 +2355,16 @@ class Handler(BaseHTTPRequestHandler):
                 return {"ok": False, "message": "choose an export file, folder or repository"}
             p = core.import_project(src, repo, str(d.get("new_name") or ""), str(d.get("account") or "") or None,
                                     str(d.get("project") or "") or None, d.get("pull") in (True, "true", "1"))
-            return {"ok": True, "slug": p.slug}
+            auto_repo = None  # kept now
+            return {"ok": True, "slug": p.slug, "name": p.name, "repo": str(p.repo), "tasks": len(core.load_tasks(p)),
+                    "account": p.account.get("name")}
         except core.NameClash as e:
             return {"ok": False, "name_clash": True, "suggested": e.suggested, "message": str(e)}
         except ValueError as e:  # BadExport is a ValueError
             return {"ok": False, "message": str(e)}
         finally:
+            if auto_repo is not None:  # the import failed: remove the folder we created
+                shutil.rmtree(auto_repo, ignore_errors=True)
             if upload:
                 upload.unlink(missing_ok=True)
             if cloned is not None and hygiene.inside(cloned, core.DATA / "imports"):  # the temporary config-repo clone
@@ -2369,8 +2388,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(core.version_info())
         if parts == ["api", "update"]:
             return self.json(update_status())
+        if parts == ["api", "import-folder"]:  # where an import would be created (read-only preview for the wizard)
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+            name = core.import_folder_name(q.get("name", ""), q.get("url", ""), q.get("filename", ""))
+            return self.json({"folder": name, "path": str(core.preview_import_dir(name))})
         if parts == ["api", "overview"]:
-            return self.json(overview())
+            return self.json({**overview(), "desktop": _WINDOW is not None})  # desktop: folder pickers work
         if parts == ["api", "busy"]:  # the gateway keeps an instance alive while this says busy
             return self.json(busy_info())
         if len(parts) >= 3 and parts[:2] == ["api", "p"]:

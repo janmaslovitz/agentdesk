@@ -119,6 +119,9 @@ dialog .pick { display: flex; gap: 8px; } dialog .pick input { flex: 1; width: a
 dialog .seg { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; } dialog .seg label, dialog label.chk { display: flex; gap: 6px; align-items: center; color: var(--text); font-size: 13px; margin: 6px 0 0; }
 dialog .hint { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
 dialog .msgbox { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; min-height: 2.8em; max-height: 8em; overflow: auto; padding: 6px 8px; font: 12px/1.4 ui-monospace, Consolas, monospace; background: var(--bg); border-radius: 8px; }
+dialog .tabs { display: flex; gap: 6px; margin: 0 0 12px; } dialog .tabs button { flex: 1; } dialog .tabs button.on { border-color: var(--accent, #4f8cff); font-weight: 600; }
+dialog .req::after { content: " *"; color: #d33; } dialog .err { color: #d33; font-size: 12px; min-height: 1em; margin: 2px 0 0; } dialog .hint { color: var(--muted); font-size: 12px; margin: 2px 0 0; }
+dialog progress { width: 100%; height: 10px; } dialog details { margin: 4px 0 12px; } dialog details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 .attn { padding: 8px 14px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: center; }
 .attn .k { font-size: 11px; font-weight: 600; color: var(--warn); text-transform: uppercase; min-width: 70px; }
@@ -205,24 +208,40 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
 </dialog>
 
 <dialog id="dImport" class="wide"><h3>Import project</h3>
-  <div class="grp"><h4>Export to import (use one)</h4>
-    <label for="iFile">A .zip file</label><input type="file" id="iFile" accept=".zip">
-    <label for="iSource">A repo / folder on this computer (<code>.agentdesk/</code> or a config repo)</label>
-    <div class="pick"><input id="iSource" placeholder="D:/work/config-repo"><button type="button" onclick="browse('iSource')">Browse…</button></div>
-    <label for="iUrl">Or clone a repo from a URL</label><input id="iUrl" placeholder="https://github.com/you/repo.git">
-    <label for="iBranch">Branch to clone (optional, e.g. <code>agentdesk-export/my-project</code>)</label><input id="iBranch" placeholder="agentdesk-export/my-project">
+  <div id="iForm">
+  <div class="hint">1. Where is the export?</div>
+  <div class="tabs"><button type="button" id="iTab_zip" onclick="iTab('zip')">From a .zip file</button><button type="button" id="iTab_git" onclick="iTab('git')">From a git URL</button><button type="button" id="iTab_dir" onclick="iTab('dir')" style="display:none">From a folder on this computer</button></div>
+  <div id="iPane_zip" class="grp">
+    <label for="iFile" class="req">Export file (.zip)</label><input type="file" id="iFile" accept=".zip" oninput="iCheck()" onchange="iCheck()">
+    <div class="err" id="iErr_file"></div>
   </div>
-  <div class="grp"><h4>This computer</h4>
-    <label for="iRepo">Project's repository folder</label>
-    <div class="pick"><input id="iRepo" placeholder="D:/work/my-repo"><button type="button" onclick="browse('iRepo')">Browse…</button></div>
-    <label for="iRepoUrl">…or clone the code from a URL into that folder (new or empty)</label><input id="iRepoUrl" placeholder="https://github.com/you/code.git">
+  <div id="iPane_git" class="grp" style="display:none">
+    <label for="iUrl" class="req">Repository URL</label><input id="iUrl" placeholder="https://github.com/you/repo.git" oninput="iCheck()">
+    <div class="err" id="iErr_url"></div>
+    <label for="iBranch">Branch (optional, e.g. <code>agentdesk-export/my-project</code>)</label><input id="iBranch" placeholder="default branch">
+    <label class="chk"><input type="checkbox" id="iAlsoCode" checked onchange="iCheck()"> The code is in this repository too: clone it as the project's code</label>
   </div>
-  <div class="grp"><h4>Project</h4>
+  <div id="iPane_dir" class="grp" style="display:none">
+    <label for="iSource" class="req">Folder with the export (<code>.agentdesk/</code> or a config repo)</label>
+    <div class="pick"><input id="iSource" placeholder="D:/work/config-repo" oninput="iCheck()"><button type="button" onclick="browse('iSource')">Browse…</button></div>
+    <div class="err" id="iErr_source"></div>
+  </div>
+  <div class="hint">2. Project</div>
+  <div class="grp">
     <label for="iAccount">Account</label><select id="iAccount"></select>
-    <label for="iName">Project name (empty: the exported name)</label><input id="iName">
+    <label for="iName">Project name (empty: the exported name)</label><input id="iName" oninput="iCheck()">
+    <div class="err" id="iErr_name"></div>
   </div>
-  <pre id="iMsg" class="msgbox"></pre>
-  <div class="row"><button onclick="closeDlg('dImport')">Cancel</button><button class="primary" onclick="importProject()">Import</button></div>
+  <div class="hint" id="iWhere"></div>
+  <details id="iAdv"><summary>Advanced: choose the code folder</summary>
+    <div>AgentDesk puts the code in its own data folder unless you choose one. Leave empty for the default.
+    <div class="pick"><input id="iRepo" placeholder="D:/work/my-repo" oninput="iCheck()"><button type="button" onclick="browse('iRepo')">Browse…</button></div></div>
+  </details>
+  </div>
+  <div id="iRun" style="display:none"><div id="iStatus" class="hint"></div><progress id="iProg"></progress></div>
+  <div id="iDone" style="display:none"></div>
+  <pre id="iMsg" class="msgbox" style="display:none"></pre>
+  <div class="row"><button id="iCancel" onclick="iCancel()">Cancel</button><button class="primary" id="iGo" onclick="importProject()" disabled>Import</button></div>
 </dialog>
 
 <dialog id="dAccount"><h3>Add account</h3>
@@ -256,7 +275,7 @@ async function api(path, body) {
 }
 function openDlg(id) {
   if (id === "dExport") xModeSet();
-  if (id === "dImport") $("iAccount").innerHTML = `<option value="">(none: pick later)</option>` + (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
+  if (id === "dImport") iOpen();
   if (id === "dProject") {
     $("pPreset").innerHTML = (ov?.presets||[]).map(p => `<option>${esc(p)}</option>`).join("");
     $("pAccount").innerHTML = (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
@@ -312,25 +331,110 @@ branch: ${r.branch}
 commit: ${r.commit || "-"}
 pushed: ${r.pushed ? "yes" : "no"}` : "");
 }
-async function importProject() {
-  const opts = {repo: $("iRepo").value.trim(), repo_url: $("iRepoUrl").value.trim(), account: $("iAccount").value, new_name: $("iName").value.trim()};
-  const f = $("iFile").files[0];
-  let r;
-  for (;;) {
-    if (f) {
-      const q = new URLSearchParams(Object.entries(opts).filter(([, v]) => v));
-      r = await (await fetch("/api/projects/import?" + q, {method: "POST", headers: {"Content-Type": "application/zip"}, body: f})).json();
-    } else r = await api("/api/projects/import", {...opts, source: $("iSource").value.trim(), source_url: $("iUrl").value.trim(), source_branch: $("iBranch").value.trim()});
-    if (r.name_clash) {  // never overwrites: ask for another name
-      const n = prompt(`${r.message}
-
-New project name:`, r.suggested);
-      if (!n) return; opts.new_name = n; opts.repo_url = ""; continue;
-    }
-    break;
+let iMode = "zip", iXhr = null;
+function iOpen() {
+  const desk = !!ov?.desktop;  // folder paths only make sense in the desktop window; in a browser they would be paths on the server
+  $("iAccount").innerHTML = `<option value="">(none: pick later)</option>` + (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
+  $("iTab_dir").style.display = desk ? "" : "none";
+  $("iAdv").style.display = desk ? "" : "none";
+  for (const id of ["iFile", "iUrl", "iBranch", "iSource", "iRepo", "iName"]) $(id).value = "";
+  $("iAlsoCode").checked = true; $("iAdv").open = false;
+  $("iForm").style.display = ""; $("iRun").style.display = "none"; $("iDone").style.display = "none"; iMsg("");
+  $("iGo").textContent = "Import"; $("iGo").onclick = importProject; $("iCancel").textContent = "Cancel";
+  iTab("zip");
+}
+function iTab(m) {
+  iMode = m;
+  for (const k of ["zip", "git", "dir"]) { $("iPane_" + k).style.display = k === m ? "" : "none"; $("iTab_" + k).classList.toggle("on", k === m); }
+  iCheck();
+}
+function iMsg(t) { $("iMsg").textContent = t; $("iMsg").style.display = t ? "" : "none"; }
+function iErr(k, t) { $("iErr_" + k).textContent = t || ""; }
+function iValid() {  // marks the field that is wrong; true when Import may be pressed
+  for (const k of ["file", "url", "source"]) iErr(k, "");
+  if (iMode === "zip") {
+    const f = $("iFile").files[0];
+    if (!f) return false;
+    if (!/\.zip$/i.test(f.name)) return iErr("file", "Choose a .zip file made by Export."), false;
+    if (!f.size) return iErr("file", "This file is empty."), false;
+    return true;
   }
-  if (!r.ok) return ($("iMsg").textContent = r.message || r.error || "import failed");
-  closeDlg("dImport"); cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
+  if (iMode === "git") {
+    const u = $("iUrl").value.trim();
+    if (!u) return false;
+    if (/\s/.test(u) || !/^(https?:\/\/|ssh:\/\/|git@|git:\/\/|file:\/\/|\/|[A-Za-z]:[\\\/])/.test(u)) return iErr("url", "Enter a git URL such as https://github.com/you/repo.git"), false;
+    return true;
+  }
+  return !!$("iSource").value.trim();
+}
+let iWhereT = null;
+function iWhere() {  // read-only "Will be created at ..." line; the server derives the folder from name / URL / file name
+  clearTimeout(iWhereT);
+  iWhereT = setTimeout(async () => {
+    const el = $("iWhere"), f = iMode === "zip" ? $("iFile").files[0] : null;
+    if ($("iRepo").value.trim()) { el.textContent = "Will use the folder you chose: " + $("iRepo").value.trim(); return; }
+    const q = new URLSearchParams({name: $("iName").value.trim(), url: iMode === "git" && $("iAlsoCode").checked ? $("iUrl").value.trim() : "", filename: f ? f.name : ""});
+    if (!q.get("name") && !q.get("url") && !q.get("filename")) { el.textContent = "The code folder is named after the project and created automatically."; return; }
+    try { const r = await (await fetch("/api/import-folder?" + q)).json(); el.textContent = r.path ? "Will be created at " + r.path : ""; } catch { el.textContent = ""; }
+  }, 250);
+}
+function iCheck() { iErr("name", ""); iWhere(); if (!iXhr) $("iGo").disabled = !iValid(); }
+function iBusy(on, text, pct) {
+  $("iRun").style.display = on ? "" : "none"; $("iStatus").textContent = text || "";
+  if (pct == null) $("iProg").removeAttribute("value"); else $("iProg").value = pct;
+  $("iProg").max = 100; $("iGo").disabled = on; $("iCancel").textContent = on ? "Cancel import" : "Cancel";
+  for (const el of $("iForm").querySelectorAll("input,select,button")) el.disabled = on;
+}
+function iCancel() {
+  if (iXhr) { const x = iXhr; iXhr = null; x.abort(); iBusy(false); iMsg("Import cancelled."); iCheck(); return; }
+  closeDlg("dImport");
+}
+function iSend(url, body, type, text) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest(); iXhr = x;
+    x.open("POST", url); x.setRequestHeader("Content-Type", type);
+    const t0 = Date.now();
+    let uploading = false;
+    const tick = setInterval(() => { if (!uploading) iBusy(true, `${text} (${Math.round((Date.now() - t0) / 1000)} s)`); }, 1000);
+    if (x.upload) x.upload.onprogress = e => {
+      if (!e.lengthComputable) return;
+      uploading = e.loaded < e.total;
+      iBusy(true, uploading ? `Uploading ${(e.loaded / 1048576).toFixed(1)} of ${(e.total / 1048576).toFixed(1)} MB…` : "Reading the export…", uploading ? e.loaded * 100 / e.total : null);
+    };
+    x.onload = () => { clearInterval(tick); try { resolve(JSON.parse(x.responseText)); } catch { resolve({ok: false, message: `The server answered ${x.status} ${x.statusText}`}); } };
+    x.onerror = () => { clearInterval(tick); reject(new Error("Could not reach the server.")); };
+    x.onabort = () => { clearInterval(tick); reject(new Error("cancelled")); };
+    x.send(body);
+  });
+}
+async function importProject() {
+  if (!iValid()) return;
+  const opts = {repo: $("iRepo").value.trim(), account: $("iAccount").value, new_name: $("iName").value.trim()};
+  const f = iMode === "zip" ? $("iFile").files[0] : null;
+  if (f) opts.filename = f.name;
+  if (iMode === "git" && $("iAlsoCode").checked) opts.repo_url = $("iUrl").value.trim();
+  iMsg(""); iErr("name", "");
+  const text = iMode === "git" ? "Cloning the repository…" : iMode === "zip" ? "Uploading…" : "Importing…";
+  iBusy(true, text, f ? 0 : null);
+  let r;
+  try {
+    if (f) r = await iSend("/api/projects/import?" + new URLSearchParams(Object.entries(opts).filter(([, v]) => v)), f, "application/zip", text);
+    else r = await iSend("/api/projects/import", JSON.stringify(iMode === "git" ? {...opts, source_url: $("iUrl").value.trim(), source_branch: $("iBranch").value.trim()} : {...opts, source: $("iSource").value.trim()}), "application/json", text);
+  } catch (e) { if (iXhr === null) return; iXhr = null; iBusy(false); iMsg(e.message); iCheck(); return; }
+  iXhr = null; iBusy(false);
+  if (r.name_clash) {  // never overwrites: suggest another name next to the name field
+    $("iName").value = r.suggested;
+    iErr("name", `The name is already used. Suggested: ${r.suggested}. Change it if you like and press Import again.`);
+    $("iName").focus(); $("iGo").disabled = !iValid(); return;
+  }
+  if (!r.ok) { iMsg(r.message || r.error || "import failed"); iCheck(); return; }
+  iShowDone(r);
+}
+function iShowDone(r) {
+  $("iForm").style.display = "none"; $("iRun").style.display = "none";
+  $("iDone").innerHTML = `<b>Imported “${esc(r.name || r.slug)}”</b><br>Code folder: <code>${esc(r.repo || "")}</code><br>Tasks: ${r.tasks ?? "?"}<br>Account: ${esc(r.account || "none yet: pick one in the project settings")}`;
+  $("iDone").style.display = ""; $("iGo").disabled = false; $("iGo").textContent = "Open project"; $("iGo").onclick = () => closeDlg("dImport"); $("iCancel").textContent = "Close";
+  cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
 }
 async function addAccount() {
   const r = await api("/api/accounts", {name: $("aName").value, kind: $("aKind").value, value: $("aValue").value});

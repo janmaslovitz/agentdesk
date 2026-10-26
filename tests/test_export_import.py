@@ -5,6 +5,7 @@ import threading
 import urllib.error
 import urllib.request
 import zipfile
+from pathlib import Path
 from http.server import ThreadingHTTPServer
 
 import pytest
@@ -203,7 +204,19 @@ def test_http_routes(full, tmp_path, monkeypatch):
             assert json.loads(post(f"/{full.slug}/export", {"mode": "git", "confirm": True})[1])["ok"] is False
         q = f"?repo={tmp_path}&new_name=Via+Http"
         st, body, _ = post("/import" + q, raw=data, ctype="application/zip")
-        assert json.loads(body) == {"ok": True, "slug": "via-http"}
+        res = json.loads(body)
+        assert res["ok"] and res["slug"] == "via-http" and res["repo"] == str(tmp_path) and res["tasks"] >= 0 and "account" in res
+        # no repo given: AgentDesk picks a fresh folder under its data folder
+        st, body, _ = post("/import?new_name=Auto+Home", raw=data, ctype="application/zip")
+        res = json.loads(body)
+        assert res["ok"] and Path(res["repo"]) == core.DATA / "repos" / "Auto-Home" and Path(res["repo"]).is_dir()
+        st, body, _ = post("/import?new_name=Auto+Home", raw=data, ctype="application/zip")  # clash: the folder made for it is removed
+        assert json.loads(body)["name_clash"] and sorted(p.name for p in (core.DATA / "repos").iterdir()) == ["Auto-Home"]
+        monkeypatch.setattr(server, "overview", lambda: {})
+        for window, want in ((None, False), (object(), True)):  # a browser / headless server has no native window
+            monkeypatch.setattr(server, "_WINDOW", window)
+            with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_port}/api/overview") as o:
+                assert json.loads(o.read())["desktop"] is want
         r = json.loads(post("/import" + q, raw=data, ctype="application/zip")[1])
         assert r["name_clash"] and r["suggested"]
     finally:
