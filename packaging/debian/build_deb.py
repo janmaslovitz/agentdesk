@@ -187,12 +187,13 @@ case "$1" in
     if [ -d "$OPT/wheels" ] && "$OPT/venv/bin/python" -m pip install --quiet --no-index --find-links "$OPT/wheels" \\
          -r "$OPT/requirements-server.txt"; then
       ok=1
-    elif "$OPT/venv/bin/python" -m pip install --quiet --disable-pip-version-check -r "$OPT/requirements-server.txt"; then
+    elif "$OPT/venv/bin/python" -m pip install --quiet --disable-pip-version-check --timeout 60 --retries 5 -r "$OPT/requirements-server.txt"; then
       ok=1
     fi
     if [ "$ok" != 1 ]; then
       echo "agentdesk-server: could not install the Python packages (no network?)." >&2
       echo "  Retry later with: sudo apt install --reinstall ./agentdesk-server_*.deb" >&2
+      echo "  or by hand: sudo $OPT/venv/bin/pip install --timeout 120 --retries 10 -r $OPT/requirements-server.txt   (a mirror: add --index-url URL; a proxy: --proxy URL)" >&2
     fi
     "$OPT/venv/bin/python" -m compileall -q "$OPT/app" >/dev/null 2>&1 || true
 
