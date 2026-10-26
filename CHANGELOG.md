@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.5.4 - 2026-10-26
+
 ### Added
 - `install-server.sh`: one-command Server install on Debian / Ubuntu (apt packages, latest `.deb` from GitHub or `--deb FILE`,
   Python packages with index fallback and retries, service start, optional first admin). README: restricted-network and API-key sections.
