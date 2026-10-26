@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.5.6 - 2026-10-26
+
 ### Changed
 - The chat opens fast however long it is: the page loads the last 30 entries behind a loading skeleton and fetches older ones
   when you scroll up (`GET /chat?limit=&before=`); long tool output is cut in pages. JSON answers are gzipped.
