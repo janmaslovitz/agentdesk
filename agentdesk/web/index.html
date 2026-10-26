@@ -80,6 +80,11 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .msg:hover > button.copy, .msg .call[open]:hover > button.copy, button.copy:focus { opacity: 1; }
 .msg .call button.copy { position: static; display: block; margin: 3px 0 2px auto; opacity: 1; }
 .msg .cost { font-size: 11px; color: var(--muted); margin-top: 6px; white-space: normal; }
+.skel { display: flex; flex-direction: column; gap: 10px; padding: 8px; }
+.skel .bar { height: 34px; border-radius: 10px; background: linear-gradient(90deg, var(--chip) 25%, var(--line) 50%, var(--chip) 75%); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; }
+.skel .w70 { width: 70%; } .skel .w50 { width: 50%; } .skel .w85 { width: 85%; } .skel .r { align-self: flex-end; }
+@keyframes shimmer { to { background-position: -200% 0; } }
+button.older { align-self: center; font-size: 12px; padding: 3px 12px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); cursor: pointer; }
 .working { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .working i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; animation: working 1.2s ease-in-out infinite; }
 .working i:nth-child(2) { animation-delay: .2s; } .working i:nth-child(3) { animation-delay: .4s; }
@@ -883,9 +888,11 @@ async function refreshOnce() {
   st = s0;
   if (chatFor !== cur) {
     chatFor = cur; pendingKey = null; planKey = ""; $("msgs").innerHTML = ""; $("pending").innerHTML = "";
-    const h = await api(`/api/p/${want}/chat`);
+    chatSkeleton(true);
+    let h; try { h = await api(`/api/p/${want}/chat?limit=${CHAT_PAGE}`); } finally { if (want === cur) chatSkeleton(false); }
     if (want !== cur) { chatFor = null; refreshAgain = true; return; }  // switched while loading: don't mix projects
     for (const m of h.history) addMsg(m.role, m.text, m);
+    firstSeq = h.history.length ? h.history[0].seq || 0 : 0; showMore(h.more);
     lastSeq = h.seq || 0; $("msgs").scrollTop = $("msgs").scrollHeight;
   } else if ((st.chat_seq || 0) > lastSeq) await fetchNotes();
   showMode(st.project);
@@ -1050,8 +1057,42 @@ function copyButton(getText) {
   return b;
 }
 
+// Lazy chat: the last CHAT_PAGE entries load first; older ones come in pages when you scroll to the top.
+const CHAT_PAGE = 30; let firstSeq = 0, loadingOlder = false;
+function chatSkeleton(on) {
+  const box = $("msgs"); box.querySelector(".skel")?.remove();
+  if (!on) return;
+  const d = document.createElement("div"); d.className = "skel";
+  d.innerHTML = `<div class="working"><i></i><i></i><i></i><span>Loading chat…</span></div><div class="bar w70"></div><div class="bar w50 r"></div><div class="bar w85"></div>`;
+  box.appendChild(d);
+}
+document.addEventListener("scroll", e => { if (e.target.id === "msgs" && e.target.scrollTop < 40 && e.target.querySelector(".older")) loadOlder(); }, true);
+function showMore(more) {
+  const box = $("msgs"); box.querySelector(".older")?.remove();
+  if (!more) return;
+  const b = document.createElement("button"); b.className = "older"; b.textContent = "Load earlier messages"; b.onclick = loadOlder;
+  box.prepend(b);
+}
+async function loadOlder() {
+  if (loadingOlder || !firstSeq) return;
+  loadingOlder = true; const proj = cur, box = $("msgs"), btn = box.querySelector(".older");
+  if (btn) btn.innerHTML = `<span class="working"><i></i><i></i><i></i></span> Loading…`;
+  try {
+    const h = await api(`/api/p/${proj}/chat?limit=${CHAT_PAGE}&before=${firstSeq}`);
+    if (proj !== cur) return;
+    const prevH = box.scrollHeight, prevT = box.scrollTop;
+    const keep = [...box.children].filter(e => !e.classList.contains("older"));
+    box.querySelector(".older")?.remove();
+    const added = [];
+    for (const m of h.history) added.push(addMsg(m.role, m.text, m, true));
+    for (const el of added) box.insertBefore(el, keep[0] || null);
+    if (h.history.length) firstSeq = h.history[0].seq || firstSeq;
+    showMore(h.more); box.scrollTop = prevT + (box.scrollHeight - prevH);
+  } catch { if (btn) btn.textContent = "Load earlier messages (retry)"; }
+  finally { loadingOlder = false; }
+}
 // A chat message; `meta` (assistant replies) has the tool calls, cost and tokens of that answer.
-function addMsg(role, text, meta) {
+function addMsg(role, text, meta, detached) {
   const div = document.createElement("div"); div.className = "msg " + role + (meta?.kind === "progress" ? " progress" : ""); div.innerHTML = md(text);
   for (const c of meta?.tools || []) {
     const d = document.createElement("details");
@@ -1069,6 +1110,7 @@ function addMsg(role, text, meta) {
     div.appendChild(c);
   }
   // Follow the chat only if you are at the bottom (or just sent something); never yank away from what you're reading.
+  if (detached) return div;  // older page: the caller inserts it above
   const box = $("msgs"), atEnd = role === "user" || box.scrollTop + box.clientHeight >= box.scrollHeight - 60;
   box.appendChild(div); if (atEnd) box.scrollTop = box.scrollHeight; return div;
 }
@@ -1085,7 +1127,7 @@ async function send(preset) {
     label.textContent = `request accepted, working… ${Math.floor((Date.now() - t0) / 1000)}s`;
   }, 1000);
   try {
-    const base = (await api(`/api/p/${cur}/chat`)).history.length;
+    const base = (await api(`/api/p/${cur}/chat?since=999999999`)).seq || 0;
     const r = await api(`/api/p/${cur}/chat`, {text});
     if (r.error) { wait.remove(); addMsg("assistant", r.error); }
     else if (r.live) { wait.remove(); await fetchNotes(); }  // live session: its answers stream in; you can keep writing
@@ -1100,9 +1142,9 @@ async function send(preset) {
       }
       wait.remove();
       if (forProject === cur && h) {
-        h = await api(`/api/p/${cur}/chat`);  // the whole transcript once, now that the answer is complete
+        h = await api(`/api/p/${cur}/chat?since=${base}`);  // only what came after the question
         await fetchNotes();
-        const last = h.history.slice(base + 1).filter(m => m.role === "assistant" && m.kind !== "progress").pop();
+        const last = h.history.filter(m => m.role === "assistant" && m.kind !== "progress").pop();
         if (last) addMsg("assistant", last.text, last);
       }
     }

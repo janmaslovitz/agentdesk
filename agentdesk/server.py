@@ -474,7 +474,7 @@ class Chat:
     def save_history(self) -> None:
         f = self.p.path("chat.json")
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.history, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(self.history, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         core.replace_file(tmp, f)
 
     # -- the running memory, kept in chat_memory.md: this (not the transcript) goes back to the model
@@ -1225,13 +1225,30 @@ class Chat:
                 self.p.path("chat.json").unlink(missing_ok=True)
                 self.p.path("chat_memory.md").unlink(missing_ok=True)
 
-    def info(self, since: int | None = None) -> dict:
+    @staticmethod
+    def _slim(m: dict, cap: int = 2000) -> dict:
+        """A transcript entry for a page: long tool inputs/outputs cut (the page shows them folded)."""
+        if not m.get("tools"):
+            return m
+        tools = []
+        for c in m["tools"]:
+            if isinstance(c, dict):
+                c = {**c, **{k: str(c[k])[:cap] + "\n… (cut)" for k in ("input", "output") if len(str(c.get(k) or "")) > cap}}
+            tools.append(c)
+        return {**m, "tools": tools}
+
+    def info(self, since: int | None = None, limit: int | None = None, before: int | None = None) -> dict:
         """The chat state. `since`: only the entries added after that seq (the page polls often; the whole
         transcript is 100 KB and more), else the whole transcript."""
         mode = core.chat_mode(self.p)
         cs = core.chat_settings(mode)
         history = self.history if since is None else [m for m in list(self.history) if m.get("seq", 0) > since]
-        out = {"history": history, "mode": mode, "busy": self.is_busy(), "model": cs["model"], "seq": self.seq}
+        more = False
+        if limit:  # a page: the last `limit` entries (older than `before` when given), so a long chat opens fast
+            pool = list(history) if before is None else [m for m in list(history) if m.get("seq", 0) < before]
+            more = len(pool) > limit
+            history = [self._slim(m) for m in pool[-limit:]]
+        out = {"history": history, "mode": mode, "busy": self.is_busy(), "model": cs["model"], "seq": self.seq, "more": more}
         if mode in AUTONOMOUS:
             out.update(budget_usd=float(cs["budget_usd"]))
         out["live"] = self.is_live()
@@ -2290,7 +2307,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def json(self, obj, code: int = 200) -> None:
-        self.send(code, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        hdrs = None
+        if len(body) > 2048 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            import gzip
+            body, hdrs = gzip.compress(body, 4), {"Content-Encoding": "gzip", "Vary": "Accept-Encoding"}
+        self.send(code, body, "application/json; charset=utf-8", hdrs)
 
     def body(self) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
@@ -2415,8 +2437,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[3] == "disk":
                 return self.json(disk_view(p, "refresh=1" in (urllib.parse.urlparse(self.path).query or "")))
             if len(parts) == 4 and parts[3] == "chat":
-                since = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("since", [""])[0]
-                return self.json(chat(p).info(int(since) if since.isascii() and since.isdigit() else None))
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                num = lambda k: int(qs[k][0]) if k in qs and qs[k][0].isascii() and qs[k][0].isdigit() else None
+                return self.json(chat(p).info(num("since"), min(num("limit") or 0, 500) or None, num("before")))
             if len(parts) == 4 and parts[3] == "pending":
                 return self.json({"pending": chat(p).approvals.pending()})
             if len(parts) == 5 and parts[3] == "task":
