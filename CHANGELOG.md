@@ -5,6 +5,10 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- Debian package, hosts that reach only the Yandex mirrors: postinst retries pip longer, then falls back to
+  `mirror.yandex.ru/pypi/web/simple/`; `PIP_INDEX_URL` / `PIP_PROXY` can be set in `/etc/default/agentdesk-server`.
+
 
 ## 1.5.2 - 2026-10-23
 

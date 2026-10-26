@@ -141,6 +141,8 @@ WantedBy=multi-user.target
 """
 
 DEFAULTS_FILE = """# Environment of agentdesk-server.service and of the `agentdesk-server` command.
+# Python package index for the install / upgrade (pip reads PIP_INDEX_URL, PIP_PROXY). Uncomment behind a firewall:
+#PIP_INDEX_URL=https://mirror.yandex.ru/pypi/web/simple/
 AGENTDESK_SERVER_HOME=/var/lib/agentdesk-server
 AGENTDESK_SERVER_CONFIG=/etc/agentdesk-server/server.toml
 """
@@ -183,12 +185,16 @@ case "$1" in
     fi
     SITE="$("$OPT/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
     echo "$OPT/app" > "$SITE/agentdesk-app.pth"
+    [ -r /etc/default/agentdesk-server ] && . /etc/default/agentdesk-server && export PIP_INDEX_URL PIP_PROXY
     ok=0
     if [ -d "$OPT/wheels" ] && "$OPT/venv/bin/python" -m pip install --quiet --no-index --find-links "$OPT/wheels" \\
          -r "$OPT/requirements-server.txt"; then
       ok=1
     elif "$OPT/venv/bin/python" -m pip install --quiet --disable-pip-version-check --timeout 60 --retries 5 -r "$OPT/requirements-server.txt"; then
       ok=1
+    elif "$OPT/venv/bin/python" -m pip install --quiet --disable-pip-version-check --timeout 60 --retries 5 \
+           --index-url https://mirror.yandex.ru/pypi/web/simple/ -r "$OPT/requirements-server.txt"; then
+      ok=1  # pypi.org unreachable (hosts that only see the Yandex mirrors): the Yandex PyPI mirror
     fi
     if [ "$ok" != 1 ]; then
       echo "agentdesk-server: could not install the Python packages (no network?)." >&2
