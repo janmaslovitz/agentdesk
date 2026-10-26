@@ -209,9 +209,9 @@ def test_http_routes(full, tmp_path, monkeypatch):
         # no repo given: AgentDesk picks a fresh folder under its data folder
         st, body, _ = post("/import?new_name=Auto+Home", raw=data, ctype="application/zip")
         res = json.loads(body)
-        assert res["ok"] and Path(res["repo"]) == core.DATA / "repos" / "auto-home" and Path(res["repo"]).is_dir()
+        assert res["ok"] and Path(res["repo"]) == core.DATA / "repos" / "Auto-Home" and Path(res["repo"]).is_dir()
         st, body, _ = post("/import?new_name=Auto+Home", raw=data, ctype="application/zip")  # clash: the folder made for it is removed
-        assert json.loads(body)["name_clash"] and sorted(p.name for p in (core.DATA / "repos").iterdir()) == ["auto-home"]
+        assert json.loads(body)["name_clash"] and sorted(p.name for p in (core.DATA / "repos").iterdir()) == ["Auto-Home"]
         monkeypatch.setattr(server, "overview", lambda: {})
         for window, want in ((None, False), (object(), True)):  # a browser / headless server has no native window
             monkeypatch.setattr(server, "_WINDOW", window)

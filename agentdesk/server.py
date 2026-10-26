@@ -2263,27 +2263,16 @@ def is_loopback(host: str) -> bool:
 # ----------------------------------------------------------------------------- http
 
 def repo_dir_for_import(d: dict, upload: Path | None) -> Path:
-    """A fresh, empty code folder under the data folder for an import that named none."""
-    name = str(d.get("new_name") or "").strip()
-    if not name and upload:
+    """A fresh, empty code folder under <data>/repos for an import that named none, derived from the source."""
+    export_name = ""
+    if upload and not str(d.get("new_name") or "").strip():
         try:
-            name = str(core._read_zip(upload)[0].get("project") or "")
+            export_name = str(core._read_zip(upload)[0].get("project") or "")
         except Exception:
-            name = ""
-    if not name:
-        url = str(d.get("repo_url") or d.get("source_url") or "").rstrip("/")
-        name = re.sub(r"\.git$", "", re.split(r"[/:]", url)[-1]) if url else ""
-    base = core.slug(name or "imported")
-    root = core.DATA / "repos"
-    root.mkdir(parents=True, exist_ok=True)
-    n, dest = 1, root / base
-    while True:
-        try:
-            dest.mkdir()
-            return dest
-        except FileExistsError:
-            n += 1
-            dest = root / f"{base}-{n}"
+            pass
+    return core.make_import_dir(core.import_folder_name(
+        str(d.get("new_name") or ""), str(d.get("repo_url") or d.get("source_url") or ""),
+        str(d.get("filename") or ""), export_name))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2399,6 +2388,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(core.version_info())
         if parts == ["api", "update"]:
             return self.json(update_status())
+        if parts == ["api", "import-folder"]:  # where an import would be created (read-only preview for the wizard)
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+            name = core.import_folder_name(q.get("name", ""), q.get("url", ""), q.get("filename", ""))
+            return self.json({"folder": name, "path": str(core.preview_import_dir(name))})
         if parts == ["api", "overview"]:
             return self.json({**overview(), "desktop": _WINDOW is not None})  # desktop: folder pickers work
         if parts == ["api", "busy"]:  # the gateway keeps an instance alive while this says busy

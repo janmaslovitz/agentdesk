@@ -686,6 +686,87 @@ def slug(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "project"
 
 
+# ----------------------------------------------------------------------------- folders of imported projects
+# The user never types a folder: it is derived from the source (project name, repo name, archive name).
+
+_RESERVED = re.compile(r"(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])")
+
+
+def folder_slug(name: str) -> str:
+    """A safe folder name: letters, digits, - _ . only; no leading dots/dashes, no '..', no Windows device names."""
+    s = re.sub(r"[^\w.-]+", "-", str(name or "").replace(chr(0), ""), flags=re.UNICODE)
+    s = re.sub(r"\.{2,}", ".", s)
+    s = re.sub(r"-{2,}", "-", s).lstrip(".-")[:64].rstrip(".- ")
+    if _RESERVED.fullmatch(s.split(".")[0]):
+        s = "_" + s
+    return s or "project"
+
+
+def repo_name_from_url(url: str) -> str:
+    """`https://github.com/you/My_Repo.git` / `git@host:you/repo.git` / a local path -> the repo name ('' if none)."""
+    u = str(url or "").strip().split("?")[0].split("#")[0].rstrip("/\\")
+    last = re.split(r"[/\:]", u)[-1] if u else ""
+    return re.sub(r"\.git$", "", last, flags=re.I)
+
+
+def archive_name(filename: str) -> str:
+    """`my-project-1.2.zip` -> `my-project`: the file name without extension and a trailing version / timestamp / ` (1)`."""
+    stem = re.split(r"[/\\]", str(filename or "").strip())[-1]
+    stem = re.sub(r"\.zip$", "", stem, flags=re.I).strip()
+    while True:
+        t = re.sub(r"\s*\(\d+\)$", "", stem)
+        t = re.sub(r"[-_ ]v?\d+(\.\d+)+$", "", t)
+        t = re.sub(r"[-_ ]\d{8}(?:[-_T ]?\d{4,6})?$", "", t).strip()
+        if t == stem or not t:
+            return stem
+        stem = t
+
+
+def import_folder_name(new_name: str = "", url: str = "", filename: str = "", export_name: str = "") -> str:
+    """The folder name for an import: typed project name, else repo name, else the export's own name, else the file name."""
+    return folder_slug((new_name or "").strip() or repo_name_from_url(url) or (export_name or "").strip()
+                       or archive_name(filename))
+
+
+def import_root() -> Path:
+    return DATA / "repos"
+
+
+def preview_import_dir(name: str, root: Path | None = None) -> Path:
+    """Where `make_import_dir` would put it now (first free `name`, `name-2`, ...), without creating anything."""
+    root = root or import_root()
+    n, dest = 1, root / name
+    while dest.exists():
+        n += 1
+        dest = root / f"{name}-{n}"
+    return dest
+
+
+def make_import_dir(name: str, root: Path | None = None) -> Path:
+    """Atomically create a fresh folder `<root>/<name>` (or `-2`, `-3`, ...) and return it. Never reuses a folder;
+    refuses a result outside `root` (symlinks included)."""
+    root = root or import_root()
+    root.mkdir(parents=True, exist_ok=True)
+    real = root.resolve()
+    name = folder_slug(name)
+    n = 1
+    while True:
+        dest = root / (name if n == 1 else f"{name}-{n}")
+        try:
+            dest.mkdir()
+        except FileExistsError:
+            n += 1
+            continue
+        if dest.resolve().parent != real:
+            try:
+                dest.rmdir()
+            except OSError:
+                pass
+            raise ValueError(f"{dest} is outside the allowed folder {root}")
+        return dest
+
+
+
 @dataclass
 class Project:
     slug: str

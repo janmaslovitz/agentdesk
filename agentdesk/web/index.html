@@ -219,7 +219,7 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
     <label for="iUrl" class="req">Repository URL</label><input id="iUrl" placeholder="https://github.com/you/repo.git" oninput="iCheck()">
     <div class="err" id="iErr_url"></div>
     <label for="iBranch">Branch (optional, e.g. <code>agentdesk-export/my-project</code>)</label><input id="iBranch" placeholder="default branch">
-    <label class="chk"><input type="checkbox" id="iAlsoCode" checked> The code is in this repository too: clone it as the project's code</label>
+    <label class="chk"><input type="checkbox" id="iAlsoCode" checked onchange="iCheck()"> The code is in this repository too: clone it as the project's code</label>
   </div>
   <div id="iPane_dir" class="grp" style="display:none">
     <label for="iSource" class="req">Folder with the export (<code>.agentdesk/</code> or a config repo)</label>
@@ -232,9 +232,10 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
     <label for="iName">Project name (empty: the exported name)</label><input id="iName" oninput="iCheck()">
     <div class="err" id="iErr_name"></div>
   </div>
+  <div class="hint" id="iWhere"></div>
   <details id="iAdv"><summary>Advanced: choose the code folder</summary>
     <div>AgentDesk puts the code in its own data folder unless you choose one. Leave empty for the default.
-    <div class="pick"><input id="iRepo" placeholder="D:/work/my-repo"><button type="button" onclick="browse('iRepo')">Browse…</button></div></div>
+    <div class="pick"><input id="iRepo" placeholder="D:/work/my-repo" oninput="iCheck()"><button type="button" onclick="browse('iRepo')">Browse…</button></div></div>
   </details>
   </div>
   <div id="iRun" style="display:none"><div id="iStatus" class="hint"></div><progress id="iProg"></progress></div>
@@ -366,7 +367,18 @@ function iValid() {  // marks the field that is wrong; true when Import may be p
   }
   return !!$("iSource").value.trim();
 }
-function iCheck() { iErr("name", ""); if (!iXhr) $("iGo").disabled = !iValid(); }
+let iWhereT = null;
+function iWhere() {  // read-only "Will be created at ..." line; the server derives the folder from name / URL / file name
+  clearTimeout(iWhereT);
+  iWhereT = setTimeout(async () => {
+    const el = $("iWhere"), f = iMode === "zip" ? $("iFile").files[0] : null;
+    if ($("iRepo").value.trim()) { el.textContent = "Will use the folder you chose: " + $("iRepo").value.trim(); return; }
+    const q = new URLSearchParams({name: $("iName").value.trim(), url: iMode === "git" && $("iAlsoCode").checked ? $("iUrl").value.trim() : "", filename: f ? f.name : ""});
+    if (!q.get("name") && !q.get("url") && !q.get("filename")) { el.textContent = "The code folder is named after the project and created automatically."; return; }
+    try { const r = await (await fetch("/api/import-folder?" + q)).json(); el.textContent = r.path ? "Will be created at " + r.path : ""; } catch { el.textContent = ""; }
+  }, 250);
+}
+function iCheck() { iErr("name", ""); iWhere(); if (!iXhr) $("iGo").disabled = !iValid(); }
 function iBusy(on, text, pct) {
   $("iRun").style.display = on ? "" : "none"; $("iStatus").textContent = text || "";
   if (pct == null) $("iProg").removeAttribute("value"); else $("iProg").value = pct;
@@ -399,6 +411,7 @@ async function importProject() {
   if (!iValid()) return;
   const opts = {repo: $("iRepo").value.trim(), account: $("iAccount").value, new_name: $("iName").value.trim()};
   const f = iMode === "zip" ? $("iFile").files[0] : null;
+  if (f) opts.filename = f.name;
   if (iMode === "git" && $("iAlsoCode").checked) opts.repo_url = $("iUrl").value.trim();
   iMsg(""); iErr("name", "");
   const text = iMode === "git" ? "Cloning the repository…" : iMode === "zip" ? "Uploading…" : "Importing…";
