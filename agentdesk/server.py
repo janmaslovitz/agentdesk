@@ -292,6 +292,18 @@ ${budget:.2f}. Never invent results: read the files. Each user message starts wi
 state in brackets.
 """
 
+VERIFY_RULE = """
+Check before you report: every claim in your answer must come from something you read or ran in this
+session (the file, state.json, the report, the git state, the command output), not from memory, a log line
+or a status you saw earlier. Before saying that something is done, broken, merged or missing, look at the
+source and, where it is cheap, run the check. If you did not check something, say so plainly instead of
+presenting it as fact; if you were wrong earlier, correct it.
+"""
+# the same rule for every chat agent of every project
+COWORKER_PROMPT += VERIFY_RULE
+COWORKER_FULL_PROMPT += VERIFY_RULE
+PLANNER_PROMPT += VERIFY_RULE
+
 COWORKER_LIVE_ADDENDUM = """
 This is a live session: it stays open between messages, so you can be interactive like a teammate.
 - The user can write to you while you work: read new messages as they come and adapt. Keep replies short.
