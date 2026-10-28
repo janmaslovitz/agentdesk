@@ -106,6 +106,24 @@ current branch becomes the base. This is local only: nothing is pushed and no re
 has no name/email, `AgentDesk <agentdesk@localhost>` is set for that repo only. Existing repos with
 commits are never changed.
 
+On the Server (any browser, not the desktop window), the server chooses the code folder: it is
+`<data>/repos/<project name>` (`-2`, `-3` if that name is taken). No folder fields or Browse buttons
+are shown, and `POST /api/projects` refuses a folder path sent by the browser. **+ Add** has two tabs:
+
+- **New project** (default): name, base branch, checks and account. AgentDesk makes the folder, runs
+  `git init` on the base branch and makes a first commit (`.gitignore`, `README.md`). If gh is logged
+  in to a GitHub account on the server (`gh auth login`), you can also tick **Create a GitHub
+  repository**, pick the account and choose Public (default) or Private. AgentDesk then runs
+  `gh repo create <account>/<name>`, sets the new repository as `origin` (https), saves the account as
+  the project's GitHub account and pushes the base branch. The account's token is only passed to gh
+  and git in their environment, never on a command line or in a log. If the GitHub step fails, the
+  project is still created and works locally: the dialog shows what went wrong, and you can set the
+  remote and push later from the Git panel.
+- **Import existing repo**: clone a git URL into a new folder (the clone folder can't be chosen here).
+
+The desktop App keeps its **A folder on this computer** and **From GitHub** tabs with Browse and the
+"choose the folder to clone into" option.
+
 ## MCP servers
 
 A project can give its workers extra MCP servers in `project.toml`:

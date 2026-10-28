@@ -2336,6 +2336,38 @@ def repo_dir_for_import(d: dict, upload: Path | None) -> Path:
         str(d.get("filename") or ""), export_name))
 
 
+def desktop() -> bool:
+    """Running in the native desktop window (folder pickers, local paths); False for the server / a browser."""
+    return _WINDOW is not None
+
+
+def new_project_route(d: dict) -> dict:
+    """POST /api/projects {new: true, name, base, preset, account, github: {account, private}}: a new project in a
+    fresh folder named after it, `git init` + a first commit; with `github`, also a GitHub repository (origin, base
+    branch pushed). A failed GitHub step keeps the local project: {ok: true, github: {ok: false, message}}."""
+    gate = core.disk_gate()
+    if gate:
+        return {"ok": False, "disk_budget": True, "error": f"not creating the project: {gate}"}
+    name = str(d.get("name") or "").strip()
+    gh = d.get("github") if isinstance(d.get("github"), dict) else None
+    login = str((gh or {}).get("account") or "").strip()
+    if gh is not None and not core.valid_login(login):
+        return {"ok": False, "error": "choose the GitHub account to create the repository as", "field": "gh"}
+    if core.slug(name) and (core.DATA / "projects" / core.slug(name) / "project.toml").exists():
+        return {"ok": False, "error": f"a project named {core.slug(name)} exists", "field": "name"}
+    try:
+        p = core.create_new_project(name, str(d.get("base") or "main"), str(d.get("preset") or "none"),
+                                    str(d.get("account") or "default"))
+    except (ValueError, RuntimeError) as e:
+        msg = str(e)
+        field = "base" if "branch name" in msg else "name" if "project" in msg else None
+        return {"ok": False, "error": msg, **({"field": field} if field else {})}
+    out = {"ok": True, "slug": p.slug, "repo": str(p.repo), "base": p.cfg["repo"]["base"]}
+    if gh is not None:
+        out["github"] = core.gh_create_repo(p, login, gh.get("private") is True)
+    return out
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_):
         pass
@@ -2459,7 +2491,10 @@ class Handler(BaseHTTPRequestHandler):
             name = core.import_folder_name(q.get("name", ""), q.get("url", ""), q.get("filename", ""))
             return self.json({"folder": name, "path": str(core.preview_import_dir(name))})
         if parts == ["api", "overview"]:
-            return self.json({**overview(), "desktop": _WINDOW is not None})  # desktop: folder pickers work
+            return self.json({**overview(), "desktop": desktop()})  # desktop: folder pickers work
+        if parts == ["api", "gh-accounts"]:  # the gh logins a new project can create its GitHub repository as
+            acc = core.gh_accounts("refresh=1" in (urllib.parse.urlparse(self.path).query or ""))
+            return self.json({**acc, "accounts": [a for a in acc["accounts"] if a["ok"] and a["host"] == "github.com"]})
         if parts == ["api", "busy"]:  # the gateway keeps an instance alive while this says busy
             return self.json(busy_info())
         if len(parts) >= 3 and parts[:2] == ["api", "p"]:
@@ -2508,6 +2543,13 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "projects"]:
                 name, repo = str(d.get("name", "")).strip(), str(d.get("repo", "")).strip()
                 base, url = str(d.get("base", "")).strip(), str(d.get("repo_url", "")).strip()
+                if d.get("new") is True:  # "New project": a fresh repo in AgentDesk's data, optionally on GitHub too
+                    return self.json(new_project_route(d))
+                if not desktop() and repo:  # the server picks the code folder itself; never trust a client path
+                    return self.json({"ok": False, "error": "on the server the code folder is created automatically: "
+                                                            "a folder path can't be chosen", "field": "repo"})
+                if not desktop() and not url:
+                    return self.json({"ok": False, "error": "create a new project or import a repository by its git URL"})
                 made = None  # a folder we created for a clone: removed again if the project is not made
                 try:
                     if url:  # "from GitHub": clone first (into the chosen new/empty folder, else a fresh one in AgentDesk data)

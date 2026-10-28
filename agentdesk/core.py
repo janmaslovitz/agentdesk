@@ -1110,6 +1110,40 @@ def add_project(name: str, repo: str, base: str, preset: str = "none", account_n
     return project(s)
 
 
+def valid_branch(name: str) -> bool:
+    """A name git accepts for a new branch (and that can't be read as an option)."""
+    if not name or name.startswith("-"):
+        return False
+    DATA.mkdir(parents=True, exist_ok=True)
+    return git(["check-ref-format", "--branch", name], DATA)[0] == 0
+
+
+def create_new_project(name: str, base: str = "main", preset: str = "none", account_name: str = "default") -> Project:
+    """A brand-new project with nothing to start from: a fresh code folder under <data>/repos named after the project
+    (as for imports), `git init` on `base` and a first commit (.gitignore, README.md). Local only: no remote, no push.
+    The folder is removed again if the project can't be made."""
+    name, base = (name or "").strip(), (base or "").strip() or "main"
+    if not name:
+        raise ValueError("enter a project name")
+    if (DATA / "projects" / slug(name) / "project.toml").exists():
+        raise ValueError(f"a project named {slug(name)} exists")
+    if not valid_branch(base):
+        raise ValueError(f"'{base}' is not a valid branch name")
+    repo = make_import_dir(import_folder_name(name))
+    try:
+        code, out = git(["init"], repo)
+        if code != 0:
+            raise RuntimeError(f"git init failed: {out}")
+        git(["symbolic-ref", "HEAD", f"refs/heads/{base}"], repo)  # `git init -b` needs git 2.28
+        (repo / "README.md").write_text(f"# {name}\n", encoding="utf-8")
+        base = setup_local_git(str(repo)) or base
+        p = add_project(name, str(repo), base, preset, account_name)
+    except BaseException:
+        shutil.rmtree(repo, ignore_errors=True)
+        raise
+    return p
+
+
 # ----------------------------------------------------------------------------- per-project state
 
 class Store:
@@ -1871,6 +1905,46 @@ def git_set_remote(p: "Project", text: str, protocol: str | None = None) -> dict
         msg = f"origin added: {url}."
     _gh_forget("prs")
     return {"ok": code == 0, "message": msg if code == 0 else gh_redact(out), "url": url}
+
+
+def gh_repo_name(name: str) -> str:
+    """A GitHub repository name for a project name: letters, digits, - _ . only."""
+    s = re.sub(r"-{2,}", "-", re.sub(r"[^A-Za-z0-9_.-]+", "-", str(name or ""))).strip("-.")[:100].rstrip("-.")
+    return s if s and s not in (".", "..") and _GH_REPO.fullmatch(s) else "project"
+
+
+def gh_create_repo(p: "Project", login: str, private: bool = False, host: str = "github.com") -> dict:
+    """Create <login>/<project name> on GitHub as the gh account `login`, make it origin (https) and push the base
+    branch. The account's token only goes into the child processes' environment. Never raises: every failure is a
+    message and the local project stays as it is (a created repository / origin is kept, so a push can be retried
+    from the Git panel). {ok, created, pushed, repo, url, message, account}."""
+    name = gh_repo_name(p.name)
+    full = f"{login}/{name}"
+    res = {"ok": False, "created": False, "pushed": False, "repo": full, "url": f"https://{host}/{full}", "account": login}
+    if not valid_login(login):
+        return {**res, "message": f"'{login}' is not a GitHub account name"}
+    tok, err = gh_token(login, host)
+    if err:
+        return {**res, "message": err}
+    code, out = _gh(["repo", "create", full, "--private" if private else "--public"], token=tok, host=host, timeout=90)
+    if code != 0:
+        return {**res, "message": f"Could not create the GitHub repository {full}: {gh_redact(out, tok or '') or 'gh failed'}"}
+    res["created"] = True
+    _gh_forget("repos")
+    try:
+        set_git_account(p, login)
+    except (OSError, ValueError) as e:
+        return {**res, "message": f"Created {res['url']}, but could not save the GitHub account in the project: {e}"}
+    r = git_set_remote(p, full, "https")
+    if not r.get("ok"):
+        return {**res, "message": f"Created {res['url']}, but could not set it as origin: {r.get('message')}"}
+    base = p.cfg["repo"]["base"]
+    r = git_push(p, base)
+    if not r.get("ok"):
+        return {**res, "message": f"Created {res['url']} and set it as origin, but pushing '{base}' failed (push again "
+                                  f"from the Git panel): {gh_redact(str(r.get('message') or ''), tok or '')}"}
+    return {**res, "ok": True, "pushed": True, "message": f"Created {res['url']} ({'private' if private else 'public'}) "
+                                                         f"and pushed '{base}'."}
 
 
 def parse_repos(out: str) -> list[dict]:
