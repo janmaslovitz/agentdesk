@@ -184,13 +184,38 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
 
 <div class="wrap" id="main"><div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dProject')">Add project</button></div></div>
 
-<dialog id="dProject"><h3>Add project</h3>
-  <label>Name</label><input id="pName" placeholder="Sintec.PDF">
-  <label>Repository folder (a git repo)</label><input id="pRepo" placeholder="C:\path\to\repo">
-  <label>Base branch tasks start from</label><input id="pBase" value="main">
-  <label>Checks</label><select id="pPreset"></select>
-  <label>Account</label><select id="pAccount"></select>
-  <div class="row"><button onclick="closeDlg('dProject')">Cancel</button><button class="primary" onclick="addProject()">Add</button></div>
+<dialog id="dProject" class="wide"><h3>New project</h3>
+  <div id="pForm">
+  <div class="hint">1. Where is the code?</div>
+  <div class="tabs"><button type="button" id="pTab_dir" onclick="pTab('dir')">A folder on this computer</button><button type="button" id="pTab_git" onclick="pTab('git')">From GitHub (git URL)</button></div>
+  <div id="pPane_dir" class="grp">
+    <label for="pRepo" class="req">Repository folder (a git repo, or any folder: local version tracking can be set up)</label>
+    <div class="pick"><input id="pRepo" placeholder="D:/work/my-repo" oninput="pCheck()"><button type="button" onclick="browse('pRepo')">Browse…</button></div>
+    <div class="err" id="pErr_repo"></div>
+  </div>
+  <div id="pPane_git" class="grp" style="display:none">
+    <label for="pUrl" class="req">Repository URL</label><input id="pUrl" placeholder="https://github.com/you/repo.git" oninput="pCheck()">
+    <div class="err" id="pErr_url"></div>
+    <label for="pBranch">Branch (optional; empty: the default branch)</label><input id="pBranch" placeholder="default branch" oninput="pCheck()">
+    <details id="pAdv"><summary>Advanced: choose the folder to clone into</summary>
+      <div>Must be new or empty. Leave empty and AgentDesk uses its own data folder.
+      <div class="pick"><input id="pClone" placeholder="D:/work/my-repo" oninput="pCheck()"><button type="button" onclick="browse('pClone')">Browse…</button></div></div>
+    </details>
+    <div class="err" id="pErr_clone"></div>
+  </div>
+  <div class="hint">2. Project</div>
+  <div class="grp">
+    <label for="pName" class="req">Project name</label><input id="pName" placeholder="Sintec.PDF" oninput="pCheck()">
+    <div class="err" id="pErr_name"></div>
+    <label for="pBase" id="pBaseL">Base branch tasks start from</label><input id="pBase" value="main">
+    <label for="pPreset">Checks</label><select id="pPreset"></select>
+    <label for="pAccount">Account</label><select id="pAccount"></select>
+  </div>
+  <div class="hint" id="pWhere"></div>
+  </div>
+  <div id="pRun" style="display:none"><div id="pStatus" class="hint"></div><progress></progress></div>
+  <pre id="pMsg" class="msgbox" style="display:none"></pre>
+  <div class="row"><button id="pCancel" onclick="closeDlg('dProject')">Cancel</button><button class="primary" id="pGo" onclick="addProject()" disabled>Add</button></div>
 </dialog>
 
 <dialog id="dExport" class="wide"><h3>Export project</h3>
@@ -281,23 +306,77 @@ async function api(path, body) {
 function openDlg(id) {
   if (id === "dExport") xModeSet();
   if (id === "dImport") iOpen();
-  if (id === "dProject") {
-    $("pPreset").innerHTML = (ov?.presets||[]).map(p => `<option>${esc(p)}</option>`).join("");
-    $("pAccount").innerHTML = (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
-  }
+  if (id === "dProject") pOpen();
   $(id).showModal();
 }
 function closeDlg(id) { $(id).close(); }
 function note(t) { if (chatFor) addMsg("assistant", "⚠ " + t); else alert(t); }
 
+let pMode = "dir", pBusyNow = false;
+function pOpen() {
+  $("pPreset").innerHTML = (ov?.presets||[]).map(p => `<option>${esc(p)}</option>`).join("");
+  $("pAccount").innerHTML = (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
+  for (const id of ["pRepo", "pUrl", "pBranch", "pClone", "pName"]) $(id).value = "";
+  $("pBase").value = "main"; $("pAdv").open = false; pBusy(false); pMsg("");
+  pTab("dir");
+}
+function pTab(m) {
+  pMode = m;
+  for (const k of ["dir", "git"]) { $("pPane_" + k).style.display = k === m ? "" : "none"; $("pTab_" + k).classList.toggle("on", k === m); }
+  $("pBaseL").textContent = m === "git" ? "Branch tasks start from (empty: the repository's default)" : "Base branch tasks start from";
+  $("pBase").placeholder = m === "git" ? "default branch" : "main";
+  if (m === "git" && $("pBase").value === "main") $("pBase").value = "";
+  if (m === "dir" && !$("pBase").value) $("pBase").value = "main";
+  pCheck();
+}
+function pMsg(t) { $("pMsg").textContent = t; $("pMsg").style.display = t ? "" : "none"; }
+function pErr(k, t) { $("pErr_" + k).textContent = t || ""; }
+function pValid() {
+  for (const k of ["repo", "url", "clone"]) pErr(k, "");
+  if (!$("pName").value.trim()) return false;
+  if (pMode === "dir") return !!$("pRepo").value.trim();
+  const u = $("pUrl").value.trim();
+  if (!u) return false;
+  if (/\s/.test(u) || !/^(https?:\/\/|ssh:\/\/|git@|git:\/\/|file:\/\/|\/|[A-Za-z]:[\\\/])/.test(u)) return pErr("url", "Enter a git URL such as https://github.com/you/repo.git"), false;
+  return true;
+}
+let pWhereT = null;
+function pWhere() {
+  clearTimeout(pWhereT);
+  pWhereT = setTimeout(async () => {
+    const el = $("pWhere");
+    if (pMode !== "git") { el.textContent = ""; return; }
+    if ($("pClone").value.trim()) { el.textContent = "Will clone into the folder you chose: " + $("pClone").value.trim(); return; }
+    const u = $("pUrl").value.trim(), n = $("pName").value.trim();
+    if (!u && !n) { el.textContent = "The code folder is named after the project and created automatically."; return; }
+    try { const r = await (await fetch("/api/import-folder?" + new URLSearchParams({name: n, url: u}))).json(); el.textContent = r.path ? "Will be cloned to " + r.path : ""; } catch { el.textContent = ""; }
+  }, 250);
+}
+function pCheck() { pErr("name", ""); pWhere(); if (!pBusyNow) $("pGo").disabled = !pValid(); }
+function pBusy(on, text) {
+  pBusyNow = on; $("pRun").style.display = on ? "" : "none"; $("pStatus").textContent = text || "";
+  $("pGo").disabled = on || (!on && !pValid());
+  for (const el of $("pForm").querySelectorAll("input,select,button,summary")) el.disabled = on;
+}
 async function addProject() {
-  const body = {name: $("pName").value, repo: $("pRepo").value, base: $("pBase").value, preset: $("pPreset").value, account: $("pAccount").value};
-  let r = await api("/api/projects", body);
-  if (r.needs_local_git) {
-    if (!confirm(r.message + ".\n\nSet up local version tracking (stays on this computer)?\nNothing is pushed and no remote is added.")) return;
-    r = await api("/api/projects", {...body, local_git: true});
-  }
-  if (r.error) return note(r.error);
+  if (!pValid()) return;
+  const git = pMode === "git";
+  const body = {name: $("pName").value.trim(), base: $("pBase").value.trim(), preset: $("pPreset").value, account: $("pAccount").value};
+  if (git) Object.assign(body, {repo_url: $("pUrl").value.trim(), repo: $("pClone").value.trim(), base: $("pBase").value.trim() || $("pBranch").value.trim()});
+  else body.repo = $("pRepo").value.trim();
+  pMsg(""); pBusy(true, git ? "Cloning the repository…" : "Creating the project…");
+  let r;
+  try {
+    r = await api("/api/projects", body);
+    if (r.needs_local_git) {
+      pBusy(false);
+      if (!confirm(r.message + ".\n\nSet up local version tracking (stays on this computer)?\nNothing is pushed and no remote is added.")) return;
+      pBusy(true, "Setting up version tracking…");
+      r = await api("/api/projects", {...body, local_git: true});
+    }
+  } catch (e) { pBusy(false); pMsg("Could not reach the server."); return; }
+  pBusy(false);
+  if (r.error) { if (r.field) pErr(r.field, r.error); else pMsg(r.error); return; }
   closeDlg("dProject"); cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
 }
 async function exportZip() {
@@ -321,8 +400,8 @@ function xModeSet() {
 }
 async function browse(id) {
   const r = await api("/api/pick", {kind: "folder", start: $(id).value.trim()}).catch(() => ({}));
-  if (r.ok && r.path) $(id).value = r.path;
-  else if (r.available === false || !r.ok) { const m = id[0] === "x" ? "xMsg" : "iMsg"; $(m).textContent = "Browse is only available in the desktop window; type the path."; }
+  if (r.ok && r.path) { $(id).value = r.path; $(id).dispatchEvent(new Event("input")); }
+  else if (r.available === false || !r.ok) { const m = id[0] === "x" ? "xMsg" : id[0] === "p" ? "pMsg" : "iMsg"; $(m).textContent = "Browse is only available in the desktop window; type the path."; }
 }
 async function exportGo() {
   const m = document.querySelector('input[name=xmode]:checked').value;

@@ -2506,13 +2506,36 @@ class Handler(BaseHTTPRequestHandler):
             if parts == ["api", "update", "open"]:
                 return self.json(update_open())
             if parts == ["api", "projects"]:
+                name, repo = str(d.get("name", "")).strip(), str(d.get("repo", "")).strip()
+                base, url = str(d.get("base", "")).strip(), str(d.get("repo_url", "")).strip()
+                made = None  # a folder we created for a clone: removed again if the project is not made
                 try:
-                    p = core.add_project(str(d.get("name", "")).strip(), str(d.get("repo", "")).strip(), str(d.get("base", "")).strip() or "main",
+                    if url:  # "from GitHub": clone first (into the chosen new/empty folder, else a fresh one in AgentDesk data)
+                        if core.slug(name) and (core.DATA / "projects" / core.slug(name) / "project.toml").exists():
+                            return self.json({"ok": False, "error": f"a project named {core.slug(name)} exists", "field": "name"})
+                        if repo:
+                            if Path(repo).exists() and (not Path(repo).is_dir() or any(Path(repo).iterdir())):
+                                return self.json({"ok": False, "error": f"{repo} already exists and is not empty; choose a new folder to clone into", "field": "repo"})
+                            Path(repo).mkdir(parents=True, exist_ok=True)
+                        else:
+                            repo = str(core.make_import_dir(core.import_folder_name(name, url)))
+                        made = Path(repo)
+                        core.clone_for_import(url, made, base or None)
+                        if not base:
+                            code, out = core.git(["rev-parse", "--abbrev-ref", "HEAD"], made)
+                            base = out.strip() if code == 0 and out.strip() not in ("", "HEAD") else "main"
+                    p = core.add_project(name, repo, base or "main",
                                          str(d.get("preset", "none")), str(d.get("account", "default")),
                                          local_git=d.get("local_git") is True)
+                    made = None
                 except core.NeedsLocalGit as e:
                     return self.json({"needs_local_git": True, "reason": e.reason, "message": str(e)})
-                return self.json({"ok": True, "slug": p.slug})
+                except core.BadExport as e:
+                    return self.json({"ok": False, "error": str(e)})
+                finally:
+                    if made is not None:
+                        shutil.rmtree(made, ignore_errors=True)
+                return self.json({"ok": True, "slug": p.slug, "repo": str(p.repo)})
             if parts == ["api", "projects", "import"]:
                 return self.json(self.import_route(d, query))
             if parts == ["api", "pick"]:
