@@ -2405,7 +2405,7 @@ def attention_items(slug: str, tasks: list[Task], state: dict, merged: dict[str,
         def add(k: str, why: str, open_: str = "log") -> None:
             out.append({"project": slug, "task": t.id, "title": t.title, "kind": k, "reason": why, "open": open_})
 
-        if int(e.get("crashes", 0)) > retry_crashed:
+        if st != "done" and int(e.get("crashes", 0)) > retry_crashed:  # a finished task is no problem, whatever came before
             add("repeated", f"crashed {e['crashes']} times; auto-retry used up: {fail.splitlines()[0] if fail else ''}".strip())
         elif kind == "gate" and st != "done":
             add("gate", "checks failed: " + (fail.splitlines()[0] if fail else ""), "log")
@@ -2946,7 +2946,9 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
         if ok:
             sha = commit(p, task, wt, " → ".join(tried))
             keep_notes(p, task, summary)
-            entry.update(status="done", commit=sha, branch=f"auto/{task.id}", finished=dt.datetime.now().isoformat(timespec="seconds"))
+            # crashes and last_failure describe the unfinished work; the history stays in runs[]
+            entry.update(status="done", commit=sha, branch=f"auto/{task.id}", finished=dt.datetime.now().isoformat(timespec="seconds"),
+                         crashes=0, last_failure="")
             warn = large_files_note(p, store, task, wt, entry)
             p.path("reports").mkdir(exist_ok=True)
             p.path("reports").joinpath(f"{task.id}.md").write_text(

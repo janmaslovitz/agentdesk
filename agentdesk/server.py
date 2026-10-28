@@ -1866,7 +1866,18 @@ def update_install(confirm: bool = False) -> dict:
 
 
 QUIT = threading.Event()  # set when the dashboard shuts down; stops the auto-runner loop
-FLAGGED: dict[str, set[str]] = {}  # project -> flags already written to its log
+FLAGGED: dict[str, set[str]] = {}  # project -> cap/gate waits already written to its log
+ITEM_LOGGED: dict[str, dict[tuple[str, str], str]] = {}  # project -> (task, kind) -> reason last written to its log
+ATTENTION_LOGGED = "attention_logged.json"  # the same, per project on disk, so it survives a restart
+
+
+def attention_logged(p: core.Project) -> dict[tuple[str, str], str]:
+    """The needs-attention reasons last written to the project's log, loaded from disk on first use."""
+    if p.slug not in ITEM_LOGGED:
+        raw = core.read_json(p.path(ATTENTION_LOGGED), {})
+        ITEM_LOGGED[p.slug] = {tuple(k.split("|", 1)): str(v) for k, v in (raw if isinstance(raw, dict) else {}).items()
+                               if "|" in k}
+    return ITEM_LOGGED[p.slug]
 
 
 def run_alive(p: core.Project) -> tuple[bool, int | None]:
@@ -1920,11 +1931,19 @@ def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
                 did.append(f"recovered {tid}")
     items = project_attention(p, state, tasks)
     seen = FLAGGED.setdefault(p.slug, set())
-    for it in items:  # flags go to the project's log once; nothing else is done about them
-        key = f"{it['task']}|{it['kind']}|{it['reason']}"
-        if key not in seen:
-            seen.add(key)
+    logged = attention_logged(p)  # (task, kind) -> reason last written to the log
+    now = {(it["task"], it["kind"]): it["reason"] for it in items}
+    for it in items:  # flags go to the project's log; nothing else is done about them. Same problem, same reason: once
+        key = (it["task"], it["kind"])
+        if logged.get(key) != it["reason"]:
             store.log(f"needs attention: {it['task']} ({it['kind']}): {it['reason']}")
+    if now != logged:  # a problem that went away is forgotten, so it is logged again if it comes back
+        logged.clear()
+        logged.update(now)
+        try:  # kept on disk: a restarted dashboard must not log the same unchanged problems again
+            core.write_json(p.path(ATTENTION_LOGGED), {f"{t}|{k}": r for (t, k), r in now.items()})
+        except OSError:
+            pass
     if not cfg["enabled"]:
         return did
     if chat(p).approvals.pending():

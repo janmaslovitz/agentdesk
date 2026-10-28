@@ -8,6 +8,7 @@ from pathlib import Path
 
 HOME = Path(tempfile.mkdtemp(prefix="agentdesk-test-"))
 os.environ["AGENTDESK_HOME"] = str(HOME)
+os.environ.pop("AGENTDESK_SERVER_CONFIG", None)  # a host-wide server config (Debian package) must not leak into the tests
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"  # a system proxy must not intercept the tests' local servers
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

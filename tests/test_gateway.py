@@ -69,7 +69,7 @@ class Client:
 def gw(tmp_path):
     home = tmp_path / "srv"
     home.mkdir()
-    (home / "server.toml").write_text('host = "127.0.0.1"\nport = 0\nidle_stop_minutes = 30\n', encoding="utf-8")
+    (home / "server.toml").write_text('host = "127.0.0.1"\nport = 0\nidle_stop_minutes = 30\ndisk_reserve_gb = 0\n', encoding="utf-8")
     mgr = InstanceManager(home, config.load(home), command=fake_command)
     g, srv, stop = cli.start(["--home", str(home)], instances=mgr)
     mgr.audit = g.audit
