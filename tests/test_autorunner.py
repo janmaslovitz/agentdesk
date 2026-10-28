@@ -189,3 +189,61 @@ def test_gate_failure_and_unmerged_branch_flagged_no_merge(project):
     log = project.path("agentdesk.log").read_text(encoding="utf-8")
     assert "needs attention: 001 (gate)" in log and "needs attention: 002 (unmerged)" in log
     assert server.attention_all()["count"] >= 2
+
+
+def test_done_task_is_not_repeated_but_unfinished_is():
+    tasks = [T("001"), T("002")]
+    st = S(**{"001": {"status": "done", "crashes": 2, "last_failure": "worker exited unexpectedly (code 1)", "branch": "auto/001"},
+              "002": {"status": "pending", "crashes": 2, "last_failure": "worker exited unexpectedly (code 1)"}})
+    items = core.attention_items("p", tasks, st, {"001": True}, retry_crashed=1)
+    assert [(i["task"], i["kind"]) for i in items] == [("002", "repeated")]
+    st = S(**{"002": {"status": "working", "crashes": 2, "last_failure": "worker exited unexpectedly (code 1)"}})
+    assert [i["kind"] for i in core.attention_items("p", tasks[1:], st, {}, retry_crashed=1)] == ["repeated"]
+
+
+def test_finishing_a_task_resets_crashes(project, monkeypatch, tmp_path):
+    async def fake_route(_p, _store, _task, _meter):
+        return {"tier": "small", "why": "", "brief": "b"}
+
+    async def fake_work(_p, _store, _task, _wt, _tier, _brief, _meter):
+        return True, "summary"
+
+    monkeypatch.setattr(core, "route", fake_route)
+    monkeypatch.setattr(core, "work", fake_work)
+    monkeypatch.setattr(core, "ensure_worktree", lambda *a: tmp_path)
+    monkeypatch.setattr(core, "commit", lambda *a: "abc123")
+    monkeypatch.setattr(core, "keep_notes", lambda *a: None)
+    monkeypatch.setattr(core, "large_files_note", lambda *a: "")
+    store = core.Store(project)
+    state = S(**{"001": {"status": "pending", "crashes": 2, "last_failure": "worker exited unexpectedly (code 1)"}})
+
+    class M:
+        pass
+
+    meter = M()
+    meter.state = state
+    task = T("001")
+    import asyncio
+    asyncio.run(core.do_task(project, store, task, meter))
+    e = state["tasks"]["001"]
+    assert e["status"] == "done" and e["commit"] == "abc123"
+    assert e["crashes"] == 0 and e["last_failure"] == ""
+    assert core.attention_items("p", [task], state, {}) == []
+
+
+def test_needs_attention_is_logged_once_per_reason(project, monkeypatch):
+    monkeypatch.setattr(core, "autorunner_cfg", lambda *a: {**core.AUTO_DEFAULTS, "enabled": False})
+    monkeypatch.setattr(server, "ITEM_LOGGED", {})
+    reasons = iter(["crashed 2 times", "crashed 2 times", "crashed 3 times", "crashed 3 times"])
+    item = lambda r: [{"project": project.slug, "task": "002", "title": "t", "kind": "repeated", "reason": r, "open": "log"}]
+    monkeypatch.setattr(server, "project_attention", lambda *a, **k: item(next(reasons)))
+    alive = lambda p: (True, None)
+    lines = []
+    monkeypatch.setattr(core.Store, "log", lambda self, msg: lines.append(msg))
+    for _ in range(3):
+        server.autorun_project(project, starter=lambda *a: None, alive=alive)
+    assert len([m for m in lines if "needs attention" in m]) == 2
+    assert lines[-1].endswith("crashed 3 times")
+    server.ITEM_LOGGED.clear()  # a restarted dashboard remembers what it already logged
+    server.autorun_project(project, starter=lambda *a: None, alive=alive)
+    assert len([m for m in lines if "needs attention" in m]) == 2
