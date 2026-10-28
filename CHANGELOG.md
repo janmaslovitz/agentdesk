@@ -5,6 +5,16 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Changed
+- Server: **+ Add** is a real "New project" flow: AgentDesk makes the folder, runs `git init` on the base branch and a first
+  commit, and can also create a GitHub repository (public or private) with a logged-in gh account, set it as origin and
+  push. A failed GitHub step keeps the local project. The second tab is "Import existing repo" (clone by URL). Folder
+  fields, Browse, the clone-folder option and the "Git folder" export are hidden there, and `POST /api/projects` refuses a
+  folder path from the browser. The desktop App is unchanged.
+
+### Fixed
+- Browse in the desktop window shows the real error when the folder dialog can't open, not "only in the desktop window".
+
 
 ## 1.5.6 - 2026-10-26
 

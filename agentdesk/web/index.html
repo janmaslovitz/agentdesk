@@ -186,8 +186,11 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
 
 <dialog id="dProject" class="wide"><h3>New project</h3>
   <div id="pForm">
-  <div class="hint">1. Where is the code?</div>
-  <div class="tabs"><button type="button" id="pTab_dir" onclick="pTab('dir')">A folder on this computer</button><button type="button" id="pTab_git" onclick="pTab('git')">From GitHub (git URL)</button></div>
+  <div class="hint" id="pStep1">1. Where is the code?</div>
+  <div class="tabs"><button type="button" id="pTab_new" onclick="pTab('new')" style="display:none">New project</button><button type="button" id="pTab_dir" onclick="pTab('dir')">A folder on this computer</button><button type="button" id="pTab_git" onclick="pTab('git')">From GitHub (git URL)</button></div>
+  <div id="pPane_new" class="grp" style="display:none">
+    <div>A new, empty git repository is created for the project, in a folder named after it, with a first commit on the base branch.</div>
+  </div>
   <div id="pPane_dir" class="grp">
     <label for="pRepo" class="req">Repository folder (a git repo, or any folder: local version tracking can be set up)</label>
     <div class="pick"><input id="pRepo" placeholder="D:/work/my-repo" oninput="pCheck()"><button type="button" onclick="browse('pRepo')">Browse…</button></div>
@@ -207,11 +210,26 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
   <div class="grp">
     <label for="pName" class="req">Project name</label><input id="pName" placeholder="Sintec.PDF" oninput="pCheck()">
     <div class="err" id="pErr_name"></div>
-    <label for="pBase" id="pBaseL">Base branch tasks start from</label><input id="pBase" value="main">
+    <label for="pBase" id="pBaseL">Base branch tasks start from</label><input id="pBase" value="main" oninput="pCheck()">
+    <div class="err" id="pErr_base"></div>
     <label for="pPreset">Checks</label><select id="pPreset"></select>
     <label for="pAccount">Account</label><select id="pAccount"></select>
   </div>
-  <div class="hint" id="pWhere"></div>
+  <div id="pGhSec" style="display:none">
+    <div class="hint">3. GitHub (optional)</div>
+    <div class="grp">
+      <div id="pGhBox" style="display:none">
+        <label class="chk"><input type="checkbox" id="pGh" onchange="pCheck()"> Create a GitHub repository</label>
+        <div id="pGhOpts" style="display:none">
+          <label for="pGhAcct">GitHub account</label><select id="pGhAcct" onchange="pCheck()"></select>
+          <label>Visibility</label><div class="seg"><label><input type="radio" name="pvis" value="public" checked onchange="pCheck()"> Public</label><label><input type="radio" name="pvis" value="private" onchange="pCheck()"> Private</label></div>
+        </div>
+      </div>
+      <div class="hint" id="pGhNote" style="white-space:pre-line"></div>
+      <div class="err" id="pErr_gh"></div>
+    </div>
+  </div>
+  <div class="hint" id="pWhere" style="white-space:pre-line"></div>
   </div>
   <div id="pRun" style="display:none"><div id="pStatus" class="hint"></div><progress></progress></div>
   <pre id="pMsg" class="msgbox" style="display:none"></pre>
@@ -223,7 +241,7 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
     <div class="seg" id="xMode">
       <label><input type="radio" name="xmode" value="zip" checked onchange="xModeSet()"> Zip file</label>
       <label><input type="radio" name="xmode" value="branch" onchange="xModeSet()"> GitHub branch</label>
-      <label><input type="radio" name="xmode" value="git" onchange="xModeSet()"> Git folder</label>
+      <label id="xModeGit"><input type="radio" name="xmode" value="git" onchange="xModeSet()"> Git folder</label>
     </div>
     <p class="hint" id="xHint"></p>
     <div id="xRepoBox"><label for="xRepo">Config repo folder (empty: <code>.agentdesk/</code> in the project's repo)</label>
@@ -312,28 +330,58 @@ function openDlg(id) {
 function closeDlg(id) { $(id).close(); }
 function note(t) { if (chatFor) addMsg("assistant", "⚠ " + t); else alert(t); }
 
-let pMode = "dir", pBusyNow = false;
-function pOpen() {
+let pMode = "dir", pBusyNow = false, pGhSeq = 0;
+function pOpen() {  // desktop: a folder on this computer or a clone; server: a brand-new repo or a clone (folders are chosen by the server)
+  const desk = !!ov?.desktop;
   $("pPreset").innerHTML = (ov?.presets||[]).map(p => `<option>${esc(p)}</option>`).join("");
   $("pAccount").innerHTML = (ov?.accounts||[]).map(a => `<option>${esc(a.name)}</option>`).join("");
   for (const id of ["pRepo", "pUrl", "pBranch", "pClone", "pName"]) $(id).value = "";
   $("pBase").value = "main"; $("pAdv").open = false; pBusy(false); pMsg("");
-  pTab("dir");
+  $("pForm").style.display = ""; $("pGo").style.display = ""; $("pCancel").textContent = "Cancel";
+  $("pTab_new").style.display = desk ? "none" : "";
+  $("pTab_dir").style.display = desk ? "" : "none";
+  $("pAdv").style.display = desk ? "" : "none";
+  $("pTab_git").textContent = desk ? "From GitHub (git URL)" : "Import existing repo";
+  $("pStep1").textContent = desk ? "1. Where is the code?" : "1. Start from";
+  $("pGh").checked = false; $("pGhBox").style.display = "none"; $("pGhNote").textContent = "";
+  document.querySelector('input[name=pvis][value=public]').checked = true;
+  pTab(desk ? "dir" : "new");
+  if (!desk) pGhLoad();
+}
+async function pGhLoad() {  // the gh logins a GitHub repository can be created as
+  const seq = ++pGhSeq;
+  let r;
+  try { r = await (await fetch("/api/gh-accounts")).json(); } catch { r = {accounts: [], message: ""}; }
+  if (seq !== pGhSeq) return;
+  const accts = r.accounts || [];
+  $("pGhAcct").innerHTML = accts.map(a => `<option${a.active ? " selected" : ""}>${esc(a.login)}</option>`).join("");
+  $("pGhBox").style.display = accts.length ? "" : "none";
+  $("pGhNote").textContent = accts.length ? "" : "To also create a GitHub repository, log in to GitHub with the gh command-line tool (`gh auth login`) on the server." + (r.message ? "\n" + r.message : "");
+  pCheck();
 }
 function pTab(m) {
   pMode = m;
-  for (const k of ["dir", "git"]) { $("pPane_" + k).style.display = k === m ? "" : "none"; $("pTab_" + k).classList.toggle("on", k === m); }
-  $("pBaseL").textContent = m === "git" ? "Branch tasks start from (empty: the repository's default)" : "Base branch tasks start from";
+  for (const k of ["new", "dir", "git"]) { $("pPane_" + k).style.display = k === m ? "" : "none"; $("pTab_" + k).classList.toggle("on", k === m); }
+  $("pGhSec").style.display = m === "new" ? "" : "none";
+  $("pBaseL").textContent = m === "git" ? "Branch tasks start from (empty: the repository's default)" : m === "new" ? "Base branch (the first commit goes here)" : "Base branch tasks start from";
   $("pBase").placeholder = m === "git" ? "default branch" : "main";
   if (m === "git" && $("pBase").value === "main") $("pBase").value = "";
-  if (m === "dir" && !$("pBase").value) $("pBase").value = "main";
+  if (m !== "git" && !$("pBase").value) $("pBase").value = "main";
   pCheck();
 }
 function pMsg(t) { $("pMsg").textContent = t; $("pMsg").style.display = t ? "" : "none"; }
 function pErr(k, t) { $("pErr_" + k).textContent = t || ""; }
+const ghRepoName = n => n.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/-{2,}/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 100).replace(/[-.]+$/, "") || "project";
 function pValid() {
-  for (const k of ["repo", "url", "clone"]) pErr(k, "");
+  for (const k of ["repo", "url", "clone", "base", "gh"]) pErr(k, "");
+  $("pGhOpts").style.display = $("pGh").checked ? "" : "none";
   if (!$("pName").value.trim()) return false;
+  if (pMode === "new") {
+    const b = $("pBase").value.trim();
+    if (b && (/\s|\.\.|[~^:?*\[\\]/.test(b) || /^[-\/.]|[\/.]$|\.lock$/.test(b))) return pErr("base", "Not a valid branch name, e.g. main"), false;
+    if ($("pGh").checked && !$("pGhAcct").value) return pErr("gh", "Choose the GitHub account"), false;
+    return true;
+  }
   if (pMode === "dir") return !!$("pRepo").value.trim();
   const u = $("pUrl").value.trim();
   if (!u) return false;
@@ -345,14 +393,15 @@ function pWhere() {
   clearTimeout(pWhereT);
   pWhereT = setTimeout(async () => {
     const el = $("pWhere");
-    if (pMode !== "git") { el.textContent = ""; return; }
-    if ($("pClone").value.trim()) { el.textContent = "Will clone into the folder you chose: " + $("pClone").value.trim(); return; }
-    const u = $("pUrl").value.trim(), n = $("pName").value.trim();
+    if (pMode === "dir") { el.textContent = ""; return; }
+    if (pMode === "git" && $("pClone").value.trim()) { el.textContent = "Will clone into the folder you chose: " + $("pClone").value.trim(); return; }
+    const u = pMode === "git" ? $("pUrl").value.trim() : "", n = $("pName").value.trim();
     if (!u && !n) { el.textContent = "The code folder is named after the project and created automatically."; return; }
-    try { const r = await (await fetch("/api/import-folder?" + new URLSearchParams({name: n, url: u}))).json(); el.textContent = r.path ? "Will be cloned to " + r.path : ""; } catch { el.textContent = ""; }
+    const gh = pMode === "new" && $("pGh").checked && $("pGhAcct").value ? `\nGitHub repository: ${$("pGhAcct").value}/${ghRepoName(n)} (${document.querySelector('input[name=pvis]:checked').value})` : "";
+    try { const r = await (await fetch("/api/import-folder?" + new URLSearchParams({name: n, url: u}))).json(); el.textContent = r.path ? (pMode === "git" ? "Will be cloned to " : "Will be created at ") + r.path + gh : ""; } catch { el.textContent = ""; }
   }, 250);
 }
-function pCheck() { pErr("name", ""); pWhere(); if (!pBusyNow) $("pGo").disabled = !pValid(); }
+function pCheck() { pErr("name", ""); if (!pBusyNow) $("pGo").disabled = !pValid(); pWhere(); }
 function pBusy(on, text) {
   pBusyNow = on; $("pRun").style.display = on ? "" : "none"; $("pStatus").textContent = text || "";
   $("pGo").disabled = on || (!on && !pValid());
@@ -360,11 +409,12 @@ function pBusy(on, text) {
 }
 async function addProject() {
   if (!pValid()) return;
-  const git = pMode === "git";
+  const git = pMode === "git", fresh = pMode === "new", gh = fresh && $("pGh").checked;
   const body = {name: $("pName").value.trim(), base: $("pBase").value.trim(), preset: $("pPreset").value, account: $("pAccount").value};
-  if (git) Object.assign(body, {repo_url: $("pUrl").value.trim(), repo: $("pClone").value.trim(), base: $("pBase").value.trim() || $("pBranch").value.trim()});
+  if (fresh) Object.assign(body, {new: true}, gh ? {github: {account: $("pGhAcct").value, private: document.querySelector('input[name=pvis]:checked').value === "private"}} : {});
+  else if (git) Object.assign(body, {repo_url: $("pUrl").value.trim(), base: $("pBase").value.trim() || $("pBranch").value.trim()}, ov?.desktop ? {repo: $("pClone").value.trim()} : {});
   else body.repo = $("pRepo").value.trim();
-  pMsg(""); pBusy(true, git ? "Cloning the repository…" : "Creating the project…");
+  pMsg(""); pBusy(true, git ? "Cloning the repository…" : gh ? "Creating the project and the GitHub repository…" : "Creating the project…");
   let r;
   try {
     r = await api("/api/projects", body);
@@ -377,7 +427,13 @@ async function addProject() {
   } catch (e) { pBusy(false); pMsg("Could not reach the server."); return; }
   pBusy(false);
   if (r.error) { if (r.field) pErr(r.field, r.error); else pMsg(r.error); return; }
-  closeDlg("dProject"); cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
+  cur = r.slug; localStorage.setItem("agentdesk.project", cur); refreshAll();
+  if (r.github && !r.github.ok) {  // the project exists and works locally; only the GitHub step failed
+    $("pForm").style.display = "none"; $("pGo").style.display = "none"; $("pCancel").textContent = "Close";
+    pMsg(`The project was created and is ready to use (code in ${r.repo}, branch ${r.base}).\n\nThe GitHub step did not complete:\n${r.github.message}\n\nYou can set a remote and push later from the Git panel.`);
+    return;
+  }
+  closeDlg("dProject");
 }
 async function exportZip() {
   const r = await fetch(`/api/projects/${cur}/export`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({include_logs: $("xLogs").checked})});
@@ -390,6 +446,8 @@ async function exportZip() {
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); $("xMsg").textContent = "Downloaded " + name;
 }
 function xModeSet() {
+  $("xModeGit").style.display = ov?.desktop ? "" : "none";  // a "Git folder" is a path on this computer: desktop only
+  if (!ov?.desktop && document.querySelector('input[name=xmode]:checked').value === "git") document.querySelector('input[name=xmode][value=zip]').checked = true;
   const m = document.querySelector('input[name=xmode]:checked').value;
   $("xRepoBox").style.display = m === "git" ? "" : "none";
   $("xPushL").style.display = m === "zip" ? "none" : "";
@@ -401,7 +459,10 @@ function xModeSet() {
 async function browse(id) {
   const r = await api("/api/pick", {kind: "folder", start: $(id).value.trim()}).catch(() => ({}));
   if (r.ok && r.path) { $(id).value = r.path; $(id).dispatchEvent(new Event("input")); }
-  else if (r.available === false || !r.ok) { const m = id[0] === "x" ? "xMsg" : id[0] === "p" ? "pMsg" : "iMsg"; $(m).textContent = "Browse is only available in the desktop window; type the path."; }
+  else if (!r.ok) {
+    const t = r.available ? (r.message || "Could not open the folder dialog.") : "Browse is only available in the desktop window; type the path.";
+    if (id[0] === "p") pMsg(t); else if (id[0] === "i") iMsg(t); else $("xMsg").textContent = t;
+  }
 }
 async function exportGo() {
   const m = document.querySelector('input[name=xmode]:checked').value;

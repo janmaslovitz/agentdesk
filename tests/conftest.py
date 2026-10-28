@@ -9,6 +9,10 @@ from pathlib import Path
 HOME = Path(tempfile.mkdtemp(prefix="agentdesk-test-"))
 os.environ["AGENTDESK_HOME"] = str(HOME)
 os.environ["NO_PROXY"] = os.environ["no_proxy"] = "127.0.0.1,localhost"  # a system proxy must not intercept the tests' local servers
+# Run on an installed Server (e.g. as one of its own workers), the service's settings leak in: the gateway tests would
+# then load /etc/agentdesk-server/server.toml (the live port, host, limits) instead of the scratch home's server.toml.
+for _k in ("AGENTDESK_SERVER_CONFIG", "AGENTDESK_SERVER_HOME"):
+    os.environ.pop(_k, None)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402
