@@ -70,6 +70,9 @@ def wait(cond, t=4.0):
     return False
 
 
+memory_calls: list = []
+
+
 @pytest.fixture
 def chat(project, monkeypatch):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "x"],
@@ -77,6 +80,13 @@ def chat(project, monkeypatch):
     core.set_chat_mode(project, "coworker")
     LiveFake.made, LiveFake.script = [], []
     monkeypatch.setattr(server, "ClaudeSDKClient", LiveFake)
+    memory_calls.clear()
+
+    async def fake_memory(_p, _model, prompt):  # no real model call for the memory update after a burst
+        memory_calls.append(prompt)
+        return ""
+
+    monkeypatch.setattr(server, "memory_call", fake_memory)
     c = server.Chat(server.LOOP, project)
     yield c
     c.reset()
@@ -315,3 +325,10 @@ def test_a_stray_message_after_the_result_does_not_stay_busy(chat):
     assert chat.is_busy() is True
     chat.last_event -= 60  # nothing heard for a while, no tool running
     assert chat.is_busy() is False
+
+
+def test_live_burst_updates_the_memory(chat):
+    LiveFake.script = [[say("Merged 041."), result(0.10)]]
+    chat.start("merge 041")
+    assert wait(lambda: not chat.busy and len(memory_calls) >= 2)  # an empty answer is retried once, then the old memory kept
+    assert "User: merge 041" in memory_calls[0] and "Assistant: Merged 041." in memory_calls[0]

@@ -396,6 +396,25 @@ def test_memory_injected_into_prompt(chat):
     assert not chat.p.path("chat_memory.tmp").exists()
 
 
+def test_rules_injected_last_and_coworker_gets_role(chat):
+    chat.save_memory(memory_text("Deploy on Fridays"))
+    chat.p.path("chat_rules.md").write_text("- Answer in Russian, act on your own\n", encoding="utf-8")
+    for opts in (chat._assistant_options(), chat._coworker_options()):
+        sp = opts.system_prompt
+        assert "Deploy on Fridays" in sp and "act on your own" in sp
+        assert sp.index(server.RULES_HEADING) > sp.index(server.MEMORY_HEADING)  # the rules come last: they win
+    sp = chat._coworker_options().system_prompt
+    assert "chat.json" in sp and "chat_rules.md" in sp and "never an answer" in sp
+
+
+def test_export_carries_memory_and_rules(chat):
+    chat.save_memory(memory_text())
+    chat.p.path("chat_rules.md").write_text("- Be brief\n", encoding="utf-8")
+    chat.p.path("chat_archive.jsonl").write_text('{"role": "user", "text": "old"}\n', encoding="utf-8")
+    files = core.export_files(chat.p)
+    assert {"chat_memory.md", "chat_rules.md", "chat_archive.jsonl"} <= set(files)
+
+
 def test_memory_written_after_ask(project, monkeypatch):
     c, prompts = fake_chat(project, monkeypatch, [memory_text("Uses SQLite")])
     assert c.ask("we use sqlite")["text"] == "pong"

@@ -167,6 +167,7 @@ unclear), then say it's queued, and offer to start it. Never invent results: rea
 MEMORY_SECTIONS = ("Decisions", "Facts about the project", "Open questions", "User preferences")
 MEMORY_MAX_WORDS = 1500
 MEMORY_HEADING = "What you remember from earlier conversations"
+RULES_HEADING = "The user's rules for working with them (chat_rules.md; they override everything above)"
 
 ACK_RULE = """
 
@@ -209,6 +210,25 @@ async def memory_call(p: core.Project, model: str, prompt: str) -> str:
 
 MEMORY_NO_TOOLS = ("Bash", "PowerShell", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent")
 
+COWORKER_ROLE = """
+How you work: the user expects a colleague who acts, not one who waits for instructions.
+- Find things out yourself. When the user mentions a file, a task, a report, a branch, a build, an earlier
+  decision or a conversation you don't remember, read it first (the repository, the AgentDesk folder, git log,
+  the chat transcript), then answer from what you found. "I haven't read it" or "I'm not familiar with it" is
+  never an answer: it is your cue to go and read it now.
+- Your session may be fresh although the chat on the user's screen is long (the app was restarted or updated, or
+  the project was imported). The visible transcript is {folder}/chat.json (a JSON list of role/text entries,
+  newest at the end); older entries are in {folder}/chat_archive.jsonl (one JSON entry per line). When the user
+  refers to something said earlier, Grep it there or read the tail instead of asking the user to repeat it.
+- Ask only when a decision is really the user's: scope, priorities, something destructive or public they haven't
+  okayed. Otherwise take the sensible default, do it, and say what you chose.
+- Carry work through to a checked result; don't hand back half-done steps or a list of things the user could do.
+- The user's rules for working with them live in {folder}/chat_rules.md and are shown at the end of these
+  instructions; they override the defaults here. When the user asks you to change how you work (tone, autonomy,
+  what to report, what to do on your own), update chat_rules.md at once (a short Markdown bullet list; replace a
+  rule that conflicts), say what you changed and follow it from then on. Never say you can't change your rules.
+"""
+
 COWORKER_PROMPT = """You are the Coworker on the user's AgentDesk dashboard for the project "{name}". You work on
 your own: nothing you do waits for the user's approval, so act carefully. Be brief and plain; answer
 in the user's language.
@@ -229,7 +249,7 @@ Delegate bigger pieces of work to the workers as tasks; do small things yourself
 
 Shell commands (Bash/PowerShell) run without asking, but a guard refuses pushing, changing remotes,
 publishing, pull requests, resetting or switching to main, and editing AgentDesk's config; edits
-outside your worktree, tasks/ and notes.md are refused too. Don't try to work around a refusal:
+outside your worktree, tasks/, notes.md and chat_rules.md are refused too. Don't try to work around a refusal:
 say what you wanted to do and let the user do it. You have a budget per message
 (${budget:.2f}); finish with a short summary of what you did and what's left. Never invent results.
 """
@@ -476,6 +496,7 @@ class Chat:
         self.live_calls: dict = {}  # tool calls started and not answered yet
         self.cli_err: list[str] = []  # the last lines the CLI wrote to stderr (its own retry messages, errors)
         self.watching_run = False
+        self.live_prompt = ""  # the user's message of the current live burst (for the memory)
 
     # -- the visible transcript, kept in chat.json so it survives a restart (the SDK session does not)
 
@@ -541,10 +562,18 @@ class Chat:
         tmp.write_text(text.strip() + "\n", encoding="utf-8")
         core.replace_file(tmp, f)
 
+    def load_rules(self) -> str:
+        try:
+            return self.p.path("chat_rules.md").read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return ""
+
     def with_memory(self, prompt: str) -> str:
-        """The system prompt plus the memory as it is now (read when a session is created)."""
-        memory = self.load_memory()
-        return f"{prompt}\n# {MEMORY_HEADING}\n{memory}\n" if memory else prompt
+        """The system prompt plus the memory and the user's rules (chat_rules.md) as they are now (read when a
+        session is created). The rules go last: they override the defaults above."""
+        memory, rules = self.load_memory(), self.load_rules()
+        out = f"{prompt}\n# {MEMORY_HEADING}\n{memory}\n" if memory else prompt
+        return f"{out}\n# {RULES_HEADING}\n{rules}\n" if rules else out
 
     def update_memory(self, user: str, reply: str) -> None:
         """Ask a tool-free model call for the updated memory; on any failure keep the old one."""
@@ -596,7 +625,7 @@ class Chat:
         if name.startswith(MCP_PREFIX) or core.chat_settings("coworker").get("full_access"):
             return PermissionResultAllow()
         wt = core.cowork_path(self.p)
-        check = core.guard(wt, also=(self.p.dir / "tasks", self.p.dir / "notes.md"), never=(Path(self.p.cfg["repo"]["worktrees"]),),
+        check = core.guard(wt, also=(self.p.dir / "tasks", self.p.dir / "notes.md", self.p.dir / "chat_rules.md"), never=(Path(self.p.cfg["repo"]["worktrees"]),),
                            extra_deny=core.COWORK_DENY, who="the Coworker")
         return await check(name, args, ctx)
 
@@ -819,6 +848,7 @@ class Chat:
                                                  folder=self.p.dir, budget=float(cs["budget_usd"]))
             gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
             # Everything is allowed through can_use_tool (no guard, no hook); the project checkout is the working directory.
+            prompt = self.with_memory(prompt + COWORKER_ROLE.format(folder=self.p.dir))
             return core.options(self.p, scratch=False, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt + ACK_RULE,
                                 max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
                                 allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
@@ -826,7 +856,8 @@ class Chat:
                                 disallowed_tools=[], permission_mode="default",
                                 can_use_tool=self.coworker_permission, setting_sources=[], env=gate_env)
         wt = core.cowork_worktree(self.p)
-        prompt = self.with_memory(COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"])))
+        prompt = self.with_memory(COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"]))
+                                  + COWORKER_ROLE.format(folder=self.p.dir))
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
         # Shell, edit and run tools must not go in allowed_tools (that skips can_use_tool, i.e. the guard).
         # No setting_sources: a project's .claude/settings.json could allow commands past the guard.
@@ -942,6 +973,7 @@ class Chat:
         prompt = COWORKER_FULL_PROMPT.format(name=self.p.name, repo=self.p.repo, base=self.p.cfg["repo"]["base"],
                                              folder=self.p.dir, budget=float(cs["budget_usd"]))
         prompt += COWORKER_LIVE_ADDENDUM.format(burst=float(cs["budget_usd"]), daily=float(cs.get("daily_budget_usd") or 0))
+        prompt += COWORKER_ROLE.format(folder=self.p.dir)
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
         daily = float(cs.get("daily_budget_usd") or 0)
         # The process-wide limit is only a backstop (the CLI counts the spend of the whole process); the bursts are
@@ -1069,6 +1101,18 @@ class Chat:
             notes.append(f"Today's Coworker spending reached the daily budget of ${daily:.2f} (`[chat.coworker] daily_budget_usd`); "
                          "it takes no new work until tomorrow or until you raise it.")
         self._live_add({"role": "assistant", "kind": "live", "text": "\n".join(notes), "cost": cost, "tokens": tokens, "model": self.model})
+        user, self.live_prompt = self.live_prompt, ""
+        if user:
+            with self.note_lock:
+                tail = []
+                for m in reversed(self.history):
+                    if m.get("role") == "user":
+                        break
+                    if m.get("text"):
+                        tail.append(m["text"])
+            reply = "\n".join(reversed(tail)).strip()[-6000:]
+            if reply:  # update_memory blocks on a model call: off the event loop
+                threading.Thread(target=self.update_memory, args=(user, reply), daemon=True, name=f"chat-memory-{self.p.slug}").start()
 
     async def _pump(self, client, gen: int) -> None:
         """Read every message of the live session until it ends: answers, tool calls, background-task events and
@@ -1118,6 +1162,8 @@ class Chat:
             self.pump = asyncio.ensure_future(self._pump(client, self.generation))
         self.busy, self.auto_turn = True, False
         self.last_event, self.idle_warned = time.time(), False
+        if not text.startswith("[Scheduled checkup]"):
+            self.live_prompt = text  # the memory is updated from it when the burst ends
         await client.query(text)
         return {"started": True, "live": True}
 

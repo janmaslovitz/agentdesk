@@ -3094,7 +3094,7 @@ EXPORT_DIR = ".agentdesk"
 MAX_FILE_BYTES = 20 * 1024 * 1024      # one file in an import
 MAX_TOTAL_BYTES = 100 * 1024 * 1024    # everything in an import
 MAX_ENTRIES = 5000
-_EXPORT_TOP = ("project.toml", "notes.md", "state.json", "agentdesk.log")
+_EXPORT_TOP = ("project.toml", "notes.md", "state.json", "agentdesk.log", "chat_memory.md", "chat_rules.md", "chat_archive.jsonl")
 _EXPORT_DIRS = ("tasks", "reports")
 # runs/<id>.jsonl (the per-task run timelines) hold tool inputs and model text like agentdesk.log does, so they are
 # logs: exported only with include_logs (redacted like everything else) and accepted back on import.
