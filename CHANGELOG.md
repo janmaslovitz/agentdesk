@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.6.0 - 2026-11-11
+
 ### Added
 - **Parallel runs over a task graph.** A run starts every task whose dependencies are done, up to `[run] max_parallel`
   (default 3) at once, each in its own worktree; among ready tasks the one on the longest remaining chain (weighted by
