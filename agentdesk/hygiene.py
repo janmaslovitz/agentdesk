@@ -600,7 +600,7 @@ def measure(p: core.Project, cfg: dict | None = None, now: float | None = None) 
     rep = {"at": dt.datetime.fromtimestamp(now).isoformat(timespec="seconds"), "ts": now, "took_s": 0.0,
            "cfg": {k: v for k, v in cfg.items() if k != "errors"}, "errors": list(cfg.get("errors", [])),
            "targets": targets, "worktrees": wts, "data": data, "total": total,
-           "over_total": total > cfg["max_total_gb"] * GB, "advice": advice(p, len([i for i in wts["items"] if i["name"] != core.COWORK]))}
+           "over_total": total > cfg["max_total_gb"] * GB, "advice": advice(p, len([i for i in wts["items"] if i["name"] not in (core.COWORK, core.INTEGRATION)]))}
     rep["warnings"] = [f"{Path(t['path']).name} is {fmt(t['bytes'])} (limit {cfg['max_target_gb']:g} GB per target dir)"
                        for t in targets if t["over"]]
     if rep["over_total"]:
@@ -670,7 +670,7 @@ def plan(p: core.Project, cfg: dict, rep: dict, state: dict, registered: list[di
     w = worktrees_dir(p)
     ttl, now = float(cfg.get("worktree_ttl_hours") or 0), float(rep.get("ts") or time.time())
     for it in rep["worktrees"]["items"]:
-        if not it["registered"] or it["locked"] or it["name"] == core.COWORK or it["name"] in active or heads is None:
+        if not it["registered"] or it["locked"] or it["name"] in (core.COWORK, core.INTEGRATION) or it["name"] in active or heads is None:
             continue
         e = state.get("tasks", {}).get(it["name"], {})
         br = it["branch"]
@@ -714,7 +714,7 @@ def _cap_actions(p: core.Project, cfg: dict, rep: dict, state: dict, acts: list[
     if cap <= 0 or heads is None:
         return []
     planned = {_key(a["path"]) for a in acts if a["kind"] == "worktree"}
-    items = [it for it in rep["worktrees"]["items"] if it["name"] != core.COWORK]
+    items = [it for it in rep["worktrees"]["items"] if it["name"] not in (core.COWORK, core.INTEGRATION)]
     left = len([it for it in items if _key(it["path"]) not in planned])
     out = []
     done = [it for it in items if _key(it["path"]) not in planned and it["registered"] and not it["locked"]
@@ -735,7 +735,7 @@ def _halfwt_actions(rep: dict, registered: list[dict] | None, active: set[str], 
     reg = {_key(r["path"]) for r in registered}
     out = []
     for it in rep["worktrees"]["items"]:
-        if it["name"] in active or it["name"] == core.COWORK or _key(it["path"]) in reg:
+        if it["name"] in active or it["name"] in (core.COWORK, core.INTEGRATION) or _key(it["path"]) in reg:
             continue
         if os.path.lexists(_lp(Path(it["path"]) / ".git")) or (it["newest"] and now - it["newest"] < HALF_CREATED_S):
             continue

@@ -9,6 +9,17 @@ from agentdesk.core import Task
 GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@t"]
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def one_task_per_run(monkeypatch):
+    """These tests describe the one-task-per-run auto-runner ([run] max_parallel = 1); the graph mode is tested in
+    tests/test_dag.py."""
+    real = core.run_cfg
+    monkeypatch.setattr(core, "run_cfg", lambda p=None: {**real(p), "max_parallel": 1})
+
+
 def T(i, deps=()):
     return Task(id=i, title=f"task {i}", body="", depends=list(deps))
 

@@ -52,7 +52,7 @@ td, th { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: le
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .st { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
-.st.done { color: var(--ok); } .st.blocked { color: var(--bad); } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
+.st.done { color: var(--ok); } .st.blocked, .st.stuck { color: var(--bad); } .st.ready { color: var(--accent); } .st.waiting { opacity: .7; } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; } .muted { color: var(--muted); }
 .detail { padding: 0 14px 12px; margin: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.18); max-height: 560px; overflow: auto; }
 .detail.empty { display: none; }
@@ -1077,13 +1077,17 @@ async function refreshOnce() {
     $("rl").textContent = "unknown"; $("rlbar").style.width = "0"; $("rlw").textContent = "–"; $("rlwbar").style.width = "0";
     $("rld").textContent = "usage unknown — enter it under Accounts";
   }
-  $("tiers").textContent = Object.entries(st.tiers).map(([k,v]) => `${k}: ${v.model}${v.effort?" ("+v.effort+")":""}`).join(" · ");
+  const g = st.graph || {};
+  $("tiers").textContent = Object.entries(st.tiers).map(([k,v]) => `${k}: ${v.model}${v.effort?" ("+v.effort+")":""}`).join(" · ")
+    + (g.max_parallel ? ` · up to ${g.max_parallel} at once (${g.working||0} working${g.width ? ", graph width " + g.width : ""})` : "")
+    + ((g.errors||[]).length ? " · graph: " + g.errors.join("; ") : "")
+    + ((g.conflicts||[]).length ? ` · ${g.conflicts.length} file overlap(s) between parallel tasks` : "");
   $("tierAvg").textContent = Object.entries(st.tier_avg||{}).map(([k,v]) => `${k} tasks average ${v.avg_pct}% (${v.tasks})`).join(" · ") || "no per-tier usage averages yet";
   const taskRow = t => {
     const models = [...new Set(t.runs.filter(x => x.tier !== "router").map(x => x.model))].join(" → ");
     return `<tr class="task${t.id===selTask?" sel":""}" onclick="pickTask('${esc(t.id)}')"><td class="num">${esc(t.id)}</td>
-      <td>${esc(t.title)}${t.depends.length?`<div class="muted">after ${esc(t.depends.join(", "))}</div>`:""}</td>
-      <td><span class="st ${esc(t.status)}">${esc(t.status)}</span></td><td>${esc(t.tier||"auto")}${models?`<div class="muted">${esc(models)}</div>`:""}</td>
+      <td>${esc(t.title)}${t.depends.length?`<div class="muted">after ${esc(t.depends.join(", "))}${t.stuck_on?` · waits on blocked ${esc(t.stuck_on)}`:""}</div>`:""}</td>
+      <td><span class="st ${esc(t.state||t.status)}" title="${esc(t.status)}">${esc(t.state||t.status)}</span></td><td>${esc(t.tier||"auto")}${models?`<div class="muted">${esc(models)}</div>`:""}</td>
       <td class="num">${fmt(sumTok(t.tokens))}</td><td class="num">${money(t.cost)}<div class="muted">${t.runs.length?usedText(t.used_pct):""}</div></td>
       <td><button onclick="event.stopPropagation();runMode('task','${esc(t.id)}')" ${t.status==="done"||r.running?"disabled":""}>Run</button></td></tr>`;
   };
@@ -1358,8 +1362,9 @@ function showPlan(plan, running) {
     ? `<button class="primary" onclick="planAct('approve')">Approve and start</button><button onclick="planEdit()">Edit</button><button class="danger" onclick="planAct('cancel')">Cancel</button>`
     : plan.status === "approved" && running ? `<button class="danger" onclick="planAct('stop')">Stop</button>`
     : (plan.status === "approved" ? `<button class="primary" onclick="planAct('start')">Start</button>` : "") + `<button onclick="planAct('close')">Close</button>`;
-  $("plan").innerHTML = `<div class="approve plan"><div class="h">${head}: ${esc(plan.summary)} <span>${plan.tasks.length} task(s) · estimated ${money(lo)}–${money(hi)}</span></div>
-    <ol>${items}</ol><div class="row">${buttons}</div></div>`;
+  const warn = (plan.warnings||[]).length ? `<div class="muted" style="color:var(--warn)">${plan.warnings.map(esc).join("<br>")}</div>` : "";
+  $("plan").innerHTML = `<div class="approve plan"><div class="h">${head}: ${esc(plan.summary)} <span>${plan.tasks.length} task(s)${plan.width ? " · up to " + plan.width + " in parallel" : ""}${plan.by === "architect" ? " · by the architect" : ""} · estimated ${money(lo)}–${money(hi)}</span></div>
+    ${warn}<ol>${items}</ol><div class="row">${buttons}</div></div>`;
 }
 async function planAct(action) {
   const r = await api(`/api/p/${cur}/plan/${action}`, {});

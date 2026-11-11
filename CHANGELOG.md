@@ -5,12 +5,39 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- **Parallel runs over a task graph.** A run starts every task whose dependencies are done, up to `[run] max_parallel`
+  (default 3) at once, each in its own worktree; among ready tasks the one on the longest remaining chain (weighted by
+  tier) goes first. A blocked task only holds back what depends on it; tasks added during a run are picked up. Checks and
+  git steps run off the event loop (`[run] gate_parallel` limits checks at once); one run per project is enforced with an
+  OS lock (`run.lock`). `run PROJECT --parallel N`, `--auto`.
+- A task that depends on several tasks gets **all** their branches merged into its worktree (before: only the last one's).
+  A merge conflict is left for the worker to resolve; the task can't be committed while conflict markers remain.
+- `files = [...]` in task headers and plans: the graph flags tasks that may run at the same time but touch the same files
+  (plan warnings, `graph`, dashboard).
+- **Architect** (`architect PROJECT GOAL`, API, MCP; `[architect]`, default Opus at high effort): reads the repository and
+  drafts a parallel task graph with files, acceptance criteria, tiers and dependencies; the plan checker's problems
+  (cycles, missing criteria, overlapping parallel files) go back to it for up to `rounds` fixes. Nothing runs before approval.
+- **Integration** (`integrate PROJECT`, `[run] integrate_after`): merges every finished branch into `auto/integration` in
+  dependency order, skips a conflicting branch with what builds on it, runs the final checks, writes `reports/integration.md`.
+- **REST API** `/api/v1/...` and an **MCP server** (`python -m agentdesk mcp`) over one service layer (`service.py`): projects,
+  status, graph, task, log, add_task, plan / propose / approve / cancel / close, architect, run, stop, retry, integrate.
+  They work without the dashboard; runs start as detached processes.
+- `graph PROJECT` and `approve PROJECT [--start]` on the command line; the dashboard shows each task's graph state
+  (ready / waiting / stuck), how many run at once, file overlaps, and the plan's warnings and parallel width.
+- Checks get `AGENTDESK_TASK_ID` and `AGENTDESK_WORKTREE` so parallel checks can keep ports, databases and temp files apart.
+
 ### Changed
 - Server: **+ Add** is a real "New project" flow: AgentDesk makes the folder, runs `git init` on the base branch and a first
   commit, and can also create a GitHub repository (public or private) with a logged-in gh account, set it as origin and
   push. A failed GitHub step keeps the local project. The second tab is "Import existing repo" (clone by URL). Folder
   fields, Browse, the clone-folder option and the "Git folder" export are hidden there, and `POST /api/projects` refuses a
   folder path from the browser. The desktop App is unchanged.
+- Usage-window readings during parallel calls are marked shared (`usage_shared`, `usage_window_pct`) instead of being
+  charged to one task; the run's window use is split over its tasks by cost (`usage_share_pct`).
+- The auto-runner starts the whole graph (`run PROJECT --auto`) when `max_parallel` > 1, else one task per run as before.
+- The Build panel merges the chosen task branches in dependency order.
+- Task ids must start with a letter or digit.
 
 ### Fixed
 - Browse in the desktop window shows the real error when the folder dialog can't open, not "only in the desktop window".

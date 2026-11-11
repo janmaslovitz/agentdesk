@@ -166,6 +166,25 @@ usage_max_age_min = 30
 run_budget_usd = 40.0
 retries_per_tier = 2
 
+# Runs: up to max_parallel tasks of a project at once, each in its own worktree, in dependency (DAG) order, the task
+# on the longest remaining chain first. gate_parallel: how many tasks run their checks at the same time (0 = all;
+# 1 when the checks share a build folder anyway, e.g. one CARGO_TARGET_DIR). integrate_after = true: when a run ends
+# with finished work, merge the finished branches into auto/integration and run the final checks there.
+# A project can override any key in its project.toml under [run].
+[run]
+max_parallel = 3
+gate_parallel = 0
+integrate_after = false
+
+# Architect: reads the repository and turns a goal into a dependency graph of tasks (a draft plan you approve).
+# rounds: how many times it may fix the plan after the checks (cycles, files two parallel tasks both touch).
+[architect]
+model = "opus"
+effort = "high"
+max_turns = 60
+budget_usd = 4.0
+rounds = 3
+
 [router]
 model = "haiku"
 max_turns = 12
@@ -1146,17 +1165,21 @@ def create_new_project(name: str, base: str = "main", preset: str = "none", acco
 
 # ----------------------------------------------------------------------------- per-project state
 
+_LOG_LOCK = threading.Lock()  # parallel tasks log from worker threads (checks, git) and the event loop at once
+
+
 class Store:
     def __init__(self, p: Project):
         self.p = p
 
     def log(self, msg: str) -> None:
         line = f"[{dt.datetime.now():%m-%d %H:%M:%S}] {msg}"
-        print(line, flush=True)
-        lf = self.p.path("agentdesk.log")
-        reliability.rotate(lf)
-        with lf.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with _LOG_LOCK:
+            print(line, flush=True)
+            lf = self.p.path("agentdesk.log")
+            reliability.rotate(lf)
+            with lf.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
     def load(self) -> dict:
         s = self.p.path("state.json")
@@ -1185,6 +1208,7 @@ class Task:
     tier: str | None = None
     depends: list[str] = field(default_factory=list)
     crates: list[str] = field(default_factory=list)
+    files: list[str] = field(default_factory=list)   # what it touches (optional): the graph checks overlaps with it
 
 
 _TASK_SKIP = object()  # cached verdict for a file that isn't a runnable task (no header, draft, invalid)
@@ -1200,7 +1224,8 @@ def _parse_task(f: Path):
         h = tomllib.loads(m.group(1))
         if h.get("status") == "draft":
             return _TASK_SKIP
-        return Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), list(h.get("depends", [])), list(h.get("crates", [])))
+        return Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), [str(d) for d in h.get("depends", [])],
+                    list(h.get("crates", [])), [str(x) for x in h.get("files", [])])
     except (tomllib.TOMLDecodeError, KeyError):
         return _TASK_SKIP
 
@@ -1221,20 +1246,25 @@ def load_tasks(p: Project) -> list[Task]:
                 hit = _task_cache[f] = (key, _parse_task(f))
             t = hit[1]
             if t is not _TASK_SKIP:
-                tasks.append(replace(t, depends=list(t.depends), crates=list(t.crates)))
+                tasks.append(replace(t, depends=list(t.depends), crates=list(t.crates), files=list(t.files)))
         for f in [f for f in _task_cache if f.parent == p.tasks_dir and f not in seen]:
             del _task_cache[f]
     return tasks
 
 
-def add_task(p: Project, task_id: str, title: str, body: str, tier: str | None = None, depends: list[str] | None = None) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
-        raise ValueError("task ids use letters, digits, - and _")
+def add_task(p: Project, task_id: str, title: str, body: str, tier: str | None = None, depends: list[str] | None = None,
+             files: list[str] | None = None) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task_id) or task_id in (COWORK,):
+        raise ValueError("task ids use letters, digits, - and _ (and start with a letter or digit)")
+    if tier and tier not in TIER_ORDER:
+        raise ValueError(f"tier is one of {', '.join(TIER_ORDER)} (or empty: the router decides)")
     head = [f"id = {toml_str(task_id)}", f"title = {toml_str(title)}"]
     if tier:
         head.append(f"tier = {toml_str(tier)}")
     if depends:
         head.append("depends = [" + ", ".join(toml_str(d) for d in depends) + "]")
+    if files:
+        head.append("files = [" + ", ".join(toml_str(str(x)) for x in files) + "]")
     p.tasks_dir.mkdir(parents=True, exist_ok=True)
     f = p.tasks_dir / f"{task_id}.md"
     f.write_text("+++\n" + "\n".join(head) + "\n+++\n\n" + body.strip() + "\n", encoding="utf-8")
@@ -1319,6 +1349,24 @@ def check_plan_tasks(p: Project, tasks) -> list[dict]:
     return out
 
 
+def plan_nodes(tasks: list[dict]):
+    from . import dag
+    return [dag.Node(t["key"], list(t["depends"]), list(t.get("files") or []), t.get("tier"), t["title"]) for t in tasks]
+
+
+def plan_warnings(tasks: list[dict]) -> list[str]:
+    """What is risky (not wrong) about a checked plan: tasks that may run at the same time but touch the same files
+    (their branches will likely conflict: order them with depends, or merge them into one task)."""
+    from . import dag
+    nodes = plan_nodes(tasks)
+    out = [f"{a} and {b} may run in parallel but both touch {', '.join(f[:5])}: make one depend on the other, or merge them"
+           for a, b, f in dag.concurrent_conflicts(nodes)]
+    no_files = [t["key"] for t in tasks if not t.get("files")]
+    if no_files and len(tasks) > 1:
+        out.append(f"no files listed for {', '.join(no_files[:10])}: overlaps with parallel tasks can't be checked")
+    return out
+
+
 def plan_task_body(t: dict) -> str:
     parts = [t["goal"]]
     if t["files"]:
@@ -1366,7 +1414,8 @@ def propose_plan(p: Project, summary: str, tasks) -> dict:
             raise ValueError("an approved plan is still going (one approved plan per project at a time); "
                              "it has to finish, or the user closes it on the plan card")
         norm = check_plan_tasks(p, tasks)
-        plan = {"status": "draft", "summary": str(summary or "").strip()[:500], "tasks": norm, "version": 1, "created": _now()}
+        plan = {"status": "draft", "summary": str(summary or "").strip()[:500], "tasks": norm, "version": 1, "created": _now(),
+                "warnings": plan_warnings(norm)}
         _write_drafts(p, norm)
         save_plan(p, plan)
     Store(p).log(f"planner: draft plan with {len(norm)} task(s) in tasks/drafts/")
@@ -1379,7 +1428,7 @@ def update_plan(p: Project, summary: str | None, tasks) -> dict:
         if not plan or plan.get("status") != "draft":
             raise ValueError("there is no draft plan to change (an approved plan isn't rewritten); propose_plan makes one")
         norm = check_plan_tasks(p, tasks)
-        plan.update(tasks=norm, version=int(plan.get("version", 1)) + 1, updated=_now())
+        plan.update(tasks=norm, version=int(plan.get("version", 1)) + 1, updated=_now(), warnings=plan_warnings(norm))
         if summary:
             plan["summary"] = str(summary).strip()[:500]
         _write_drafts(p, norm)
@@ -1424,7 +1473,7 @@ def approve_plan(p: Project) -> dict[str, str]:
             ids[t["key"]] = f"{n:03d}"
             n += 1
         for t in order:
-            add_task(p, ids[t["key"]], t["title"], plan_task_body(t), t["tier"], [ids.get(d, d) for d in t["depends"]])
+            add_task(p, ids[t["key"]], t["title"], plan_task_body(t), t["tier"], [ids.get(d, d) for d in t["depends"]], t["files"])
         _clear_drafts(p)
         plan.update(status="approved", ids=ids, approved=_now(), seen={})
         save_plan(p, plan)
@@ -1457,8 +1506,17 @@ def plan_view(p: Project, plan: dict | None = None) -> dict | None:
         rows.append({**t, "id": tid or t["key"], "depends": [ids.get(d, d) for d in t["depends"]],
                      "status": state.get(tid, {}).get("status", "pending") if tid else "draft"})
     lo, hi = plan_estimate(plan["tasks"])
+    from . import dag
+    try:
+        lv = dag.levels(plan_nodes(plan["tasks"]))
+        width = dag.width(plan_nodes(plan["tasks"]))
+    except dag.GraphError:
+        lv, width = {}, None
+    for r, t in zip(rows, plan_order(plan["tasks"])):
+        r["level"] = lv.get(t["key"])
     return {"status": plan["status"], "summary": plan.get("summary", ""), "version": plan.get("version", 1),
-            "tasks": rows, "estimate": [lo, hi]}
+            "tasks": rows, "estimate": [lo, hi], "warnings": plan.get("warnings", []), "width": width,
+            "by": plan.get("by", "planner"), "goal": plan.get("goal", "")}
 
 
 def plan_brief(p: Project) -> str:
@@ -2102,21 +2160,85 @@ def add_worktree(p: Project, wt: Path, branch: str, base: str) -> None:
             (wt / name).write_bytes(src.read_bytes())
 
 
-def ensure_worktree(p: Project, store: Store, task: Task) -> Path:
+def branch_exists(p: Project, branch: str) -> bool:
+    return git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], p.repo)[0] == 0
+
+
+def dependency_branches(p: Project, task: Task, state: dict) -> list[str]:
+    """The branches of the task's finished dependencies that still exist, in `depends` order."""
+    out = []
+    for dep in task.depends:
+        e = state["tasks"].get(dep, {})
+        if e.get("status") == "done":
+            br = e.get("branch") or f"auto/{dep}"
+            if br not in out and branch_exists(p, br):
+                out.append(br)
+    return out
+
+
+def unmerged_files(wt: Path) -> list[str]:
+    """Files with unresolved merge conflicts in a worktree."""
+    code, out = git(["diff", "--name-only", "--diff-filter=U"], wt)
+    return [l.strip() for l in out.splitlines() if l.strip()] if code == 0 else []
+
+
+def merge_into(wt: Path, branch: str, message: str) -> list[str]:
+    """Merge `branch` into the worktree's branch (a merge commit). [] on success; on a conflict the merge is left in
+    progress (markers in the files) and the conflicted files are returned."""
+    code, out = git(["merge", "--no-ff", "--no-edit", "-m", message, branch], wt)
+    if code == 0:
+        return []
+    files = unmerged_files(wt)
+    if not files:  # failed for another reason (not a conflict): nothing is left half way
+        git(["merge", "--abort"], wt)
+        raise RuntimeError(f"git merge {branch} failed: {out.strip()[:500]}")
+    return files
+
+
+def ensure_worktree(p: Project, store: Store, task: Task, state: dict | None = None) -> Path:
+    """The task's worktree on `auto/<id>`. A new one starts from the first finished dependency's branch (else the base
+    branch) and gets every other finished dependency's branch merged in, so the task sees all the work it builds on.
+    A merge conflict is left for the worker (see worktree_conflicts); an existing worktree is reused as it is."""
     wt = Path(p.cfg["repo"]["worktrees"]) / task.id
     if wt.exists():
         return wt
     why = worktree_cap_reason(p, task.id)
     if why:
         raise RuntimeError(why)
+    state = state if state is not None else store.load()
     branch, base = f"auto/{task.id}", p.cfg["repo"]["base"]
-    state = store.load()
-    for dep in task.depends:
-        if state["tasks"].get(dep, {}).get("status") == "done":
-            base = f"auto/{dep}"
+    deps = dependency_branches(p, task, state)
+    if deps:
+        base = deps[0]
     add_worktree(p, wt, branch, base)
     store.log(f"{task.id}: worktree {wt} on {branch} from {base}")
+    for br in deps[1:]:
+        files = merge_into(wt, br, f"{task.id}: merge {br} (dependency)")
+        if files:
+            store.log(f"{task.id}: merging {br} left conflicts in {', '.join(files[:10])}; the worker resolves them")
+            break  # one merge at a time: the rest can't start while this one is in progress
+        store.log(f"{task.id}: merged {br}")
     return wt
+
+
+def worktree_conflicts(p: Project, task: Task, wt: Path, state: dict) -> str:
+    """The brief's preamble when the worktree has an unfinished dependency merge (conflicts, or branches not merged
+    yet because an earlier merge stopped), else ""."""
+    files = unmerged_files(wt)
+    missing = [br for br in dependency_branches(p, task, state)
+               if git(["merge-base", "--is-ancestor", br, "HEAD"], wt)[0] != 0]
+    if not files and not missing:
+        return ""
+    parts = ["## First: finish merging the dependencies\n"]
+    if files:
+        parts.append("Merging the branches this task depends on stopped with conflicts in: "
+                     + ", ".join(f"`{f}`" for f in files[:30]) + ". Resolve them keeping the intent of both sides, then "
+                     "`git add` the files (don't commit; the orchestrator does).")
+    if missing:
+        parts.append(("After that, merge" if files else "Merge") + " these dependency branches too, resolving any conflict the same way: "
+                     + ", ".join(f"`git merge --no-edit {br}`" for br in missing)
+                     + (" (run `git commit --no-edit` first to finish the merge in progress)." if files else "."))
+    return "\n".join(parts) + "\n\n"
 
 
 def cowork_path(p: Project) -> Path:
@@ -2166,12 +2288,16 @@ def trim(output: str, limit: int) -> str:
 
 
 def run_gates(p: Project, store: Store, wt: Path, kind: str, crates: list[str] | None) -> tuple[bool, str]:
+    """The project's `kind` checks in `wt`. Besides [gates.env] they get AGENTDESK_TASK_ID (the worktree's name) and
+    AGENTDESK_WORKTREE, so checks of tasks running in parallel can keep their ports, databases and temp files apart
+    (e.g. a port from 20000 + hash, or a database under the worktree)."""
     g = p.cfg.get("gates", {})
     sel = "--workspace" if not crates else " ".join(f"-p {c}" for c in crates)
+    env = {"AGENTDESK_TASK_ID": wt.name, "AGENTDESK_WORKTREE": str(wt), **{k: str(v) for k, v in g.get("env", {}).items()}}
     for cmd in g.get(kind, []):
         cmd = cmd.replace("{crates}", sel)
         store.log(f"  gate: {cmd}")
-        code, out = run(cmd, wt, env={k: str(v) for k, v in g.get("env", {}).items()}, timeout=int(g.get("timeout_s", 3600)), shell=True)
+        code, out = run(cmd, wt, env=env, timeout=int(g.get("timeout_s", 3600)), shell=True)
         if code != 0:
             return False, f"$ {cmd}\n{trim(out, int(g.get('max_feedback_chars', 6000)))}"
     return True, ""
@@ -2271,7 +2397,7 @@ def worktree_cap_reason(p: "Project", task_id: str) -> str | None:
     if (root / task_id).exists() or not root.is_dir():
         return None
     try:
-        n = sum(1 for d in root.iterdir() if d.is_dir() and not d.is_symlink() and d.name != COWORK)
+        n = sum(1 for d in root.iterdir() if d.is_dir() and not d.is_symlink() and d.name not in (COWORK, INTEGRATION))
     except OSError:
         return None
     if n >= cap:
@@ -2539,6 +2665,34 @@ class Meter:
         self.p, self.store, self.state = p, store, state
         self.limits = settings()["limits"]
         self.acct = p.account.get("name", "default")
+        # Shared by the tasks of one run when they go in parallel: at most `gate_sem` checks at a time (None = no
+        # limit), and one git operation on the repository's worktrees/branches at a time.
+        self.gate_sem: asyncio.Semaphore | None = None
+        self.repo_lock = threading.Lock()
+        self.active = 0   # model calls going right now (several in a parallel run)
+        self.starts = 0   # model calls started so far
+
+    def begin(self) -> dict:
+        """Mark the start of a model call: a token for end()/release()."""
+        self.active += 1
+        self.starts += 1
+        return {"before": self.mark(), "shared": self.active > 1, "n": self.starts, "open": True}
+
+    def end(self, tok: dict) -> dict:
+        """usage fields for a call started with begin(). If another call overlapped it, the account's usage delta
+        belongs to all of them: usage_used_pct is unknown and the delta is kept as usage_window_pct (share_usage
+        splits the run's delta by cost at the end). cost_usd and tokens come from the SDK per call either way."""
+        u = self.used(tok["before"])
+        shared = tok["shared"] or self.starts != tok["n"] or self.active > 1
+        self.release(tok)
+        if shared:
+            u["usage_window_pct"], u["usage_used_pct"], u["usage_shared"] = u["usage_used_pct"], None, True
+        return u
+
+    def release(self, tok: dict) -> None:
+        if tok.get("open"):
+            tok["open"] = False
+            self.active = max(0, self.active - 1)
 
     def mark(self) -> dict | None:
         """The current usage reading, to compare with a later one."""
@@ -2853,10 +3007,22 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
                    allowed_tools=["Read", "Grep", "Glob"], disallowed_tools=["Edit", "Write", "Bash", "PowerShell"],
                    permission_mode="default", setting_sources=["project"], output_format={"type": "json_schema", "schema": ROUTER_SCHEMA})
     result = None
-    before = meter.mark()
+    tok = meter.begin()
     delays, tries = network_delays(), 0
     act = Activity(p, task.id, "router")
     act.add("start", tier="router", model=r["model"], effort=r.get("effort"))
+    try:
+        result = await _route_loop(p, store, task, meter, opts, r, act, tok, delays)
+    finally:
+        meter.release(tok)
+    if not result or result.get("tier") not in TIER_ORDER:
+        result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
+    act.add("routed", tier=result.get("tier"), text=result.get("why", ""))
+    return result
+
+
+async def _route_loop(p: Project, store: Store, task: Task, meter: Meter, opts, r: dict, act, tok: dict, delays: list) -> dict | None:
+    result, tries = None, 0
     while True:
         try:
             async for msg in query(prompt=ROUTER_PROMPT.format(notes=store.notes(), id=task.id, title=task.title, body=task.body), options=opts):
@@ -2867,7 +3033,7 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
                     entry.setdefault("runs", []).append({"tier": "router", "model": r["model"], "effort": r.get("effort"),
                                                          "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
                                                          "error": msg.is_error, "tokens": usage_tokens(msg.usage), "at": dt.datetime.now().isoformat(timespec="seconds"),
-                                                         **meter.used(before)})
+                                                         **meter.end(tok)})
                     store.save(meter.state)
                     if isinstance(msg.structured_output, dict):
                         result = msg.structured_output
@@ -2884,10 +3050,142 @@ async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
             act.add("network_retry", text=str(e)[:200] or type(e).__name__, delay_s=delays[tries])
             await asyncio.sleep(delays[tries])
             tries += 1
-    if not result or result.get("tier") not in TIER_ORDER:
-        result = {"tier": "standard", "why": "router gave no usable answer", "brief": task.body}
-    act.add("routed", tier=result.get("tier"), text=result.get("why", ""))
     return result
+
+
+ARCHITECT_SCHEMA = {"type": "object", "required": ["summary", "tasks"], "properties": {
+    "summary": {"type": "string"},
+    "tasks": {"type": "array", "items": {"type": "object", "required": ["title", "goal", "done_when", "files", "depends"], "properties": {
+        "title": {"type": "string"}, "goal": {"type": "string"},
+        "done_when": {"type": "array", "items": {"type": "string"}},
+        "files": {"type": "array", "items": {"type": "string"}},
+        "tier": {"type": "string", "enum": TIER_ORDER},
+        "depends": {"type": "array", "items": {"type": "string"}}}}}}}
+
+ARCHITECT_PROMPT = """You are the architect of an automated coding team. Turn the goal below into a dependency graph of
+tasks for worker agents. Workers run in parallel, each in its own git worktree on its own branch; a task starts when
+everything it depends on is done, from a branch that already contains that work. Each worker sees only its own task.
+
+First read the repository (Read, Grep, Glob): its layout, conventions, tests and instructions (CLAUDE.md, AGENTS.md,
+README). Be thorough but don't read everything. Then design the graph:
+- Each task is one coherent change a worker can finish in one session, with its tests. Prefer 3-12 tasks; never more
+  than {max_tasks}. Don't split what must change together; don't bundle unrelated work.
+- Maximize safe parallelism: tasks that touch disjoint files run side by side. Put shared foundations (data models,
+  interfaces, schemas, config, helpers) first and make the tasks using them depend on them.
+- Two tasks that may run at the same time must not edit the same file: make one depend on the other, or merge them.
+  List in `files` every file a task will create or edit (folders allowed, e.g. "src/api/").
+- goal: what to build or change and why, where (files, functions), the interfaces or contracts it must provide or
+  follow (names, signatures, data formats) so parallel tasks fit together, and constraints.
+- done_when: concrete, checkable acceptance criteria (tests that pass, commands that succeed, behaviour).
+- tier: mechanical (clear local edits), standard (normal feature or debugging work), hard (cross-module design,
+  subtle algorithms). Choose the cheapest tier that will do it well.
+- depends: the 1-based positions of earlier tasks in your list as "d1", "d2", ..., or ids of queued tasks below.
+  Only real dependencies: an unneeded edge costs parallelism.
+
+The project's checks after every task: {gates}
+Queued tasks that aren't done yet (you may depend on them; don't redo them):
+{queued}
+Project notes:
+{notes}
+
+Goal:
+{goal}
+
+Answer with the plan as JSON: summary (one line) and tasks.
+"""
+
+ARCHITECT_FIX = """The plan checker found problems. Fix them and answer with the whole corrected plan (same JSON format).
+
+{problems}
+"""
+
+
+def architect_review(p: Project, raw: dict) -> tuple[list[dict] | None, list[str], list[str]]:
+    """(normalized plan tasks or None, problems that must be fixed, warnings) for the architect's JSON answer."""
+    tasks = raw.get("tasks") if isinstance(raw, dict) else None
+    if not isinstance(tasks, list) or not tasks:
+        return None, ["the plan has no tasks"], []
+    conv = []
+    for t in tasks:
+        if not isinstance(t, dict):
+            return None, ["each task must be an object"], []
+        crit = [str(c).strip() for c in t.get("done_when") or [] if str(c).strip()]
+        conv.append({"title": t.get("title"), "goal": t.get("goal"), "files": t.get("files") or [], "tier": t.get("tier") or None,
+                     "depends": t.get("depends") or [], "body": ("## Done when\n" + "\n".join(f"- {c}" for c in crit)) if crit else ""})
+    try:
+        norm = check_plan_tasks(p, conv)
+    except ValueError as e:
+        return None, [str(e)], []
+    problems = [f"task {t['key']} ({t['title']}) has no acceptance criteria (done_when)" for t in norm if "## Done when" not in t["body"]]
+    return norm, problems, plan_warnings(norm)
+
+
+async def architect(p: Project, goal: str) -> dict:
+    """Design a task graph for `goal` and save it as the project's draft plan (replacing a draft that is there). The
+    plan is checked (ids, cycles, files two parallel tasks both touch); problems go back to the architect up to
+    [architect] rounds times. Returns the plan view. Nothing runs before the plan is approved."""
+    _load_sdk()
+    a = settings()["architect"]
+    store = Store(p)
+    state = store.load()
+    meter = Meter(p, store, state)
+    gates = "; ".join(p.cfg.get("gates", {}).get("quick", [])) or "(none)"
+    open_tasks = [t for t in load_tasks(p) if state["tasks"].get(t.id, {}).get("status") != "done"]
+    queued = "\n".join(f"- {t.id}: {t.title}" + (f" (after {', '.join(t.depends)})" if t.depends else "") for t in open_tasks[:40]) or "(none)"
+    opts = options(p, role="router", log=store.log, model=a["model"], effort=a.get("effort"), max_turns=int(a["max_turns"]),
+                   max_budget_usd=float(a["budget_usd"]), cwd=str(p.repo), allowed_tools=["Read", "Grep", "Glob"],
+                   disallowed_tools=["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"], permission_mode="default",
+                   setting_sources=["project"], output_format={"type": "json_schema", "schema": ARCHITECT_SCHEMA})
+    message = ARCHITECT_PROMPT.format(max_tasks=MAX_PLAN_TASKS, gates=gates, queued=queued, notes=store.notes(), goal=goal.strip())
+    act = Activity(p, "_architect", "architect")
+    act.add("start", tier="architect", model=a["model"], effort=a.get("effort"), text=goal[:ACTIVITY_TEXT])
+    store.log(f"architect: designing a plan ({a['model']}{', ' + a['effort'] if a.get('effort') else ''})")
+    norm, problems, warnings, cost = None, ["no answer"], [], 0.0
+    rounds = max(0, int(a.get("rounds", 3)))
+    async with ClaudeSDKClient(options=opts) as client:
+        for rnd in range(rounds + 1):
+            await client.query(message)
+            raw = None
+            async for msg in client.receive_response():
+                meter.see(msg)
+                act.see(msg)
+                if isinstance(msg, ResultMessage):
+                    cost += msg.total_cost_usd or 0.0
+                    if msg.subtype == "error_max_budget_usd":
+                        problems = ["the architect's budget ran out"]
+                    if isinstance(msg.structured_output, dict):
+                        raw = msg.structured_output
+                    elif msg.result and (m := re.search(r"\{.*\}", msg.result, re.S)):
+                        try:
+                            raw = json.loads(m.group(0))
+                        except ValueError:
+                            raw = None
+            if raw is None:
+                problems = ["the answer was not the plan JSON"]
+            else:
+                norm, problems, warnings = architect_review(p, raw)
+            act.add("check", ok=not problems, text="; ".join(problems + warnings)[:ACTIVITY_TEXT] or "plan ok")
+            if norm is not None and not problems and not warnings:
+                break
+            if rnd == rounds or "budget ran out" in " ".join(problems):
+                break
+            store.log(f"architect: round {rnd + 1}: " + "; ".join(problems + warnings)[:300])
+            message = ARCHITECT_FIX.format(problems="\n".join(f"- {x}" for x in problems + warnings))
+    if norm is None or problems:
+        store.log(f"architect: no usable plan ({'; '.join(problems)[:300]}); spent {cost:.2f} USD")
+        raise RuntimeError("the architect gave no usable plan: " + "; ".join(problems))
+    summary = str((raw or {}).get("summary") or goal).strip()
+    with PLAN_LOCK:
+        old = load_plan(p)
+        if plan_active(old):
+            raise RuntimeError("an approved plan is still going; close it on the plan card (or with the API) first")
+        plan = {"status": "draft", "summary": summary[:500], "tasks": norm, "version": int((old or {}).get("version", 0)) + 1,
+                "created": _now(), "warnings": warnings, "by": "architect", "goal": goal.strip()[:4000], "cost_usd": round(cost, 4)}
+        _write_drafts(p, norm)
+        save_plan(p, plan)
+    store.log(f"architect: draft plan with {len(norm)} task(s)" + (f", {len(warnings)} warning(s)" if warnings else "")
+              + f"; spent {cost:.2f} USD")
+    return plan_view(p, plan) or {}
 
 
 async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter) -> tuple[bool, str]:
@@ -2902,6 +3200,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
     message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
     attempts = int(s["limits"]["retries_per_tier"])
     attempt, net_try, session_id, delays = 1, 0, None, network_delays()
+    tok: dict = {}
     act = Activity(p, task.id, "worker")
     while True:
         # A network error (reset, refused, dropped ...) ends the connection, not the task: wait, reconnect to the same
@@ -2911,7 +3210,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                 while attempt <= attempts:
                     if meter.stop_reason():
                         return False, summary
-                    before = meter.mark()
+                    tok = meter.begin()
                     store.log(f"{task.id}: {tier} ({t['model']}{', ' + t['effort'] if t.get('effort') else ''}) attempt {attempt}")
                     act.add("start", tier=tier, model=t["model"], effort=t.get("effort"), attempt=attempt)
                     await client.query(message)
@@ -2927,7 +3226,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                             entry.setdefault("runs", []).append({"tier": tier, "model": t["model"], "effort": t.get("effort"),
                                                                  "cost_usd": msg.total_cost_usd, "turns": msg.num_turns,
                                                                  "error": msg.is_error, "attempt": attempt, "tokens": usage_tokens(msg.usage),
-                                                                 "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.used(before)})
+                                                                 "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.end(tok)})
                             try:
                                 run = act.take_stats()
                                 run.update(turns=msg.num_turns, cost_usd=msg.total_cost_usd, duration_ms=msg.duration_ms, tier=tier, attempt=attempt)
@@ -2935,7 +3234,8 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                             except Exception as e:  # stats must never break a run
                                 store.log(f"{task.id}: tool stats failed ({e})")
                             store.save(meter.state)
-                    ok, failure = run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
+                    meter.release(tok)  # (already released by end() unless the answer had no result)
+                    ok, failure = await check_worktree(p, store, task, wt, meter)
                     gates = p.cfg.get("gates", {}).get("quick", [])
                     act.add("check", ok=ok, gates=len(gates), text="; ".join(gates) if ok else failure[-ACTIVITY_TEXT:])
                     if ok:
@@ -2951,6 +3251,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                         act.add("retry", attempt=attempt, text="checks failed; the worker is asked to fix the cause")
             return False, summary
         except Exception as e:
+            meter.release(tok)
             if not is_transient(e) or net_try >= len(delays):
                 raise
             store.log(f"{task.id}: network error ({str(e)[:120] or type(e).__name__}); retrying in {delays[net_try]:g}s "
@@ -2962,9 +3263,39 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
             net_try += 1
 
 
+async def check_worktree(p: Project, store: Store, task: Task, wt: Path, meter: Meter) -> tuple[bool, str]:
+    """The quick checks of a worker's attempt, off the event loop (other tasks of a parallel run keep streaming), at
+    most `meter.gate_sem` at a time. Unresolved merge conflicts fail before any check runs."""
+    def go() -> tuple[bool, str]:
+        left = unmerged_files(wt)
+        if left:
+            return False, ("The checks failed: unresolved merge conflicts remain in " + ", ".join(left[:30])
+                           + ". Resolve them and `git add` the files.")
+        return run_gates(p, store, wt, "quick", task.crates or changed_crates(wt, p.cfg["repo"]["base"]))
+    if getattr(meter, "gate_sem", None) is None:
+        return await asyncio.to_thread(go)
+    async with meter.gate_sem:
+        return await asyncio.to_thread(go)
+
+
+async def in_repo(meter: Meter, fn, *args):
+    """Run a blocking git step in a thread, one at a time per run (worktree add, merges, commits)."""
+    lock = getattr(meter, "repo_lock", None) or threading.Lock()  # (a bare meter in tests has none)
+
+    def go():
+        with lock:
+            return fn(*args)
+    return await asyncio.to_thread(go)
+
+
+# Build/test leftovers a worker's run leaves in the worktree that must never be committed even when the repository
+# doesn't ignore them (in parallel branches they turn into binary merge conflicts). Tracked files are unaffected.
+JUNK_GLOBS = ("**/__pycache__/**", "**/*.pyc", "**/.pytest_cache/**", "**/.mypy_cache/**", "**/.ruff_cache/**")
+
+
 def commit(p: Project, task: Task, wt: Path, tiers: str) -> str:
     # .code-graph/ is the code-graph MCP index: never commit it (info/exclude is per common git dir, so don't rely on it)
-    git(["add", "-A", "--", ".", ":(exclude).code-graph"], wt)
+    git(["add", "-A", "--", ".", ":(exclude).code-graph", *[f":(exclude,glob){g}" for g in JUNK_GLOBS]], wt)
     git(["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".code-graph"], wt)
     code, out = git(["commit", "-q", "-m", f"{task.id}: {task.title}\n\nAutomated by AgentDesk ({tiers}).\n\n{p.cfg['repo']['co_author']}"], wt)
     if code != 0 and "nothing to commit" not in out:
@@ -3012,13 +3343,16 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
         task.crates = [c for c in plan["crates"] if re.fullmatch(r"[A-Za-z0-9_-]+", c)]
     store.save(state)
     store.log(f"{task.id}: routed to {plan['tier']} ({plan.get('why', '')})")
-    wt = ensure_worktree(p, store, task)
+    wt = await in_repo(meter, ensure_worktree, p, store, task, state)
+    preamble = await in_repo(meter, worktree_conflicts, p, task, wt, state)
+    if preamble:
+        Activity(p, task.id, "orchestrator").add("merge_conflict", text=preamble[:ACTIVITY_TEXT])
     tier, tried = plan["tier"], []
     while tier:
         tried.append(tier)
-        ok, summary = await work(p, store, task, wt, tier, plan["brief"], meter)
+        ok, summary = await work(p, store, task, wt, tier, preamble + plan["brief"], meter)
         if ok:
-            sha = commit(p, task, wt, " → ".join(tried))
+            sha = await in_repo(meter, commit, p, task, wt, " → ".join(tried))
             keep_notes(p, task, summary)
             # crashes and last_failure describe the unfinished work; the history stays in runs[]
             entry.update(status="done", commit=sha, branch=f"auto/{task.id}", finished=dt.datetime.now().isoformat(timespec="seconds"),
@@ -3044,25 +3378,317 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
     store.log(f"{task.id}: blocked after {' → '.join(tried)}")
 
 
-async def run_queue(p: Project, only: str | None = None, max_tasks: int | None = None) -> None:
+def run_cfg(p: Project | None = None) -> dict:
+    """[run] from settings.toml with the project's [run] on top: max_parallel (>= 1), gate_parallel (0 = all),
+    integrate_after."""
+    cfg = dict(settings().get("run", {}))
+    if p is not None:
+        cfg.update(p.cfg.get("run", {}) or {})
+    try:
+        n = max(1, int(cfg.get("max_parallel", 1)))
+    except (TypeError, ValueError):
+        n = 1
+    try:
+        g = max(0, int(cfg.get("gate_parallel", 0)))
+    except (TypeError, ValueError):
+        g = 0
+    return {"max_parallel": n, "gate_parallel": g, "integrate_after": bool(cfg.get("integrate_after", False))}
+
+
+class RunLock:
+    """One run process per project: an exclusive OS lock on `run.lock` in the project folder, released by the OS when
+    the process ends (also when it is killed), so a stale lock can't exist. `held_elsewhere(p)` asks without taking it."""
+
+    def __init__(self, p: Project, name: str = "run"):
+        self.path = p.path(f"{name}.lock")
+        self.f = None
+
+    def acquire(self) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(self.path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            f.close()
+            return False
+        self.f = f
+        return True
+
+    def release(self) -> None:
+        if self.f is None:
+            return
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.f.seek(0)
+                msvcrt.locking(self.f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        self.f.close()
+        self.f = None
+
+    def __enter__(self):
+        if not self.acquire():
+            raise RunBusy(f"another run of this project is going (lock {self.path})")
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+    @staticmethod
+    def held_elsewhere(p: Project, name: str = "run") -> bool:
+        probe = RunLock(p, name)
+        if probe.acquire():
+            probe.release()
+            return False
+        return True
+
+
+class RunBusy(RuntimeError):
+    """A run (or an integration) of the project is already going."""
+
+
+def _flagged(e: dict, retry_crashed: int) -> bool:
+    """A task the auto-runner leaves for a human: crashed too often, or its checks failed last time."""
+    return int(e.get("crashes", 0)) > retry_crashed or classify_failure(e.get("last_failure"), "pending") == "gate"
+
+
+async def _guarded_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
+    """do_task for a parallel run: an unexpected error ends this task (back to pending, counted as a crash), not the
+    whole run with its other tasks."""
+    try:
+        await do_task(p, store, task, meter)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        entry = meter.state["tasks"].setdefault(task.id, {"title": task.title})
+        entry.update(status="pending", last_failure=f"worker exited unexpectedly: {type(e).__name__}: {str(e)[:500]}",
+                     crashes=int(entry.get("crashes", 0)) + 1)
+        store.save(meter.state)
+        store.log(f"{task.id}: failed with {type(e).__name__}: {str(e)[:300]}")
+        Activity(p, task.id, "orchestrator").add("crash", text=f"{type(e).__name__}: {e}")
+
+
+async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | None = None, auto: bool = False) -> dict:
+    """The orchestrator: run the project's task graph with up to `max_parallel` tasks at once. A task starts as soon as
+    everything it depends on is done; among ready tasks the one on the longest remaining chain goes first. A blocked
+    task only holds back what depends on it. Tasks added while the run goes are picked up. `max_tasks` caps how many
+    start; `auto` (the auto-runner) skips tasks flagged for a human (see attention_items). Returns a summary."""
+    from . import dag
     store = Store(p)
     state = store.load()
     state["budget_base"] = state.get("spent_usd", 0.0)  # the run budget counts from now
     meter = Meter(p, store, state)
-    done = 0
-    for task in load_tasks(p):
-        if max_tasks and done >= max_tasks:
-            break
-        if only and task.id != only:
+    cfg = run_cfg(p)
+    n = max(1, int(max_parallel or cfg["max_parallel"]))
+    g = cfg["gate_parallel"]
+    meter.gate_sem = asyncio.Semaphore(g) if 0 < g < n else None
+    retry = autorunner_cfg(p)["retry_crashed"] if auto else 0
+    running: dict[str, asyncio.Task] = {}
+    started: list[str] = []
+    said: set[str] = set()
+    stop = None
+    run_before = meter.mark()
+    store.log(f"run started: up to {n} task(s) at once" + (f", checks {g} at a time" if meter.gate_sem else ""))
+    try:
+        while True:
+            tasks = {t.id: t for t in load_tasks(p)}
+            nodes = dag.nodes_from_tasks(tasks.values())
+            errs = dag.validate(nodes, [tid for tid, e in state["tasks"].items() if e.get("status") == "done"])
+            for e in errs:
+                if f"err|{e}" not in said:
+                    said.add(f"err|{e}")
+                    store.log(f"task graph: {e} (the tasks involved can't start)")
+            stop = stop or meter.stop_reason()
+            if not stop and (max_tasks is None or len(started) < max_tasks):
+                skip = set(started)  # each task at most once per run (one that ends not done waits for the next run)
+                if auto:
+                    skip |= {tid for tid in tasks if _flagged(state["tasks"].get(tid, {}), retry)}
+                for tid in dag.ready(nodes, state, skip):
+                    if len(running) >= n or (max_tasks is not None and len(started) >= max_tasks):
+                        break
+                    cap = worktree_cap_reason(p, tid)
+                    if cap:
+                        if f"cap|{cap}" not in said:
+                            said.add(f"cap|{cap}")
+                            store.log(f"{tid} waits: {cap}")
+                        break
+                    running[tid] = asyncio.create_task(_guarded_task(p, store, tasks[tid], meter), name=f"task-{tid}")
+                    started.append(tid)
+                    if len(running) > 1 or n > 1:
+                        store.log(f"{tid}: started ({len(running)} of {n} slots busy)")
+            if not running:
+                break
+            finished, _ = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
+            for tid in [t for t, job in running.items() if job in finished]:
+                running.pop(tid)
+    finally:
+        for job in running.values():  # only on cancellation / a crash of the loop itself
+            job.cancel()
+    statuses = {tid: state["tasks"].get(tid, {}).get("status", "pending") for tid in started}
+    nodes = dag.nodes_from_tasks(load_tasks(p))
+    stuck = dag.stuck(nodes, state)
+    summary = {"started": started, "done": [t for t, s_ in statuses.items() if s_ == "done"],
+               "blocked": [t for t, s_ in statuses.items() if s_ == "blocked"],
+               "stuck": sorted(stuck), "stopped": stop}
+    share_usage(state, started, run_before, meter.mark())
+    store.save(state)
+    if stop:
+        store.log(f"stopping: {stop}")
+    store.log(f"run finished: {len(started)} task(s) started, {len(summary['done'])} done, {len(summary['blocked'])} blocked"
+              + (f", {len(stuck)} waiting on a blocked task" if stuck else "")
+              + f"; project total {state.get('spent_usd', 0):.2f} USD")
+    if summary["done"] and cfg["integrate_after"] and not stop:
+        try:
+            summary["integration"] = await asyncio.to_thread(integrate, p)
+        except Exception as e:  # the run's work is committed either way
+            store.log(f"integration failed: {type(e).__name__}: {e}")
+    return summary
+
+
+def share_usage(state: dict, task_ids: list[str], before: dict | None, after: dict | None) -> None:
+    """A parallel run's account usage (percent points of the window, from the readings before and after the run) split
+    over its tasks by what each spent in the run (cost_usd from the SDK): tasks[id].usage_share_pct, and the run's total
+    in state.last_run_usage. Nothing when there's no newer reading."""
+    if not before or not after or before.get("at") == after.get("at") or not task_ids:
+        return
+    total = max(0.0, round((after["utilization"] - before["utilization"]) * 100, 2))
+    since = before.get("at") or ""
+    costs = {}
+    for tid in task_ids:
+        runs = state["tasks"].get(tid, {}).get("runs", [])
+        costs[tid] = sum((r.get("cost_usd") or 0.0) for r in runs if str(r.get("at", "")) >= since)
+    whole = sum(costs.values())
+    for tid, c in costs.items():
+        if whole > 0:
+            state["tasks"][tid]["usage_share_pct"] = round(total * c / whole, 2)
+    state["last_run_usage"] = {"used_pct": total, "tasks": len(task_ids), "from": before.get("at"), "to": after.get("at")}
+
+
+async def run_queue(p: Project, only: str | None = None, max_tasks: int | None = None, max_parallel: int | None = None,
+                    auto: bool = False) -> None:
+    """`run PROJECT [TASK]`: one task (whatever its dependencies say), or the task graph (run_dag)."""
+    if not only:
+        await run_dag(p, max_parallel, max_tasks, auto)
+        return
+    store = Store(p)
+    state = store.load()
+    state["budget_base"] = state.get("spent_usd", 0.0)
+    meter = Meter(p, store, state)
+    task = next((t for t in load_tasks(p) if t.id == only), None)
+    if task is None:
+        store.log(f"run: no task {only}")
+        return
+    if (why := meter.stop_reason()):
+        store.log(f"stopping before {task.id}: {why}")
+        return
+    await do_task(p, store, task, meter)
+    store.log(f"run finished: 1 task(s); project total {state.get('spent_usd', 0):.2f} USD")
+
+
+# ----------------------------------------------------------------------------- integration: one branch with all the work
+
+INTEGRATION = "_integration"            # the integration worktree's folder (never a task id: those don't start with _)
+INTEGRATION_BRANCH = "auto/integration"
+
+
+def integrate(p: Project, branch: str = INTEGRATION_BRANCH, final: bool = True) -> dict:
+    """Merge every finished task's branch that isn't in the base branch yet into `branch` (made fresh from the base,
+    in its own worktree), in dependency order, then run the final checks there. A branch that conflicts is skipped
+    with everything built on it. Never touches the base branch or the checkout. Writes reports/integration.md."""
+    from . import dag
+    store = Store(p)
+    state = store.load()
+    base = p.cfg["repo"]["base"]
+    tasks = load_tasks(p)
+    nodes = dag.nodes_from_tasks(tasks)
+    order = dag.topo_order(nodes)
+    titles = {t.id: t.title for t in tasks}
+    wt = Path(p.cfg["repo"]["worktrees"]) / INTEGRATION
+    if wt.exists():
+        git(["merge", "--abort"], wt)
+        code, out = git(["checkout", "-q", "-B", branch, base], wt)
+        if code != 0:
+            raise RuntimeError(f"can't reset the integration worktree: {out.strip()[:300]}")
+        git(["reset", "-q", "--hard", base], wt)
+        git(["clean", "-q", "-fd"], wt)
+    else:
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        code, out = git(["worktree", "add", "-q", "-B", branch, str(wt), base], p.repo)
+        if code != 0:
+            raise RuntimeError(f"git worktree add failed: {out.strip()[:300]}")
+    merged, skipped, already, covered = [], [], [], {}
+    bad: set[str] = set()
+    done = [tid for tid in order if state["tasks"].get(tid, {}).get("status") == "done"
+            and branch_exists(p, state["tasks"][tid].get("branch") or f"auto/{tid}")]
+    br_of = {tid: state["tasks"][tid].get("branch") or f"auto/{tid}" for tid in done}
+    for tid in done:  # a branch another finished branch already contains comes in with it (conflicts resolved there)
+        for other in done:
+            if other != tid and tid in dag.ancestors(nodes, other) and \
+                    git(["merge-base", "--is-ancestor", br_of[tid], br_of[other]], p.repo)[0] == 0:
+                covered[tid] = other
+                break
+    for tid in done:
+        br = br_of[tid]
+        if tid in covered:
             continue
-        if not only and not ready(task, state):
+        if tid in bad:
+            skipped.append({"task": tid, "reason": "builds on a task that conflicted"})
             continue
-        if (why := meter.stop_reason()):
-            store.log(f"stopping before {task.id}: {why}")
-            break
-        await do_task(p, store, task, meter)
-        done += 1
-    store.log(f"run finished: {done} task(s); project total {state.get('spent_usd', 0):.2f} USD")
+        if git(["merge-base", "--is-ancestor", br, "HEAD"], wt)[0] == 0:
+            already.append(tid)
+            continue
+        code, out = git(["merge", "--no-ff", "--no-edit", "-m", f"integrate {tid}: {titles.get(tid, '')}", br], wt)
+        if code != 0:
+            files = unmerged_files(wt)
+            git(["merge", "--abort"], wt)
+            skipped.append({"task": tid, "reason": "merge conflict" if files else out.strip()[:300], "files": files[:30]})
+            bad |= dag.descendants(nodes, [tid]) | {tid}
+            store.log(f"integration: {tid} conflicts ({', '.join(files[:5]) or out.strip()[:120]}); skipped with what builds on it")
+            continue
+        merged.append(tid)
+    for tid in done:  # report what came in through a branch built on it
+        if tid in covered:
+            top = covered[tid]
+            while top in covered:
+                top = covered[top]
+            (merged if top in merged else already if top in already else skipped).append(
+                tid if top in merged or top in already else {"task": tid, "reason": f"comes with {top}, which was skipped"})
+    merged.sort(key=order.index)
+    already.sort(key=order.index)
+    ok, failure = (True, "")
+    if final and merged:
+        ok, failure = run_gates(p, store, wt, "final", None)
+    sha = git(["rev-parse", "--short", "HEAD"], wt)[1].strip()
+    res = {"branch": branch, "commit": sha, "merged": merged, "already_in": already, "skipped": skipped,
+           "via": {t: c for t, c in covered.items()},
+           "checks": None if not (final and merged) else ok, "failure": failure[-3000:] if failure else "",
+           "at": _now(), "worktree": str(wt)}
+    state = store.load()
+    state["integration"] = {k: v for k, v in res.items() if k != "failure"} | {"failure": failure[-1500:]}
+    store.save(state)
+    lines = [f"# Integration: `{branch}` at {sha}", "",
+             f"Base `{base}`. Merged in dependency order: {', '.join(merged) or 'nothing new'}.", ""]
+    if already:
+        lines.append(f"Already contained: {', '.join(already)}.")
+    for s_ in skipped:
+        lines.append(f"- Skipped {s_['task']}: {s_['reason']}" + (f" ({', '.join(s_.get('files') or [])})" if s_.get("files") else ""))
+    if res["checks"] is not None:
+        lines += ["", "Final checks: " + ("passed." if ok else "FAILED."), *(["", "```", failure[-3000:], "```"] if failure else [])]
+    p.path("reports").mkdir(exist_ok=True)
+    p.path("reports").joinpath("integration.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    store.log(f"integration: {branch} at {sha}; merged {len(merged)}, skipped {len(skipped)}"
+              + ("" if res["checks"] is None else f"; final checks {'passed' if ok else 'FAILED'}"))
+    return res
 
 
 async def plan_tasks(p: Project, only: str | None = None) -> None:
@@ -3085,6 +3711,10 @@ def final_gates(p: Project, task_id: str) -> None:
 
 def run_async(coro) -> None:
     asyncio.run(coro)
+
+
+def run_async_result(coro):
+    return asyncio.run(coro)
 
 
 # ----------------------------------------------------------------------------- export / import of a project
@@ -3670,6 +4300,13 @@ def check_build_selection(p: "Project", version, tasks) -> tuple[dict | None, st
     if bad:
         return None, "not a finished task with a branch auto/<id>: " + ", ".join(bad[:10])
     ids = sorted(set(tasks), key=lambda x: (len(x), x))
+    try:  # dependencies before what builds on them (ids are usually in that order already)
+        from . import dag
+        order = {tid: i for i, tid in enumerate(dag.topo_order(dag.nodes_from_tasks(
+            sorted(load_tasks(p), key=lambda t: (len(t.id), t.id)))))}
+        ids.sort(key=lambda x: order.get(x, len(order)))
+    except Exception:
+        pass
     return {"version": v, "ref": plan["ref"], "branch": f"build/{v}", "tasks": ids,
             "merge": [x for x in ids if not known[x]["in_base"]], "seen": list(known)}, None
 

@@ -26,7 +26,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, hygiene, reliability
+from . import core, dag, hygiene, reliability, service
 
 _SDK_NAMES = ('AgentDefinition', 'AssistantMessage', 'ClaudeSDKClient', 'HookMatcher', 'PermissionResultAllow', 'PermissionResultDeny', 'RateLimitEvent', 'ResultMessage', 'SystemMessage', 'TaskNotificationMessage', 'TaskStartedMessage', 'TextBlock', 'ToolResultBlock', 'ToolUseBlock', 'UserMessage', 'create_sdk_mcp_server')
 
@@ -66,7 +66,7 @@ class Runner:
         return self.proc is not None and self.proc.poll() is None
 
     def start(self, args: list[str]) -> str | None:
-        if self.running():
+        if self.running() or core.RunLock.held_elsewhere(self.p):
             return "a run is already going for this project"
         gate = core.disk_gate()
         if gate:  # the server's disk budget / this user's quota (running work is never stopped by it)
@@ -299,6 +299,9 @@ call propose_plan with:
   hard, or empty to let the router decide); depends (what must be done first: d1, d2, ... for this
   plan's tasks by position, or ids of tasks already queued).
 Prefer few, self-contained tasks; split only where one worker would otherwise do too much at once.
+Tasks run in parallel (each in its own branch) as soon as their dependencies are done: list the files each task
+touches, and never let two tasks that may run at the same time edit the same file (add a depends, or merge them);
+propose_plan answers with WARNING lines for such overlaps: fix them with update_plan.
 
 The plan is a draft: nothing runs until the user presses "Approve and start" on the plan card. Then the
 drafts become queued tasks and the workers run them in dependency order. You don't approve, start or
@@ -785,6 +788,10 @@ class Chat:
             for t in v.get("tasks", []):
                 lines.append(f"{t['id']} {t['title']} ({t['tier'] or 'tier: router'}"
                              + (f"; after {', '.join(t['depends'])}" if t["depends"] else "") + ")")
+            for w in v.get("warnings", []):
+                lines.append(f"WARNING: {w}")
+            if v.get("width"):
+                lines.append(f"Up to {v['width']} task(s) can run in parallel.")
             lo, hi = v.get("estimate", [0, 0])
             lines.append(f"Estimated ${lo:.2f}-${hi:.2f}. The user sees it as a card with Approve and start / Edit / Cancel; "
                          "nothing runs before they approve.")
@@ -1689,7 +1696,8 @@ def task_row(t: core.Task, e: dict) -> dict:
         for k, v in (r.get("tokens") or {}).items():
             tok[k] = tok.get(k, 0) + v
     return {"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "status": e.get("status", "pending"),
-            "used_pct": task_used(runs), "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
+            "used_pct": task_used(runs) if task_used(runs) is not None or e.get("usage_share_pct") is None else e["usage_share_pct"],
+            "usage_shared": e.get("usage_share_pct") is not None and task_used(runs) is None, "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
             "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", "")}
 
 
@@ -1728,7 +1736,11 @@ def task_detail(p: core.Project, t: core.Task) -> dict:
 
 def project_state(p: core.Project) -> dict:
     state = core.Store(p).load()
-    tasks = [task_row(t, state["tasks"].get(t.id, {})) for t in core.load_tasks(p)]
+    loaded = core.load_tasks(p)
+    tasks = [task_row(t, state["tasks"].get(t.id, {})) for t in loaded]
+    gv = dag.view(dag.nodes_from_tasks(loaded), state)
+    for row, n in zip(tasks, gv["nodes"]):  # the graph's view of each task: ready / waiting / stuck, level
+        row.update(state=n["state"], level=n["level"], stuck_on=n["stuck_on"])
     s = core.settings()
     mode = core.chat_mode(p)
     cs = core.chat_settings(mode)
@@ -1750,6 +1762,9 @@ def project_state(p: core.Project) -> dict:
             "reading": reading_view(p.account.get("name", "default")), "max_age_min": core.usage_max_age_min(),
             "auto_error": auto_error(p.account.get("name", "default")) if p.account.get("kind") != "api_key" else None,
             "tier_avg": tier_averages(tasks),
+            "graph": {"width": gv["width"], "errors": gv["errors"], "conflicts": gv["conflicts"],
+                      "max_parallel": core.run_cfg(p)["max_parallel"], "working": sum(1 for t in tasks if t["status"] in ("routing", "working")),
+                      "integration": state.get("integration")},
             "tiers": {k: {"model": v["model"], "effort": v.get("effort")} for k, v in s["tiers"].items()}}
 
 
@@ -1937,7 +1952,7 @@ def run_alive(p: core.Project) -> tuple[bool, int | None]:
         pid = 0
     if r.proc is not None and r.proc.pid == pid:
         return False, r.proc.returncode
-    return core.pid_alive(pid), None
+    return core.pid_alive(pid) or core.RunLock.held_elsewhere(p), None
 
 
 def project_attention(p: core.Project, state: dict | None = None, tasks: list | None = None) -> list[dict]:
@@ -2013,6 +2028,14 @@ def autorun_project(p: core.Project, starter=None, alive=None) -> list[str]:
         return did
     seen.difference_update({k for k in seen if k.startswith(("cap|", "gate|"))})
     again = int(state["tasks"].get(t.id, {}).get("crashes", 0)) > 0
+    if core.run_cfg(p)["max_parallel"] > 1:  # one run takes the whole graph, several tasks at once
+        err = starter(p, ["run", p.slug, "--auto"])
+        if err:
+            store.log(f"auto-runner: could not start the task graph: {err}")
+        else:
+            store.log(f"auto-runner: started the task graph (from {t.id}" + (", retry after crash" if again else "") + ")")
+            did.append(f"started graph from {t.id}")
+        return did
     err = starter(p, run_args(p, "task", t.id) or [])
     if err:
         store.log(f"auto-runner: could not start {t.id}: {err}")
@@ -2555,6 +2578,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self.guard(False):
             return None
         parts = [x for x in self.path.split("?")[0].split("/") if x]
+        if parts[:2] == ["api", "v1"]:
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).items()}
+            code, obj = service.rest("GET", [urllib.parse.unquote(x) for x in parts[2:]], q, {})
+            return self.json(obj, code)
         if not parts or parts == ["index.html"]:
             return self.send(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
         if parts == ["api", "attention"]:
@@ -2612,6 +2639,9 @@ class Handler(BaseHTTPRequestHandler):
         query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
         upload = parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")
         d = {} if upload else self.body()
+        if parts[:2] == ["api", "v1"]:
+            code, obj = service.rest("POST", [urllib.parse.unquote(x) for x in parts[2:]], query, d if isinstance(d, dict) else {})
+            return self.json(obj, code)
         try:
             if parts == ["api", "update", "install"]:
                 return self.json(update_install(d.get("confirm") is True))

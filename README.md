@@ -147,7 +147,7 @@ command-line argument; use the OS environment instead.
 
 1. You add tasks: **+ Task**, or describe the work to the project's assistant in the chat (it
    writes the task for you).
-2. **Run next** / **Run all**: a cheap router (Haiku) reads the task and the repo, picks a tier
+2. **Run next** / **Run all**: tasks run in parallel in dependency order (see "Parallel runs" below). A cheap router (Haiku) reads the task and the repo, picks a tier
    and writes a brief. The worker — Haiku (mechanical), Sonnet (standard) or Opus at high effort
    (hard) — does it in its own git worktree on branch `auto/<id>`, never touching your checkout.
 3. AgentDesk runs the checks itself (no model tokens). Failures go back to the worker, trimmed;
@@ -158,6 +158,82 @@ command-line argument; use the OS environment instead.
 Limits: a budget per call and per run, and a pause at the account's usage threshold
 (`data/settings.toml`, `[limits]`). Workers can't push, change remotes, publish or edit outside
 their worktree (`[guard]`).
+
+## Parallel runs, the task graph and the architect
+
+Tasks form a dependency graph (`depends` in the task header). A run (**Run all**, `run PROJECT`, the API) starts every
+task whose dependencies are done, up to `[run] max_parallel` at once (default 3; `--parallel N` for one run), each in its
+own worktree on `auto/<id>`. Among ready tasks the one on the longest remaining chain goes first (tasks weighted by tier:
+mechanical 1, standard 3, hard 8). A blocked task holds back only what depends on it ("stuck" on the dashboard); the
+rest goes on. Each task starts at most once per run; tasks added while it runs are picked up.
+
+```toml
+[run]                 # settings.toml, or a project's project.toml to override
+max_parallel = 3
+gate_parallel = 0     # checks at the same time (0 = all); 1 if the checks share one build folder
+integrate_after = false
+```
+
+- **Several dependencies:** the task's worktree starts from the first dependency's branch and gets the others merged in.
+  A conflict is left for the worker (its brief says which files); the task isn't committed while conflicts remain.
+- **Files:** `files = ["src/api/users.py", "tests/"]` in a task header says what it touches. Two tasks that may run at the
+  same time and list the same file are flagged: their branches will likely conflict. Give one a `depends`, or merge them.
+  Best results come from code where each task adds its own files (a plugin / registry folder) rather than editing one hub.
+- **Parallel checks:** checks get `AGENTDESK_TASK_ID` and `AGENTDESK_WORKTREE`; use them (or port 0, in-memory databases)
+  so two tasks' tests don't fight over a port or a database file. Otherwise set `gate_parallel = 1`.
+- **One run per project** at a time: the run process holds an OS lock on `run.lock` (released when it ends, also when killed).
+- **Usage:** while several calls run at once, the account's usage delta can't be told apart: runs record `usage_shared` and
+  `usage_window_pct`, and at the end of the run the window use is split over its tasks by cost (`usage_share_pct`).
+  `cost_usd` and tokens are exact per call either way.
+
+**Architect.** `architect PROJECT "goal"` (or the API / MCP `architect`) runs `[architect] model` (default Opus, high effort,
+`budget_usd` 4) read-only on the repository and drafts a task graph: per task a goal with the interfaces it must provide,
+the files it touches, acceptance criteria, a tier and real dependencies, shaped for parallel work (foundations first,
+no two parallel tasks on one file). A checker refuses cycles and missing criteria and flags overlapping files; the
+architect fixes its plan up to `rounds` times. The result is the project's draft plan (the same card the Planner chat
+uses): approve it on the dashboard, with `approve PROJECT --start`, or the API.
+
+**Integration.** `integrate PROJECT` (or `[run] integrate_after = true`) merges every finished task branch that isn't in
+the base branch into `auto/integration` (worktree `<worktrees>/_integration`, made fresh from the base each time) in
+dependency order, skips a branch that conflicts together with everything built on it, runs the final checks and writes
+`reports/integration.md`. The base branch is never touched: review `auto/integration` and merge it yourself.
+
+`graph PROJECT` prints the graph: level, state (ready / waiting / stuck / working / done / blocked), critical-path weight,
+cycles and file overlaps.
+
+## API and MCP
+
+Everything above (and the queue) is available without the dashboard, through one service layer:
+
+| Operation | REST (`http://127.0.0.1:8765/api/v1`) | What |
+|---|---|---|
+| list_projects | `GET /projects` | projects with run state, counts, spending |
+| status | `GET /projects/{p}` | tasks with status and graph state, the run, spending, last integration |
+| graph | `GET /projects/{p}/graph` | nodes, edges, levels, critical path, cycles, file overlaps, width |
+| task | `GET /projects/{p}/tasks/{id}?activity=30` | task text, runs, costs, report, agent timeline |
+| log | `GET /projects/{p}/log?lines=80` | the project log |
+| add_task | `POST /projects/{p}/tasks` | `{title, body, tier?, depends?, files?, id?}` (refuses unknown deps and cycles) |
+| plan | `GET /projects/{p}/plan` | the draft/approved plan and the architect's state |
+| propose_plan | `POST /projects/{p}/plan` | `{summary, tasks: [{title, goal, body?, files?, tier?, depends: ["d1"]}]}` |
+| approve_plan / cancel_plan / close_plan | `POST /projects/{p}/plan/approve` (`{start, max_parallel}`), `/cancel`, `/close` | |
+| architect | `POST /projects/{p}/architect` | `{goal}`: drafts a plan in the background |
+| run / stop | `POST /projects/{p}/run` (`{task?, max_parallel?, max_tasks?}`), `/stop` | background run; stop puts its tasks back to pending |
+| retry | `POST /projects/{p}/tasks/{id}/retry` | blocked / paused / crashed task back to pending |
+| integrate | `POST /projects/{p}/integrate` (`{wait?}`) | merge finished branches into `auto/integration` |
+
+`GET /api/v1` lists the operations with their JSON schemas; `POST /api/v1/call/<operation>` takes the arguments as JSON.
+Errors come back as `{"error": "..."}` with 400 / 404 / 409 (busy) / 507 (disk). The API has the dashboard's request guard
+(loopback Host, same-origin POSTs, the gateway token behind the AgentDesk Server).
+
+**MCP:** `python -m agentdesk mcp` (`./agentdesk.sh mcp`, `AgentDesk.cmd mcp`) serves the same operations as MCP tools over
+stdio. For Claude Code:
+
+```
+claude mcp add agentdesk -- /path/to/AgentDesk/.venv/bin/python -m agentdesk mcp
+```
+
+(add `-e AGENTDESK_HOME=...` if the data folder isn't the default). A typical session: `architect` → poll `plan` → review →
+`approve_plan` with `start` → poll `status` / `graph` → `integrate` → review `auto/integration`.
 
 ## The Git window
 
@@ -546,7 +622,12 @@ Keep the archive private: it holds credentials. Restore by unpacking it over the
 AgentDesk.cmd projects                     (or ./agentdesk.sh …)
 AgentDesk.cmd add-project NAME REPO BASE --preset rust --account default
 AgentDesk.cmd status PROJECT
-AgentDesk.cmd run PROJECT [TASK] [--max N]
+AgentDesk.cmd run PROJECT [TASK] [--max N] [--parallel N] [--auto]
+AgentDesk.cmd graph PROJECT
+AgentDesk.cmd architect PROJECT "goal ..."   (or --goal-file FILE)
+AgentDesk.cmd approve PROJECT [--start] [--parallel N]
+AgentDesk.cmd integrate PROJECT [--no-checks]
+AgentDesk.cmd mcp
 AgentDesk.cmd plan PROJECT [TASK]
 AgentDesk.cmd final PROJECT TASK
 AgentDesk.cmd import NAME OLD_ORCHESTRATOR_DIR

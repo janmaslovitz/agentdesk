@@ -8,7 +8,12 @@
     python -m agentdesk projects                 list projects
     python -m agentdesk add-project NAME REPO BASE [--preset rust|node|python|go|none] [--account A]
     python -m agentdesk status PROJECT
-    python -m agentdesk run PROJECT [TASK] [--max N]
+    python -m agentdesk run PROJECT [TASK] [--max N] [--parallel N] [--auto]   run the task graph (or one task)
+    python -m agentdesk graph PROJECT            the task graph: levels, state (ready/waiting/stuck), conflicts
+    python -m agentdesk architect PROJECT GOAL... | --goal-file F   draft a parallel task graph for a goal
+    python -m agentdesk approve PROJECT [--start] [--parallel N]   queue the draft plan's tasks (and run them)
+    python -m agentdesk integrate PROJECT        merge finished branches into auto/integration, run the final checks
+    python -m agentdesk mcp                      MCP server on stdin/stdout (for Claude Code and other MCP clients)
     python -m agentdesk plan PROJECT [TASK]
     python -m agentdesk final PROJECT TASK
     python -m agentdesk export PROJECT FILE.zip [--logs]   save a project (config, tasks, notes, state, reports, chat) to a file
@@ -172,6 +177,50 @@ def cmd_stop(runs: bool) -> None:
                 rf.unlink(missing_ok=True)
 
 
+def hold_lock(p: core.Project, name: str, pidfile: str) -> core.RunLock:
+    """Take the project's `name` lock for this process (exit 3 if another holds it) and record our pid."""
+    lock = core.RunLock(p, name)
+    if not lock.acquire():
+        print(f"{p.slug}: another {name} is going (lock {lock.path}); not starting", file=sys.stderr)
+        raise SystemExit(3)
+    try:
+        p.path(pidfile).write_text(str(os.getpid()), encoding="utf-8")
+    except OSError:
+        pass
+    return lock
+
+
+def cmd_graph(p: core.Project) -> None:
+    from . import dag
+    v = dag.view(dag.nodes_from_tasks(core.load_tasks(p)), core.Store(p).load())
+    for n in sorted(v["nodes"], key=lambda n: (n["level"] if n["level"] is not None else 999, n["id"])):
+        after = f"  after {', '.join(n['depends'])}" if n["depends"] else ""
+        print(f"L{n['level'] if n['level'] is not None else '?'}  {n['id']:<8} {n['state']:<9} {n['tier'] or '-':<11} "
+              f"cp {n['critical']:<5g} {n['title']}{after}" + (f"  (stuck on {n['stuck_on']})" if n["stuck_on"] else ""))
+    print(f"width {v['width']}")
+    for e in v["errors"]:
+        print(f"ERROR: {e}")
+    for c in v["conflicts"]:
+        print(f"conflict: {c['a']} and {c['b']} may run in parallel but both touch {', '.join(c['files'][:5])}")
+
+
+def cmd_architect(p: core.Project, goal: str) -> None:
+    import json
+    lock = hold_lock(p, "architect", "architect.pid")
+    info = {"status": "running", "goal": goal[:4000], "started": core._now(), "pid": os.getpid()}
+    core.write_json(p.path("architect.json"), info)
+    try:
+        v = core.run_async_result(core.architect(p, goal))
+        info.update(status="done", finished=core._now(), tasks=len(v.get("tasks", [])), warnings=v.get("warnings", []))
+        print(json.dumps(v, ensure_ascii=False, indent=2))
+    except BaseException as e:
+        info.update(status="failed", finished=core._now(), error=f"{type(e).__name__}: {e}"[:2000])
+        raise
+    finally:
+        core.write_json(p.path("architect.json"), info)
+        lock.release()
+
+
 def cmd_import(name: str, old: Path) -> None:
     """Make a project from an old single-project orchestrator folder (config, tasks, notes, state)."""
     with (old / "config.toml").open("rb") as f:
@@ -213,6 +262,14 @@ def main() -> None:
                    help="if the folder isn't a git repo (or has no commits), set up local version tracking (stays on this computer)")
     s = sub.add_parser("status"); s.add_argument("project")
     r = sub.add_parser("run"); r.add_argument("project"); r.add_argument("task", nargs="?"); r.add_argument("--max", type=int)
+    r.add_argument("--parallel", type=int, help="tasks at once (default [run] max_parallel)")
+    r.add_argument("--auto", action="store_true", help="skip tasks flagged for a human (as the auto-runner does)")
+    gr = sub.add_parser("graph"); gr.add_argument("project")
+    ar = sub.add_parser("architect"); ar.add_argument("project"); ar.add_argument("goal", nargs="*"); ar.add_argument("--goal-file", type=Path)
+    apv = sub.add_parser("approve"); apv.add_argument("project"); apv.add_argument("--start", action="store_true")
+    apv.add_argument("--parallel", type=int)
+    ig = sub.add_parser("integrate"); ig.add_argument("project"); ig.add_argument("--no-checks", action="store_true")
+    sub.add_parser("mcp")
     pl = sub.add_parser("plan"); pl.add_argument("project"); pl.add_argument("task", nargs="?")
     f = sub.add_parser("final"); f.add_argument("project"); f.add_argument("task")
     i = sub.add_parser("import"); i.add_argument("name"); i.add_argument("old", type=Path)
@@ -240,7 +297,37 @@ def main() -> None:
     elif args.cmd == "status":
         cmd_status(core.project(args.project))
     elif args.cmd == "run":
-        core.run_async(core.run_queue(core.project(args.project), args.task, args.max))
+        p = core.project(args.project)
+        lock = hold_lock(p, "run", "runner.pid")
+        try:
+            core.run_async(core.run_queue(p, args.task, args.max, args.parallel, args.auto))
+        finally:
+            lock.release()
+    elif args.cmd == "graph":
+        cmd_graph(core.project(args.project))
+    elif args.cmd == "architect":
+        goal = args.goal_file.read_text(encoding="utf-8") if args.goal_file else " ".join(args.goal)
+        if not goal.strip():
+            sys.exit("architect: give the goal as words or with --goal-file")
+        cmd_architect(core.project(args.project), goal)
+    elif args.cmd == "approve":
+        p = core.project(args.project)
+        ids = core.approve_plan(p)
+        print("queued: " + ", ".join(f"{k} → {v}" for k, v in ids.items()))
+        if args.start:
+            from . import service
+            print(service.run(p.slug, max_parallel=args.parallel))
+    elif args.cmd == "integrate":
+        p = core.project(args.project)
+        lock = hold_lock(p, "run", "runner.pid")
+        try:
+            import json
+            print(json.dumps(core.integrate(p, final=not args.no_checks), ensure_ascii=False, indent=2))
+        finally:
+            lock.release()
+    elif args.cmd == "mcp":
+        from . import mcp_server
+        mcp_server.main()
     elif args.cmd == "plan":
         core.run_async(core.plan_tasks(core.project(args.project), args.task))
     elif args.cmd == "final":
