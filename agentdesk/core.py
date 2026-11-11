@@ -172,7 +172,7 @@ retries_per_tier = 2
 # with finished work, merge the finished branches into auto/integration and run the final checks there.
 # A project can override any key in its project.toml under [run].
 [run]
-max_parallel = 3
+max_parallel = 8
 gate_parallel = 0
 integrate_after = false
 
@@ -2202,10 +2202,10 @@ def ensure_worktree(p: Project, store: Store, task: Task, state: dict | None = N
     wt = Path(p.cfg["repo"]["worktrees"]) / task.id
     if wt.exists():
         return wt
-    why = worktree_cap_reason(p, task.id)
+    state = state if state is not None else store.load()
+    why = worktree_cap_reason(p, task.id, state)
     if why:
         raise RuntimeError(why)
-    state = state if state is not None else store.load()
     branch, base = f"auto/{task.id}", p.cfg["repo"]["base"]
     deps = dependency_branches(p, task, state)
     if deps:
@@ -2387,8 +2387,10 @@ def clone_options() -> list[str]:
     return out
 
 
-def worktree_cap_reason(p: "Project", task_id: str) -> str | None:
-    """Why no new worktree may be made for `task_id` ([hygiene] max_worktrees reached), or None."""
+def worktree_cap_reason(p: "Project", task_id: str, state: dict | None = None) -> str | None:
+    """Why no new worktree may be made for `task_id` ([hygiene] max_worktrees reached), or None. Only worktrees of
+    tasks that aren't done count: a finished task's worktree is disk hygiene's to remove, and counting it would stall a
+    parallel run behind work that is merely waiting to be merged."""
     cap = int(hygiene_cfg(p)["max_worktrees"])
     raw = str((p.cfg.get("repo") or {}).get("worktrees") or "")
     if cap <= 0 or not raw:
@@ -2396,13 +2398,15 @@ def worktree_cap_reason(p: "Project", task_id: str) -> str | None:
     root = Path(raw)
     if (root / task_id).exists() or not root.is_dir():
         return None
+    tasks = (state if state is not None else Store(p).load()).get("tasks", {})
     try:
-        n = sum(1 for d in root.iterdir() if d.is_dir() and not d.is_symlink() and d.name not in (COWORK, INTEGRATION))
+        n = sum(1 for d in root.iterdir() if d.is_dir() and not d.is_symlink() and d.name not in (COWORK, INTEGRATION)
+                and tasks.get(d.name, {}).get("status") != "done")
     except OSError:
         return None
     if n >= cap:
-        return (f"the project already has {n} task worktrees (limit [hygiene] max_worktrees = {cap}); disk hygiene "
-                "removes finished ones, then the next task starts")
+        return (f"the project has {n} unfinished task worktrees (limit [hygiene] max_worktrees = {cap}); the next task "
+                "starts when one of them finishes")
     return None
 
 
@@ -2808,6 +2812,11 @@ Your working directory is a dedicated git worktree; edit files only inside it. F
 instructions (CLAUDE.md / AGENTS.md / README). Never push, open pull requests, publish, or change git
 remotes; the orchestrator commits for you. Before finishing, format the code and run the tests of
 what you changed.
+Other tasks run in parallel and add their own code next to yours, so write tests that stay true as the
+project grows: assert on what this task adds, never that a registry, folder, list or table is empty or holds
+an exact total of things other tasks may add. If a check fails in a test this task didn't write, decide
+whether that test encodes an assumption the project has outgrown (e.g. "nothing is registered yet"): then fix
+that test minimally and say so in your summary; otherwise fix your code.
 Finish with a short summary of what you changed, then a line `NOTES:` followed by at most three
 lines of durable facts later tasks should know (or `NOTES: none`).
 
@@ -3081,6 +3090,10 @@ README). Be thorough but don't read everything. Then design the graph:
   subtle algorithms). Choose the cheapest tier that will do it well.
 - depends: the 1-based positions of earlier tasks in your list as "d1", "d2", ..., or ids of queued tasks below.
   Only real dependencies: an unneeded edge costs parallelism.
+- Tests must stay valid as the graph fills in: a foundation task's tests must not assert that nothing is
+  registered yet or that a collection has an exact size other tasks will change. Say so in its goal.
+- A task that generates data (a simulator, fixtures, seed data, sample streams) must also prove the absence of false
+  positives: its done_when includes that the normal/healthy data triggers nothing, not only that injected cases appear.
 
 The project's checks after every task: {gates}
 Queued tasks that aren't done yet (you may depend on them; don't redo them):
@@ -3246,6 +3259,11 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                     if meter.stop_reason():
                         return False, summary
                     message = f"The checks failed. Fix the cause (not the check), then finish as before.\n\n{failure}"
+                    foreign = foreign_failures(wt, p.cfg["repo"]["base"], failure)
+                    if foreign:
+                        message += ("\n\nNote: the failing tests are in files this task didn't change: " + ", ".join(foreign)
+                                    + ". If such a test encodes an assumption the project has outgrown, fix that test "
+                                      "minimally (and say so); otherwise fix your code.")
                     attempt += 1
                     if attempt <= attempts:
                         act.add("retry", attempt=attempt, text="checks failed; the worker is asked to fix the cause")
@@ -3261,6 +3279,24 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                 message = "A network error interrupted you. Continue the task exactly where you left off."
             await asyncio.sleep(delays[net_try])
             net_try += 1
+
+
+_FAIL_FILE = re.compile(r"(?m)^(?:FAILED |ERROR )?([\w./\\-]+\.(?:py|rs|ts|tsx|js|go|java|kt))(?::\d+)?::")
+
+
+def foreign_failures(wt: Path, base: str, failure: str) -> list[str]:
+    """Test files named in a check failure (pytest / cargo / jest style `path::test`) that this worktree's branch hasn't
+    changed since `base` (committed or not): failures the task likely didn't cause."""
+    files = list(dict.fromkeys(m.group(1).replace("\\", "/") for m in _FAIL_FILE.finditer(failure or "")))
+    if not files:
+        return []
+    changed = set()
+    for args in (["diff", "--name-only", f"{base}...HEAD"], ["diff", "--name-only", "HEAD"],
+                 ["ls-files", "--others", "--exclude-standard"]):
+        code, out = git(args, wt)
+        if code == 0:
+            changed |= {l.strip() for l in out.splitlines() if l.strip()}
+    return [f for f in files if f not in changed][:10]
 
 
 async def check_worktree(p: Project, store: Store, task: Task, wt: Path, meter: Meter) -> tuple[bool, str]:
@@ -3498,6 +3534,10 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
     said: set[str] = set()
     stop = None
     run_before = meter.mark()
+    cap_n = int(hygiene_cfg(p)["max_worktrees"])
+    if 0 < cap_n < n:
+        store.log(f"note: [hygiene] max_worktrees = {cap_n} allows fewer unfinished tasks than max_parallel = {n}; "
+                  f"at most {cap_n} run at once (raise max_worktrees in [hygiene] for more)")
     store.log(f"run started: up to {n} task(s) at once" + (f", checks {g} at a time" if meter.gate_sem else ""))
     try:
         while True:
@@ -3516,7 +3556,7 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
                 for tid in dag.ready(nodes, state, skip):
                     if len(running) >= n or (max_tasks is not None and len(started) >= max_tasks):
                         break
-                    cap = worktree_cap_reason(p, tid)
+                    cap = worktree_cap_reason(p, tid, state)
                     if cap:
                         if f"cap|{cap}" not in said:
                             said.add(f"cap|{cap}")
@@ -3537,9 +3577,15 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
     statuses = {tid: state["tasks"].get(tid, {}).get("status", "pending") for tid in started}
     nodes = dag.nodes_from_tasks(load_tasks(p))
     stuck = dag.stuck(nodes, state)
+    left = [] if stop or max_tasks is not None else [t for t in dag.ready(nodes, state, set(started)) if not (
+        auto and _flagged(state["tasks"].get(t, {}), retry))]
     summary = {"started": started, "done": [t for t, s_ in statuses.items() if s_ == "done"],
                "blocked": [t for t, s_ in statuses.items() if s_ == "blocked"],
-               "stuck": sorted(stuck), "stopped": stop}
+               "stuck": sorted(stuck), "stopped": stop, "not_started": left}
+    if left:
+        why = next((worktree_cap_reason(p, t, state) for t in left if worktree_cap_reason(p, t, state)), None)
+        store.log(f"WARNING: {len(left)} ready task(s) were not started: {', '.join(left)}"
+                  + (f" ({why})" if why else ""))
     share_usage(state, started, run_before, meter.mark())
     store.save(state)
     if stop:

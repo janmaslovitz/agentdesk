@@ -54,7 +54,7 @@ disk_reserve_gb = 40
 soft_limit_pct = 80         # warn and clean automatically
 hard_limit_pct = 92         # refuse new runs, clones, imports and uploads (running work goes on)
 quota_gb = 50               # per user; `agentdesk-server user quota NAME GB` sets one user's
-# build_stale_days = 2   build_max_target_gb = 20   build_max_project_gb = 60   worktree_ttl_hours = 24   max_worktrees = 6
+# build_stale_days = 2   build_max_target_gb = 20   build_max_project_gb = 60   worktree_ttl_hours = 24   max_worktrees = 10
 # clone_depth = 0   partial_clone = false   max_upload_mb = 200   shared_target = false   cache_dedupe = false
 # [cache_caps_gb] is a table: cache_caps_gb = { cargo = 30, npm = 15, pip = 10, uv = 15, go = 10, gradle = 20 }
 """

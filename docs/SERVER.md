@@ -122,7 +122,7 @@ project's own `project.toml [hygiene]` still wins. Desktop installs keep `auto =
 | `build_max_target_gb` | `max_target_gb` | 20 | per cargo target dir |
 | `build_max_project_gb` | `max_total_gb` | 60 | per project; over it the oldest build output goes first |
 | `worktree_ttl_hours` | `worktree_ttl_hours` | 24 | worktrees of done tasks idle this long are removed; the branch is kept |
-| `max_worktrees` | `max_worktrees` | 6 | task worktrees per project; at the limit the next task waits and done ones go first |
+| `max_worktrees` | `max_worktrees` | 10 | unfinished task worktrees per project (finished ones don't count; disk hygiene removes them); at the limit the next task waits. Keep it >= `[run] max_parallel` |
 | `git_gc_hours`, `offpeak_hours` | same | 24, "01-06" | `git gc --auto` (nice / ionice idle), off-peak, never during a run |
 | `large_file_mb` | same | 50 | the task report warns about committed files above this size |
 

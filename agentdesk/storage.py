@@ -44,7 +44,7 @@ DEFAULTS: dict = {
     "build_max_target_gb": 20.0,
     "build_max_project_gb": 60.0,
     "worktree_ttl_hours": 24.0,
-    "max_worktrees": 6,
+    "max_worktrees": 10,             # unfinished task worktrees per project (>= [run] max_parallel to use all slots)
     "git_gc_hours": 24.0,
     "offpeak_hours": "01-06",
     "large_file_mb": 50.0,

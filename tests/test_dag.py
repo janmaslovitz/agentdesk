@@ -435,3 +435,52 @@ def test_integration_uses_a_branch_that_resolved_its_dependencies(project):
     res = core.integrate(project, final=False)
     assert res["merged"] == ["a", "b", "c"] and res["skipped"] == [] and res["via"] == {"a": "c", "b": "c"}
     assert (core.Path(res["worktree"]) / "x.txt").read_text() == "a and b\n"
+
+
+# ----------------------------------------------------------------------------- fixes after the FleetPulse benchmark
+
+def test_worktree_cap_counts_only_unfinished_tasks(project):
+    p = project
+    w = core.Path(p.cfg["repo"]["worktrees"])
+    for tid in ("a", "b"):
+        core.add_worktree(p, w / tid, f"auto/{tid}", "main")
+    text = core._set_toml_key(core._project_text(p), "hygiene", "max_worktrees", "2")
+    core._write_project(p, text)
+    p = core.project(p.slug)
+    assert "max_worktrees = 2" in core.worktree_cap_reason(p, "c", {"tasks": {}})
+    # a done task's worktree waits for hygiene / the merge: it must not hold a slot
+    assert core.worktree_cap_reason(p, "c", {"tasks": {"a": {"status": "done"}}}) is None
+
+
+def test_run_reports_ready_tasks_it_could_not_start(project, monkeypatch):
+    add(project, "1"); add(project, "2")
+    monkeypatch.setattr(core, "worktree_cap_reason", lambda p, tid, state=None: "limit reached" if tid == "2" else None)
+    fake_tasks(monkeypatch)
+    res = asyncio.run(core.run_dag(project, max_parallel=4))
+    assert res["done"] == ["1"] and res["not_started"] == ["2"]
+    assert "were not started: 2 (limit reached)" in project.path("agentdesk.log").read_text()
+
+
+def test_default_parallelism():
+    assert core.tomllib.loads(core.DEFAULT_SETTINGS)["run"]["max_parallel"] == 8
+
+
+def test_foreign_failures_names_tests_the_task_did_not_touch(project):
+    ident(project)
+    (project.repo / "tests").mkdir()
+    (project.repo / "tests" / "test_core.py").write_text("def test_x(): pass\n")
+    subprocess.run(["git", "add", "-A"], cwd=project.repo, check=True)
+    subprocess.run([*GIT, "commit", "-q", "-m", "core"], cwd=project.repo, check=True)
+    add(project, "t")
+    t = next(x for x in core.load_tasks(project) if x.id == "t")
+    wt = core.ensure_worktree(project, core.Store(project), t, core.Store(project).load())
+    (wt / "tests" / "test_mine.py").write_text("def test_y(): assert 0\n")
+    failure = ("FAILED tests/test_core.py::test_load_collectors_empty - assert [x] == []\n"
+               "FAILED tests/test_mine.py::test_y - assert 0\n")
+    assert core.foreign_failures(wt, "main", failure) == ["tests/test_core.py"]
+    assert core.foreign_failures(wt, "main", "no file names here") == []
+
+
+def test_prompts_carry_the_test_hygiene_rules():
+    assert "never that a registry" in core.WORKER_PROMPT and "outgrown" in core.WORKER_PROMPT
+    assert "false" in core.ARCHITECT_PROMPT and "positives" in core.ARCHITECT_PROMPT

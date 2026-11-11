@@ -5,6 +5,14 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Changed
+- `[run] max_parallel` defaults to 8 (was 3); the Server's default `max_worktrees` is 10 (was 6).
+- `[hygiene] max_worktrees` counts only worktrees of unfinished tasks: finished-but-unmerged work no longer stalls a
+  parallel run. A run notes when the limit is below `max_parallel`, and warns about ready tasks it ended without starting.
+- Workers are told to write tests that stay true as the project grows (no "nothing registered yet" / exact-count
+  assertions on shared collections); when a check fails in a test file the task didn't change, the retry message says so.
+- The architect asks foundation tasks for growth-safe tests and data generators for proof of no false positives.
+
 
 ## 1.6.0 - 2026-11-11
 

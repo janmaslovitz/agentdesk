@@ -162,14 +162,14 @@ their worktree (`[guard]`).
 ## Parallel runs, the task graph and the architect
 
 Tasks form a dependency graph (`depends` in the task header). A run (**Run all**, `run PROJECT`, the API) starts every
-task whose dependencies are done, up to `[run] max_parallel` at once (default 3; `--parallel N` for one run), each in its
+task whose dependencies are done, up to `[run] max_parallel` at once (default 8; `--parallel N` for one run), each in its
 own worktree on `auto/<id>`. Among ready tasks the one on the longest remaining chain goes first (tasks weighted by tier:
 mechanical 1, standard 3, hard 8). A blocked task holds back only what depends on it ("stuck" on the dashboard); the
 rest goes on. Each task starts at most once per run; tasks added while it runs are picked up.
 
 ```toml
 [run]                 # settings.toml, or a project's project.toml to override
-max_parallel = 3
+max_parallel = 8
 gate_parallel = 0     # checks at the same time (0 = all); 1 if the checks share one build folder
 integrate_after = false
 ```
@@ -181,6 +181,12 @@ integrate_after = false
   Best results come from code where each task adds its own files (a plugin / registry folder) rather than editing one hub.
 - **Parallel checks:** checks get `AGENTDESK_TASK_ID` and `AGENTDESK_WORKTREE`; use them (or port 0, in-memory databases)
   so two tasks' tests don't fight over a port or a database file. Otherwise set `gate_parallel = 1`.
+- **Worktree limit:** `[hygiene] max_worktrees` counts only worktrees of unfinished tasks (a finished task's worktree is
+  disk hygiene's to remove), so finished-but-unmerged work never stalls a run. Keep it >= `max_parallel` to use every slot;
+  a run that ends with ready tasks it couldn't start says so in the log (`WARNING: ... were not started`).
+- **Tests that survive parallel work:** workers are told to assert on what their task adds, never that a registry or list
+  is empty or has an exact size, and a check failing in a test file the task didn't change is pointed out to the worker
+  as possibly outdated. The architect asks data generators (simulators, fixtures) to prove they raise no false positives.
 - **One run per project** at a time: the run process holds an OS lock on `run.lock` (released when it ends, also when killed).
 - **Usage:** while several calls run at once, the account's usage delta can't be told apart: runs record `usage_shared` and
   `usage_window_pct`, and at the end of the run the window use is split over its tasks by cost (`usage_share_pct`).
