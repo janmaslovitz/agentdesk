@@ -188,10 +188,10 @@ def test_approve_starts_queue_in_dependency_order(chat, runner):
     assert tasks["002"].title == "First" and tasks["002"].tier == "hard"
     assert tasks["003"].depends == ["002", "001"]
     assert not core.drafts_dir(p).exists()
-    assert runner.started == [["run", p.slug]]  # the same command as "Run all"
+    assert runner.started == [["run", p.slug, "--budget", "40"]]  # "Run all" with the plan's budget
     plan = core.load_plan(p)
     assert plan["status"] == "approved" and plan["was_running"]
-    assert notes(chat)[0] == "Plan approved: tasks 002, 003 are queued." and "Started the queue" in notes(chat)[1]
+    assert notes(chat)[0] == "Plan approved: tasks 002, 003 are queued." and "Started the plan's run" in notes(chat)[1]
     assert [t["id"] for t in core.plan_view(p)["tasks"]] == ["002", "003"]
     with pytest.raises(ValueError, match="no draft"):
         chat.approve_plan()
@@ -220,13 +220,13 @@ def test_progress_notes_and_blocked(chat, runner):
     assert n[1] == "✓ Done 001: Add the parser (branch auto/001 at abc123)"
     assert n[2].startswith("✗ Blocked 002: Use the parser — $ pytest") and "waits" in n[2]
     assert n[3].startswith("The run ended: 1 of 2") and "002 (blocked)" in n[3]
-    assert core.load_plan(p)["status"] == "approved" and runner.started == [["run", p.slug]]  # waits for the user
+    assert core.load_plan(p)["status"] == "approved" and runner.started == [["run", p.slug, "--budget", "40"]]  # waits for the user
     chat.plan_tick()
     assert len(notes(chat)) == 4  # nothing new, nothing repeated
     # The user fixes it and presses Start; the plan finishes.
     set_status(p, "002", "pending")
     chat.start_plan()
-    assert runner.started[-1] == ["run", p.slug]
+    assert runner.started[-1][:2] == ["run", p.slug] and "--budget" in runner.started[-1]
     set_status(p, "002", "done")
     assert chat.plan_tick() is False
     assert notes(chat)[-1].startswith("Plan finished: all 2 task(s) done")
@@ -244,7 +244,7 @@ def test_approve_while_a_run_is_going_waits(chat, runner):
     assert runner.started == []
     runner.busy = False
     chat.plan_tick()
-    assert runner.started == [["run", chat.p.slug]] and "Started the queue" in notes(chat)[-1]
+    assert runner.started == [["run", chat.p.slug, "--budget", "40"]] and "Started the plan's run" in notes(chat)[-1]
 
 
 
@@ -380,7 +380,7 @@ def test_http_plan_card(proj, runner):
         assert st["plan"]["status"] == "draft" and [t["id"] for t in st["plan"]["tasks"]] == ["d1", "d2"]
         assert st["tasks"] == []  # drafts aren't in the task table
         r = post(base + "/plan/approve", {})
-        assert r["ok"] and r["ids"] == {"d1": "001", "d2": "002"} and runner.started == [["run", proj.slug]]
+        assert r["ok"] and r["ids"] == {"d1": "001", "d2": "002"} and runner.started == [["run", proj.slug, "--budget", "40"]]
         st = get(base + "/state")
         assert st["plan"]["status"] == "approved" and [t["id"] for t in st["tasks"]] == ["001", "002"] and st["chat_seq"] >= 2
         assert [m["text"] for m in get(base + "/chat")["history"] if m.get("kind") == "progress"][0].startswith("Plan approved")

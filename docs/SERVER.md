@@ -60,6 +60,19 @@ pause). With `false` instances start lazily at the user's next request.
   true` in `server.toml` to end runs with the service instead (SIGTERM, then kill after the grace). A machine reboot
   still ends everything; tasks left `working` are recovered at the next start. Keep the grace below `TimeoutStopSec`.
 
+## Updating from a git checkout
+
+Between releases the Server can be updated from a checkout of the AgentDesk repository (committed, clean):
+
+```
+sudo tools/deploy_server.sh --repo /path/to/agentdesk [--wait] [--no-restart]
+```
+
+It smoke-imports the new code, keeps the last five backups of `/opt/agentdesk-server/app/agentdesk` in
+`/root/agentdesk.bak-*`, copies the package, stamps `_buildinfo.py` with the commit (the dashboard shows it), fixes the
+permissions and restarts the service. Runs keep going through the restart (see Shutdown); `--wait` waits for every run
+and architect to end first, for updating from a version that still ended runs on a restart.
+
 ## Logs
 
 Rotated by size, `log_max_mb` (10) and `log_keep` (5) in `server.toml`: `audit.log`, `logs/<user>.log` (instance

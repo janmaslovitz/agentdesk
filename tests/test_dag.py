@@ -484,3 +484,25 @@ def test_foreign_failures_names_tests_the_task_did_not_touch(project):
 def test_prompts_carry_the_test_hygiene_rules():
     assert "never that a registry" in core.WORKER_PROMPT and "outgrown" in core.WORKER_PROMPT
     assert "false" in core.ARCHITECT_PROMPT and "positives" in core.ARCHITECT_PROMPT
+
+
+def test_a_running_run_keeps_answers_and_retries_made_meanwhile(project, monkeypatch):
+    """The run holds state.json in memory; an answer recorded by the dashboard while it runs must survive its saves."""
+    add(project, "1"); add(project, "2")
+    st = core.Store(project).load()
+    st["tasks"]["2"] = {"status": "needs_decision", "question": "A or B?"}
+    core.Store(project).save(st)
+
+    async def fake(p, store, task, meter):
+        meter.state["tasks"].setdefault(task.id, {})["status"] = "working"
+        store.save(meter.state)
+        core.answer_task(p, "2", "B")          # someone answers on the dashboard while task 1 runs
+        await asyncio.sleep(0.01)
+        meter.state["tasks"][task.id].update(status="done", branch=f"auto/{task.id}")
+        store.save(meter.state)                # the run's save must not bring back "needs_decision"
+
+    monkeypatch.setattr(core, "do_task", fake)
+    asyncio.run(core.run_dag(project, max_parallel=1, max_tasks=1))
+    st = core.Store(project).load()
+    assert st["tasks"]["1"]["status"] == "done"
+    assert st["tasks"]["2"]["status"] == "pending" and st["tasks"]["2"]["decisions"][0]["answer"] == "B"

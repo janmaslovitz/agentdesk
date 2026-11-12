@@ -250,7 +250,7 @@ def approve_plan(project: str, start: bool = True, max_parallel: int | None = No
         raise ApiError(str(e))
     out = {"ok": True, "ids": ids}
     if start:
-        out["run"] = run(project, max_parallel=max_parallel)
+        out["run"] = run(project, max_parallel=max_parallel, budget_usd=core.plan_budget(p))
     return out
 
 
@@ -290,7 +290,8 @@ def architect(project: str, goal: str) -> dict:
 
 # ----------------------------------------------------------------------------- runs
 
-def run(project: str, task: str | None = None, max_parallel: int | None = None, max_tasks: int | None = None) -> dict:
+def run(project: str, task: str | None = None, max_parallel: int | None = None, max_tasks: int | None = None,
+        budget_usd: float | None = None) -> dict:
     """Start a run in the background: the whole task graph (up to max_parallel tasks at once, default [run]
     max_parallel), at most max_tasks of them, or just `task`."""
     p = _project(project)
@@ -302,6 +303,8 @@ def run(project: str, task: str | None = None, max_parallel: int | None = None, 
         args += ["--parallel", str(max(1, int(max_parallel)))]
     if max_tasks:
         args += ["--max", str(max(1, int(max_tasks)))]
+    if budget_usd:
+        args += ["--budget", f"{max(0.5, float(budget_usd)):g}"]
     proc = spawn(p, args)
     return {"ok": True, "pid": proc.pid, "args": args}
 
@@ -407,7 +410,8 @@ OPERATIONS: list[Op] = [
        _obj({**_P, "goal": {"type": "string"}}, ["project", "goal"]), True),
     Op("run", run, "Start a background run of the task graph (parallel), or of one task.",
        _obj({**_P, "task": {"type": "string"}, "max_parallel": {"type": "integer", "minimum": 1, "maximum": 32},
-             "max_tasks": {"type": "integer", "minimum": 1}}, ["project"]), True),
+             "max_tasks": {"type": "integer", "minimum": 1}, "budget_usd": {"type": "number", "minimum": 0.5,
+             "description": "this run's budget (default [limits] run_budget_usd)"}}, ["project"]), True),
     Op("stop", stop, "Stop the project's run; its working tasks go back to pending.", _obj(_P, ["project"]), True),
     Op("retry", retry, "Put a blocked/paused/crashed task back to pending.", _obj({**_P, "id": {"type": "string"}}, ["project", "id"]), True),
     Op("answer", answer, "Answer a task waiting for a decision (needs_decision); it goes back to the queue with the answer.",

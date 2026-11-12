@@ -263,6 +263,7 @@ def main() -> None:
     s = sub.add_parser("status"); s.add_argument("project")
     r = sub.add_parser("run"); r.add_argument("project"); r.add_argument("task", nargs="?"); r.add_argument("--max", type=int)
     r.add_argument("--parallel", type=int, help="tasks at once (default [run] max_parallel)")
+    r.add_argument("--budget", type=float, help="this run's budget in USD (default [limits] run_budget_usd)")
     r.add_argument("--auto", action="store_true", help="skip tasks flagged for a human (as the auto-runner does)")
     gr = sub.add_parser("graph"); gr.add_argument("project")
     ar = sub.add_parser("architect"); ar.add_argument("project"); ar.add_argument("goal", nargs="*"); ar.add_argument("--goal-file", type=Path)
@@ -300,7 +301,7 @@ def main() -> None:
         p = core.project(args.project)
         lock = hold_lock(p, "run", "runner.pid")
         try:
-            core.run_async(core.run_queue(p, args.task, args.max, args.parallel, args.auto))
+            core.run_async(core.run_queue(p, args.task, args.max, args.parallel, args.auto, args.budget))
         finally:
             lock.release()
     elif args.cmd == "graph":

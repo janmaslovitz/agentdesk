@@ -192,6 +192,21 @@ integrate_after = false
   `usage_window_pct`, and at the end of the run the window use is split over its tasks by cost (`usage_share_pct`).
   `cost_usd` and tokens are exact per call either way.
 
+**Review.** After a worker's attempt passes the checks, a reviewer (`[review]`, default Sonnet at low effort, $0.60)
+compares the change with the task's goal and acceptance criteria. When the task isn't actually done (a stub, a missed
+criterion, tests weakened to pass) it sends it back with concrete fixes (`rounds` per tier, default 1); a question
+only the user can answer turns the task into `needs_decision`. A failed review counts as passed.
+
+**Decisions and budgets.** A worker that needs a choice only the user can make ends with `NEEDS_DECISION:`; one that
+changes nothing must say `NO_CHANGES_NEEDED:` why. Either way the task waits (`needs_decision`, never done) with its
+question on the dashboard, and what builds on it waits too; the answer is added to the task and it runs again. An
+approved plan runs with a budget from its estimate (`run --budget`); when a run's budget is spent, its tasks pause
+(reported, with a notification) and Run all goes on.
+
+**Notifications.** `[notify]`: a Telegram bot (token in the environment variable `telegram_token_env`, chat id in
+`telegram_chat_id`) and/or a `webhook_url` get a short message for `needs_decision`, `blocked`, `paused`,
+`run_finished` and `integration`.
+
 **Architect.** `architect PROJECT "goal"` (or the API / MCP `architect`) runs `[architect] model` (default Opus, high effort,
 `budget_usd` 4) read-only on the repository and drafts a task graph: per task a goal with the interfaces it must provide,
 the files it touches, acceptance criteria, a tier and real dependencies, shaped for parallel work (foundations first,

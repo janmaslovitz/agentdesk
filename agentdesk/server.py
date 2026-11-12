@@ -485,9 +485,13 @@ def run_finished_prompt(p: "core.Project", since: str) -> str:
                      + (f" — report reports/{tid}.md, branch {e.get('branch') or 'auto/' + tid}" if e.get("status") == "done" else "")
                      + (f" — last failure: {str(e.get('last_failure') or '').strip().splitlines()[0][:160]}"
                         if e.get("status") not in ("done", "needs_decision") and e.get("last_failure") else "")
-                     + (f" — QUESTION FOR THE USER: {str(e.get('question') or '')[:600]}" if e.get("status") == "needs_decision" else ""))
+                     + (f" — QUESTION FOR THE USER: {str(e.get('question') or '')[:600]}" if e.get("status") == "needs_decision" else "")
+                     + (" — PAUSED: the run budget was reached" if e.get("status") == "paused" else ""))
     if not ended:
         lines.append("- (none found; see the checkup below)")
+    if any(e.get("status") == "paused" for _, e in ended):
+        lines.append("PAUSED tasks stopped because the run's budget was spent. Continuing spends more: tell the user what was "
+                     "spent and what is left, and ask whether to go on (run_all) — don't continue on your own.")
     if any(e.get("status") == "needs_decision" for _, e in ended):
         lines.append("A task marked QUESTION FOR THE USER stopped for a decision that is theirs: put the question to the user "
                      "plainly with the options and your recommendation, and record their answer with answer_task(id, answer). "
@@ -1673,7 +1677,7 @@ class Chat:
                                  (". The Coworker looks into it when the run ends." if self.coworking() else
                                   ". The plan waits here: tell me how to go on (I don't change the plan without asking)."))
                 elif st == "paused":
-                    notes.append(f"⏸ Paused {what} (the account usage limit or the run budget was reached).")
+                    notes.append(f"⏸ Paused {what}: the run budget was reached. Run all goes on with a new budget.")
                 elif st == "needs_decision":
                     q = (str(e.get("question") or "").splitlines() or [""])[0]
                     notes.append(f"❓ Needs your decision {what} — {q[:300]}. Tasks built on it wait; answer in the chat or on the task.")
@@ -1703,9 +1707,11 @@ class Chat:
         if r.running():
             plan["start_pending"] = True
             return "A run is already going; the plan's tasks start when it ends.", True
-        if e := r.start(run_args(p, "all") or []):
+        budget = core.plan_budget(p, plan)
+        if e := r.start((run_args(p, "all") or []) + ["--budget", f"{budget:g}"]):
             return f"Couldn't start the queue: {e}", False
-        return "Started the queue (Run all): the tasks run in dependency order; progress shows here.", True
+        return (f"Started the plan's run (budget ${budget:.2f}, its estimate): tasks run in parallel in dependency order; "
+                "progress shows here."), True
 
     def start_plan(self) -> str:
         """Start (or go on with) the approved plan's run; the plan card's Start button."""

@@ -176,6 +176,25 @@ max_parallel = 8
 gate_parallel = 0
 integrate_after = false
 
+# Notifications: a short message when something needs a person or a run ends. Telegram: set the bot token in the
+# environment variable named by telegram_token_env (never here) and the chat id; webhook_url: a JSON POST
+# {project, kind, text}. Nothing is sent while neither is set.
+[notify]
+telegram_token_env = "AGENTDESK_TELEGRAM_TOKEN"
+telegram_chat_id = ""
+webhook_url = ""
+events = ["needs_decision", "blocked", "paused", "run_finished", "integration"]
+
+# Review: after a worker's attempt passes the checks, a reviewer compares the change with the task (goal, acceptance
+# criteria) and sends it back with concrete fixes when the task isn't actually done (rounds = how often per tier).
+[review]
+enabled = true
+model = "sonnet"
+effort = "low"
+max_turns = 20
+budget_usd = 0.6
+rounds = 1
+
 # Architect: reads the repository and turns a goal into a dependency graph of tasks (a draft plan you approve).
 # rounds: how many times it may fix the plan after the checks (cycles, files two parallel tasks both touch).
 [architect]
@@ -1195,6 +1214,10 @@ _LOG_LOCK = threading.Lock()  # parallel tasks log from worker threads (checks, 
 class Store:
     def __init__(self, p: Project):
         self.p = p
+        # In a run process: the ids of the tasks this run is working on right now. save() then writes only those
+        # tasks (and the run's totals) from memory and takes every other task from disk, into memory too, so a change
+        # made meanwhile by the dashboard, the chat or the API (an answer, a retry) is neither lost nor overwritten.
+        self.owned: set[str] | None = None
 
     def log(self, msg: str) -> None:
         line = f"[{dt.datetime.now():%m-%d %H:%M:%S}] {msg}"
@@ -1211,6 +1234,11 @@ class Store:
         return data if isinstance(data, dict) and isinstance(data.get("tasks"), dict) else {"tasks": {}, "spent_usd": 0.0}
 
     def save(self, state: dict) -> None:
+        if self.owned is not None:
+            disk = self.load()
+            for tid, e in disk.get("tasks", {}).items():
+                if tid not in self.owned:
+                    state["tasks"][tid] = e
         s, bak = self.p.path("state.json"), self.p.path("state.json.bak")
         try:  # the previous good state is kept as a backup (at most once a minute: this is saved very often)
             if s.exists() and s.stat().st_size > 2 and time.time() - (bak.stat().st_mtime if bak.exists() else 0) > 60:
@@ -1515,6 +1543,16 @@ def plan_estimate(tasks: list[dict]) -> tuple[float, float]:
         b = float(s["tiers"].get(t.get("tier") or "standard", s["tiers"]["standard"])["budget_usd"])
         lo, hi = lo + 0.15 * b, hi + b + router
     return round(lo, 2), round(hi, 2)
+
+
+def plan_budget(p: Project, plan: dict | None = None) -> float:
+    """The run budget for an approved plan: its estimate's upper end, never below [limits] run_budget_usd."""
+    plan = plan or load_plan(p) or {}
+    base = float(settings()["limits"]["run_budget_usd"])
+    try:
+        return round(max(base, plan_estimate(plan.get("tasks", []))[1]), 2)
+    except Exception:
+        return base
 
 
 def plan_view(p: Project, plan: dict | None = None) -> dict | None:
@@ -2639,6 +2677,8 @@ def attention_items(slug: str, tasks: list[Task], state: dict, merged: dict[str,
             add("gate", "checks failed: " + (fail.splitlines()[0] if fail else ""), "log")
         elif st == "blocked":
             add("blocked", "blocked after all tiers: " + (fail.splitlines()[0][:120] if fail else "see the log"))
+        elif st == "paused":
+            add("paused", "paused: the run budget was reached; Run all goes on (a spending decision)")
         elif st == "needs_decision":
             add("decision", "needs your decision: " + (str(e.get("question") or "").splitlines() or [""])[0][:160], "report")
         if e.get("merge") == "conflict" or (st != "done" and "merge conflict" in fail.lower()):
@@ -2750,9 +2790,13 @@ class Meter:
                 totals[k] = totals.get(k, 0) + v
             self.store.save(self.state)
 
+    def budget(self) -> float:
+        """This run's budget in USD: `run --budget` (an approved plan's estimate), else [limits] run_budget_usd."""
+        return float(getattr(self, "budget_override", None) or self.limits["run_budget_usd"])
+
     def stop_reason(self) -> str | None:
-        if self.state.get("spent_usd", 0.0) >= float(self.limits["run_budget_usd"]) + self.state.get("budget_base", 0.0):
-            return f"run budget {self.limits['run_budget_usd']} USD spent"
+        if self.state.get("spent_usd", 0.0) >= self.budget() + self.state.get("budget_base", 0.0):
+            return f"run budget {self.budget():g} USD spent"
         return None
 
 
@@ -3232,6 +3276,98 @@ async def architect(p: Project, goal: str) -> dict:
     return plan_view(p, plan) or {}
 
 
+REVIEW_SCHEMA = {"type": "object", "required": ["verdict", "problems"], "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "fix", "ask"]},
+    "problems": {"type": "array", "items": {"type": "string"}},
+    "instructions": {"type": "string"},
+    "question": {"type": "string"}}}
+
+REVIEW_PROMPT = """You review one automated worker's finished attempt at a task. The project's checks already passed; you
+judge only whether the change actually does what the task asks.
+
+Task {id}: {title}
+{body}
+
+The worker's summary:
+{summary}
+
+Changed files (git status) and the diff against the start of the task (cut at {cut} characters; read any file in
+full with Read/Grep/Glob, your working directory is the task's worktree):
+{status}
+
+{diff}
+
+Verdict:
+- "pass" unless you find a concrete problem. Don't nitpick style, naming or structure.
+- "fix" when the task isn't done: its main point is missing or only stubbed (TODO, placeholder, "not implemented"),
+  an acceptance criterion ("Done when") is clearly not met, tests were deleted or weakened just to pass, or the change
+  breaks something the task said to keep. List each problem in `problems` (one line each, concrete: file, what) and
+  say in `instructions` what to do.
+- "ask" only when the task cannot be finished without a decision that is the user's (put it in `question`).
+Answer with the JSON.
+"""
+
+
+def review_cfg() -> dict:
+    r = dict(settings().get("review", {}))
+    return {"enabled": bool(r.get("enabled", True)), "model": r.get("model") or "sonnet", "effort": r.get("effort") or None,
+            "max_turns": int(r.get("max_turns", 20)), "budget_usd": float(r.get("budget_usd", 0.6)),
+            "rounds": max(0, int(r.get("rounds", 1)))}
+
+
+def attempt_diff(wt: Path, limit: int = 40000) -> tuple[str, str]:
+    """(git status, diff of everything the worker changed: uncommitted edits and new files) for the reviewer."""
+    git(["add", "-A", "-N", "--", ".", ":(exclude).code-graph", *[f":(exclude,glob){g}" for g in JUNK_GLOBS]], wt)
+    _, status = git(["status", "--short"], wt)
+    _, diff = git(["diff", "HEAD", "--", ".", ":(exclude).code-graph"], wt)
+    return status.strip()[:4000] or "(no changes)", (diff[:limit] + ("\n… (cut)" if len(diff) > limit else ""))
+
+
+async def review_attempt(p: Project, store: Store, task: Task, wt: Path, summary: str, meter: Meter) -> dict:
+    """The reviewer's verdict on an attempt that passed the checks: {verdict: pass|fix|ask, problems, instructions,
+    question}. Any failure of the review itself counts as pass (a review must never block finished work)."""
+    _load_sdk()
+    rc = review_cfg()
+    act = Activity(p, task.id, "reviewer")
+    try:
+        status, diff = await asyncio.to_thread(attempt_diff, wt)
+        prompt = REVIEW_PROMPT.format(id=task.id, title=task.title, body=task.body[:8000], summary=(summary or "")[-4000:],
+                                      cut=40000, status=status, diff=diff)
+        opts = options(p, model=rc["model"], effort=rc["effort"], max_turns=rc["max_turns"], max_budget_usd=rc["budget_usd"],
+                       cwd=str(wt), allowed_tools=["Read", "Grep", "Glob"], permission_mode="default", setting_sources=["project"],
+                       disallowed_tools=["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"],
+                       output_format={"type": "json_schema", "schema": REVIEW_SCHEMA})
+        act.add("start", tier="review", model=rc["model"], effort=rc["effort"])
+        tok = meter.begin()
+        verdict = None
+        try:
+            async for msg in query(prompt=prompt, options=opts):
+                meter.see(msg)
+                act.see(msg)
+                if isinstance(msg, ResultMessage):
+                    meter.state["tasks"].setdefault(task.id, {}).setdefault("runs", []).append(
+                        {"tier": "review", "model": rc["model"], "effort": rc["effort"], "cost_usd": msg.total_cost_usd,
+                         "turns": msg.num_turns, "error": msg.is_error, "tokens": usage_tokens(msg.usage),
+                         "at": dt.datetime.now().isoformat(timespec="seconds"), **meter.end(tok)})
+                    store.save(meter.state)
+                    if isinstance(msg.structured_output, dict):
+                        verdict = msg.structured_output
+                    elif msg.result and (m := re.search(r"\{.*\}", msg.result, re.S)):
+                        try:
+                            verdict = json.loads(m.group(0))
+                        except ValueError:
+                            verdict = None
+        finally:
+            meter.release(tok)
+    except Exception as e:  # the review is a safety net, never a gate that can break a run
+        store.log(f"{task.id}: review skipped ({type(e).__name__}: {str(e)[:160]})")
+        return {"verdict": "pass", "problems": []}
+    if not isinstance(verdict, dict) or verdict.get("verdict") not in ("pass", "fix", "ask"):
+        return {"verdict": "pass", "problems": []}
+    act.add("review", ok=verdict["verdict"] == "pass", text=(verdict["verdict"] + ": " + "; ".join(verdict.get("problems") or []))[:ACTIVITY_TEXT])
+    return verdict
+
+
 async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter) -> tuple[bool, str]:
     _load_sdk()
     s = settings()
@@ -3244,6 +3380,7 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
     message = WORKER_PROMPT.format(id=task.id, title=task.title, brief=brief, body=task.body)
     attempts = int(s["limits"]["retries_per_tier"])
     attempt, net_try, session_id, delays = 1, 0, None, network_delays()
+    reviews = 0
     tok: dict = {}
     act = Activity(p, task.id, "worker")
     while True:
@@ -3282,6 +3419,24 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                     ok, failure = await check_worktree(p, store, task, wt, meter)
                     gates = p.cfg.get("gates", {}).get("quick", [])
                     act.add("check", ok=ok, gates=len(gates), text="; ".join(gates) if ok else failure[-ACTIVITY_TEXT:])
+                    if ok and not _DECISION.search(summary or "") and review_cfg()["enabled"] and reviews < review_cfg()["rounds"]:
+                        verdict = await review_attempt(p, store, task, wt, summary, meter)
+                        if verdict.get("verdict") == "ask" and verdict.get("question"):
+                            return True, f"{summary}\nNEEDS_DECISION: {verdict['question']}"
+                        if verdict.get("verdict") == "fix":
+                            reviews += 1
+                            problems = "\n".join(f"- {x}" for x in verdict.get("problems") or []) or "- (see instructions)"
+                            entry["last_review"] = (problems + "\n" + str(verdict.get("instructions") or ""))[:1500]
+                            store.save(meter.state)
+                            store.log(f"{task.id}: the reviewer sent it back: {problems.splitlines()[0][2:160]}")
+                            attempt += 1
+                            if attempt > attempts:
+                                return False, summary
+                            act.add("retry", attempt=attempt, text="the reviewer sent it back")
+                            message = ("The checks passed, but a reviewer compared your change with the task and found it isn't "
+                                       f"done yet:\n{problems}\n\nWhat to do: {verdict.get('instructions') or 'fix the points above'}\n\n"
+                                       "Fix this (or, if the reviewer is wrong, explain why in your summary), then finish as before.")
+                            continue
                     if ok:
                         return True, summary
                     store.log(f"{task.id}: checks failed")
@@ -3399,6 +3554,47 @@ def decision_needed(summary: str, wt: Path, start_sha: str) -> str:
     return ""
 
 
+_notify_errors: set[str] = set()
+
+
+def notify(p: Project, kind: str, text: str) -> bool:
+    """Send a short notification (Telegram and/or webhook from [notify]) in the background; False when nothing is
+    configured or the event is off. A failure is logged once per reason and never breaks the caller."""
+    n = settings().get("notify", {}) or {}
+    if kind not in (n.get("events") or []):
+        return False
+    token = os.environ.get(str(n.get("telegram_token_env") or "AGENTDESK_TELEGRAM_TOKEN"), "").strip()
+    chat_id, hook = str(n.get("telegram_chat_id") or "").strip(), str(n.get("webhook_url") or "").strip()
+    if not ((token and chat_id) or hook):
+        return False
+    msg = f"AgentDesk · {p.name}\n{text}"[:3500]
+
+    def send():
+        import urllib.request
+        posts = []
+        if token and chat_id:
+            posts.append((f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat_id, "text": msg,
+                                                                              "disable_web_page_preview": True}))
+        if hook:
+            posts.append((hook, {"project": p.slug, "kind": kind, "text": msg}))
+        for url, body in posts:
+            try:
+                req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+                urllib.request.urlopen(req, timeout=10).read()
+            except Exception as e:  # noqa: BLE001 — a notification must never break a run
+                why = f"{type(e).__name__}: {str(e)[:120]}".replace(token, "***") if token else f"{type(e).__name__}"
+                if why not in _notify_errors:
+                    _notify_errors.add(why)
+                    try:
+                        Store(p).log(f"notify failed ({'telegram' if 'telegram' in url else 'webhook'}): {why}")
+                    except OSError:
+                        pass
+
+    threading.Thread(target=send, daemon=True, name=f"notify-{p.slug}").start()
+    return True
+
+
 def answer_task(p: Project, task_id: str, answer: str, who: str = "user") -> None:
     """Record the answer to a task waiting for a decision (or any open task) in its file and put it back in the queue;
     its worktree and branch are kept, so the next run goes on from there."""
@@ -3485,6 +3681,7 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
                     encoding="utf-8")
                 store.save(state)
                 store.log(f"{task.id}: needs a decision: {question.splitlines()[0][:200]}")
+                notify(p, "needs_decision", f"❓ {task.id} {task.title}: needs your decision\n{question[:1200]}")
                 Activity(p, task.id, "orchestrator").add("decision", text=question[:ACTIVITY_TEXT])
                 return
             sha = await in_repo(meter, commit, p, task, wt, " → ".join(tried))
@@ -3511,6 +3708,8 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
     entry["status"] = "blocked"
     store.save(state)
     store.log(f"{task.id}: blocked after {' → '.join(tried)}")
+    fail = (entry.get("last_failure") or "").strip().splitlines()
+    notify(p, "blocked", f"✗ {task.id} {task.title}: blocked after {' → '.join(tried)}" + (f"\n{fail[0][:300]}" if fail else ""))
 
 
 def run_cfg(p: Project | None = None) -> dict:
@@ -3613,7 +3812,8 @@ async def _guarded_task(p: Project, store: Store, task: Task, meter: Meter) -> N
         Activity(p, task.id, "orchestrator").add("crash", text=f"{type(e).__name__}: {e}")
 
 
-async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | None = None, auto: bool = False) -> dict:
+async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | None = None, auto: bool = False,
+                  budget_usd: float | None = None) -> dict:
     """The orchestrator: run the project's task graph with up to `max_parallel` tasks at once. A task starts as soon as
     everything it depends on is done; among ready tasks the one on the longest remaining chain goes first. A blocked
     task only holds back what depends on it. Tasks added while the run goes are picked up. `max_tasks` caps how many
@@ -3623,12 +3823,14 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
     state = store.load()
     state["budget_base"] = state.get("spent_usd", 0.0)  # the run budget counts from now
     meter = Meter(p, store, state)
+    meter.budget_override = budget_usd
     cfg = run_cfg(p)
     n = max(1, int(max_parallel or cfg["max_parallel"]))
+    running: dict[str, asyncio.Task] = {}
+    store.owned = set()  # filled as tasks start: see Store.save
     g = cfg["gate_parallel"]
     meter.gate_sem = asyncio.Semaphore(g) if 0 < g < n else None
     retry = autorunner_cfg(p)["retry_crashed"] if auto else 0
-    running: dict[str, asyncio.Task] = {}
     started: list[str] = []
     said: set[str] = set()
     stop = None
@@ -3640,6 +3842,8 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
     store.log(f"run started: up to {n} task(s) at once" + (f", checks {g} at a time" if meter.gate_sem else ""))
     try:
         while True:
+            store.owned = set(running)
+            store.save(state)  # takes in what others changed meanwhile (an answer, a retry) before choosing
             tasks = {t.id: t for t in load_tasks(p)}
             nodes = dag.nodes_from_tasks(tasks.values())
             errs = dag.validate(nodes, [tid for tid, e in state["tasks"].items() if e.get("status") == "done"])
@@ -3661,6 +3865,7 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
                             said.add(f"cap|{cap}")
                             store.log(f"{tid} waits: {cap}")
                         break
+                    store.owned.add(tid)
                     running[tid] = asyncio.create_task(_guarded_task(p, store, tasks[tid], meter), name=f"task-{tid}")
                     started.append(tid)
                     if len(running) > 1 or n > 1:
@@ -3670,6 +3875,7 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
             finished, _ = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
             for tid in [t for t, job in running.items() if job in finished]:
                 running.pop(tid)
+                store.owned.discard(tid)
     finally:
         for job in running.values():  # only on cancellation / a crash of the loop itself
             job.cancel()
@@ -3687,13 +3893,27 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
         store.log(f"WARNING: {len(left)} ready task(s) were not started: {', '.join(left)}"
                   + (f" ({why})" if why else ""))
     share_usage(state, started, run_before, meter.mark())
+    store.owned = {t for t in started if state["tasks"].get(t, {}).get("usage_share_pct") is not None}
     store.save(state)
+    store.owned = None
     if stop:
-        store.log(f"stopping: {stop}")
+        paused = [t for t, e in state["tasks"].items() if e.get("status") == "paused"]
+        store.log(f"stopping: {stop}" + (f"; paused: {', '.join(paused)}" if paused else "")
+                  + ". Run all goes on (with a new budget); nothing restarts by itself.")
+        summary["paused"] = paused
     store.log(f"run finished: {len(started)} task(s) started, {len(summary['done'])} done, {len(summary['blocked'])} blocked"
               + (f", {len(summary['needs_decision'])} waiting for a decision" if summary["needs_decision"] else "")
               + (f", {len(stuck)} waiting on a blocked task" if stuck else "")
               + f"; project total {state.get('spent_usd', 0):.2f} USD")
+    if started:
+        spent = state.get("spent_usd", 0.0) - state.get("budget_base", 0.0)
+        parts = [f"{len(summary['done'])} done"] + [f"{len(summary[k])} {w}" for k, w in (("blocked", "blocked"),
+                 ("needs_decision", "waiting for your decision"), ("stuck", "waiting on those")) if summary.get(k)]
+        if stop:
+            notify(p, "paused", f"⏸ Run paused: {stop}. {', '.join(parts)}; paused: {', '.join(summary.get('paused', [])) or '-'}. "
+                                "Run all goes on.")
+        else:
+            notify(p, "run_finished", f"■ Run finished: {', '.join(parts)} of {len(started)} started; ${spent:.2f} this run.")
     if summary["done"] and cfg["integrate_after"] and not stop:
         try:
             summary["integration"] = await asyncio.to_thread(integrate, p)
@@ -3722,15 +3942,16 @@ def share_usage(state: dict, task_ids: list[str], before: dict | None, after: di
 
 
 async def run_queue(p: Project, only: str | None = None, max_tasks: int | None = None, max_parallel: int | None = None,
-                    auto: bool = False) -> None:
+                    auto: bool = False, budget_usd: float | None = None) -> None:
     """`run PROJECT [TASK]`: one task (whatever its dependencies say), or the task graph (run_dag)."""
     if not only:
-        await run_dag(p, max_parallel, max_tasks, auto)
+        await run_dag(p, max_parallel, max_tasks, auto, budget_usd)
         return
     store = Store(p)
     state = store.load()
     state["budget_base"] = state.get("spent_usd", 0.0)
     meter = Meter(p, store, state)
+    meter.budget_override = budget_usd
     task = next((t for t in load_tasks(p) if t.id == only), None)
     if task is None:
         store.log(f"run: no task {only}")
@@ -3738,6 +3959,7 @@ async def run_queue(p: Project, only: str | None = None, max_tasks: int | None =
     if (why := meter.stop_reason()):
         store.log(f"stopping before {task.id}: {why}")
         return
+    store.owned = {task.id}
     await do_task(p, store, task, meter)
     store.log(f"run finished: 1 task(s); project total {state.get('spent_usd', 0):.2f} USD")
 
@@ -3833,6 +4055,8 @@ def integrate(p: Project, branch: str = INTEGRATION_BRANCH, final: bool = True) 
         lines += ["", "Final checks: " + ("passed." if ok else "FAILED."), *(["", "```", failure[-3000:], "```"] if failure else [])]
     p.path("reports").mkdir(exist_ok=True)
     p.path("reports").joinpath("integration.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    notify(p, "integration", f"⇢ Integration {branch} at {sha}: merged {len(merged)}, skipped {len(skipped)}"
+           + ("" if res["checks"] is None else f"; final checks {'passed' if ok else 'FAILED'}"))
     store.log(f"integration: {branch} at {sha}; merged {len(merged)}, skipped {len(skipped)}"
               + ("" if res["checks"] is None else f"; final checks {'passed' if ok else 'FAILED'}"))
     return res

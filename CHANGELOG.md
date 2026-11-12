@@ -6,6 +6,21 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- **Review step.** After the checks pass, a reviewer (`[review]`, Sonnet low effort) compares the change with the
+  task's goal and acceptance criteria and sends unfinished work back with concrete fixes; a question only the user can
+  answer becomes `needs_decision`; a failed review never blocks.
+- **Run budgets from the plan.** An approved plan runs with its estimate as the budget (`run --budget`, API
+  `budget_usd`). A budget stop is reported as a pause (log, Needs attention, plan card, the Coworker's wake-up, which
+  asks the user before spending more); nothing resumes by itself, Run all goes on.
+- **Notifications** (`[notify]`): Telegram and/or a webhook for decisions, blocked tasks, pauses, finished runs and
+  integrations.
+- `tools/deploy_server.sh`: deploy a checkout to an installed Server (import check, backups, commit stamp, restart).
+
+### Fixed
+- An answer or a retry recorded while a run was going was overwritten by the run's next save of state.json; a run now
+  writes only the tasks it is working on and takes the others from disk.
+
+### Added
 - **Tasks can wait for a decision** (status `needs_decision`). A worker that hits a choice only the user can make ends
   with `NEEDS_DECISION: question, options, recommendation`; a worker that changed nothing must say `NO_CHANGES_NEEDED:
   why`, else the task also waits for a decision. Such a task is never marked done: nothing is committed, its worktree

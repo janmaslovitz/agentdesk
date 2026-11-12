@@ -23,6 +23,13 @@ assert core.DATA == HOME, "agentdesk was imported before AGENTDESK_HOME was set"
 
 
 @pytest.fixture(autouse=True)
+def no_real_review(monkeypatch):
+    """The reviewer is a real model call: off in tests unless a test turns it on with a fake (tests/test_pipeline.py)."""
+    real = core.review_cfg
+    monkeypatch.setattr(core, "review_cfg", lambda: {**real(), "enabled": False})
+
+
+@pytest.fixture(autouse=True)
 def no_real_usage_lookup(monkeypatch):
     """Tests never read the real login or call the usage service; tests/test_usage_auto.py turns it on with fakes."""
     monkeypatch.setattr(core, "usage_auto_enabled", lambda: False)
