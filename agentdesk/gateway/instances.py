@@ -185,7 +185,8 @@ class InstanceManager:
                    if k != "AGENTDESK_SERVER_HOME" and k not in hidden}
             env.update(PYTHONUTF8="1", PYTHONUNBUFFERED="1", AGENTDESK_HOME=str(user_home),
                        AGENTDESK_LOG_MAX_MB=str(self.cfg.get("log_max_mb", 10)), AGENTDESK_LOG_KEEP=str(self.cfg.get("log_keep", 5)),
-                       AGENTDESK_SHUTDOWN_GRACE=str(self.cfg.get("shutdown_grace_seconds", 25)))
+                       AGENTDESK_SHUTDOWN_GRACE=str(self.cfg.get("shutdown_grace_seconds", 25)),
+                       AGENTDESK_STOP_RUNS="1" if self.cfg.get("stop_runs_on_shutdown") else "0")
             if self.extra_env is not None:
                 try:
                     env.update(self.extra_env(username, user_home) or {})

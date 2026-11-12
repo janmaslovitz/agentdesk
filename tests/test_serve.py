@@ -115,3 +115,33 @@ def test_python_m_agentdesk_serve_answers(tmp_path):
     finally:
         p.terminate()
         p.wait(timeout=20)
+
+
+def test_stopping_the_instance_leaves_runs_going_by_default(tmp_path, monkeypatch):
+    """A restart / update of the service must not throw away a long run: shutdown_runs is only called on request."""
+    from agentdesk import server
+    called = []
+    monkeypatch.setattr(server, "shutdown_runs", lambda grace=20.0: called.append(grace) or [])
+    monkeypatch.delenv("AGENTDESK_STOP_RUNS", raising=False)
+    srv, stop = serve.start(["--port", "0"])
+    stop()
+    assert called == []
+    monkeypatch.setenv("AGENTDESK_STOP_RUNS", "1")
+    srv, stop = serve.start(["--port", "0"])
+    stop()
+    assert len(called) == 1
+
+
+def test_service_unit_keeps_runs_and_gateway_passes_the_choice(tmp_path):
+    import importlib.util
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("build_deb", root / "packaging" / "debian" / "build_deb.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = mod.stage(tmp_path / "stage", "9.9.9")
+    unit = next(Path(out).rglob("agentdesk-server.service")).read_text(encoding="utf-8")
+    assert "KillMode=process" in unit
+    from agentdesk.gateway import config
+    assert config.DEFAULTS["stop_runs_on_shutdown"] is False
+    assert "stop_runs_on_shutdown" in config.EXAMPLE

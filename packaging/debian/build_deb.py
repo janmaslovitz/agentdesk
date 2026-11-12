@@ -113,6 +113,10 @@ Restart=always
 RestartSec=3
 # SIGTERM: instances get shutdown_grace_seconds (25) to finish their step; then SIGKILL after TimeoutStopSec.
 TimeoutStopSec=45
+# process: a stop / restart signals only the gateway, which stops the user instances itself; worker runs (detached, each
+# holding its project's run.lock) are left to finish, so an update or a restart doesn't throw away hours of agent work.
+# Instances left behind by a gateway that was killed are ended by the next gateway at start (recover()).
+KillMode=process
 SyslogIdentifier=agentdesk-server
 # State (users, projects, instance data). Logs go to the journal: journalctl -u agentdesk-server
 StateDirectory=agentdesk-server

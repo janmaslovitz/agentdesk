@@ -53,9 +53,12 @@ pause). With `false` instances start lazily at the user's next request.
 * **Hard timeout.** `[autorunner] run_timeout_min` (settings.toml / project.toml, default 720, 0 = off): a run older
   than this is killed with its children (process group); its tasks are then recovered as crashed.
 * **Disk space.** `[autorunner] min_free_gb` (default 1): below it no run starts (logged loudly: `DISK FULL`).
-* **Shutdown.** On SIGTERM (systemd stop / reboot) the gateway stops accepting, sends STOPPING=1, and every instance
-  gets `shutdown_grace_seconds` (25) to stop: it stops accepting, asks its runs to end (SIGTERM), then kills the rest
-  with their children. Tasks left `working` are recovered at the next start. Keep the grace below `TimeoutStopSec`.
+* **Shutdown and restarts keep runs going.** On SIGTERM (systemd stop / restart, a package update) the gateway stops
+  accepting, sends STOPPING=1, and every instance gets `shutdown_grace_seconds` (25) to stop. Worker runs are left
+  alone (`KillMode=process` in the unit; each run holds its project's `run.lock`): they finish their tasks, and the
+  next instance sees them through the lock, so its recovery leaves their tasks alone. Set `stop_runs_on_shutdown =
+  true` in `server.toml` to end runs with the service instead (SIGTERM, then kill after the grace). A machine reboot
+  still ends everything; tasks left `working` are recovered at the next start. Keep the grace below `TimeoutStopSec`.
 
 ## Logs
 

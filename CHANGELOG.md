@@ -14,6 +14,12 @@ them under the new version number, tags it and builds the installer (see README,
   `answer_task`, API `POST /api/v1/projects/{p}/tasks/{id}/answer`, MCP `answer`) is added to the task as a
   "## Decision" section and the task goes back to the queue.
 
+### Changed
+- **Worker runs survive a restart or an update of the Server.** The unit uses `KillMode=process` (systemd signals only
+  the gateway, which stops the user instances itself) and an instance no longer ends the runs when it stops; each run
+  holds its project's `run.lock`, so the next instance sees it and leaves its tasks alone. `stop_runs_on_shutdown =
+  true` in `server.toml` restores the old behaviour. A machine reboot still ends everything (recovered at start).
+
 ### Fixed
 - A task whose worker stopped to ask, without changing anything, was marked done (its checks passed on the unchanged
   tree) and the chain went on without it.

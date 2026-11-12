@@ -28,6 +28,7 @@ DEFAULTS: dict = {
     "max_body_mb": 200,            # largest request body passed through (uploads)
     "autostart_instances": True,   # at start, start the instances of users that were active before a reboot / crash
     "shutdown_grace_seconds": 25.0,  # on SIGTERM each instance gets this long to finish its step (keep < TimeoutStopSec)
+    "stop_runs_on_shutdown": False,  # true: a stop / restart also ends the worker runs (default: they go on and finish)
     "log_max_mb": 10.0,            # rotate audit.log and the instance logs at this size ...
     "log_keep": 5,                 # ... keeping this many old files
     "min_free_gb": 1.0,            # the watchdog stops pinging (systemd restarts the service) below this much free disk
@@ -45,6 +46,7 @@ session_idle_minutes = 120
 idle_stop_minutes = 30      # stop idle user instances (runs, chats and builds keep them alive)
 autostart_instances = true  # after a reboot, start the instances of users who were active so their queues go on
 # shutdown_grace_seconds = 25   log_max_mb = 10   log_keep = 5   min_free_gb = 1
+# stop_runs_on_shutdown = false   # worker runs survive a restart / update of the service and finish on their own
 run_as_users = false        # true: each instance runs as OS user agentdesk-<username> (see README)
 # run_as = "sudo"           # or "systemd-run"
 

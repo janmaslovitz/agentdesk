@@ -111,9 +111,16 @@ def start(argv: list[str]):
         quit_ev.set()
         if thread.is_alive():
             srv.shutdown()  # no new requests
-        grace = float(os.environ.get("AGENTDESK_SHUTDOWN_GRACE", "20"))
-        for line in server.shutdown_runs(grace):
-            server.log_error(f"shutdown: {line}")
+        # Worker runs are detached processes holding their project's run.lock: by default they outlive this instance
+        # (a restart or an update must not throw away hours of work); the next instance sees them through the lock.
+        if os.environ.get("AGENTDESK_STOP_RUNS") == "1":
+            grace = float(os.environ.get("AGENTDESK_SHUTDOWN_GRACE", "20"))
+            for line in server.shutdown_runs(grace):
+                server.log_error(f"shutdown: {line}")
+        else:
+            going = [p.slug for p in core.projects() if server.run_alive(p)[0]]
+            if going:
+                server.log_error(f"shutdown: leaving the runs of {', '.join(going)} going; they finish on their own")
         srv.server_close()
         if pidf:
             pidf.unlink(missing_ok=True)
