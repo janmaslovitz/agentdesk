@@ -2639,6 +2639,8 @@ def attention_items(slug: str, tasks: list[Task], state: dict, merged: dict[str,
             add("gate", "checks failed: " + (fail.splitlines()[0] if fail else ""), "log")
         elif st == "blocked":
             add("blocked", "blocked after all tiers: " + (fail.splitlines()[0][:120] if fail else "see the log"))
+        elif st == "needs_decision":
+            add("decision", "needs your decision: " + (str(e.get("question") or "").splitlines() or [""])[0][:160], "report")
         if e.get("merge") == "conflict" or (st != "done" and "merge conflict" in fail.lower()):
             add("conflict", "merge conflict")
         if st == "done" and e.get("branch") and merged.get(t.id) is False and not e.get("reviewed"):
@@ -2841,6 +2843,11 @@ project grows: assert on what this task adds, never that a registry, folder, lis
 an exact total of things other tasks may add. If a check fails in a test this task didn't write, decide
 whether that test encodes an assumption the project has outgrown (e.g. "nothing is registered yet"): then fix
 that test minimally and say so in your summary; otherwise fix your code.
+If the task can't be done without a decision only the user can make (a choice the task leaves open, a missing
+precondition, two reasonable options with different consequences), don't guess and don't stop silently: finish with
+a line `NEEDS_DECISION:` followed by the question, the options and what you recommend; the task then waits for the
+user's answer, which is added to the task. If the task turns out to need no change at all, finish with a line
+`NO_CHANGES_NEEDED:` and the reason. A task with a "## Decision" section has been answered: follow it.
 Finish with a short summary of what you changed, then a line `NOTES:` followed by at most three
 lines of durable facts later tasks should know (or `NOTES: none`).
 
@@ -3357,10 +3364,64 @@ def commit(p: Project, task: Task, wt: Path, tiers: str) -> str:
     # .code-graph/ is the code-graph MCP index: never commit it (info/exclude is per common git dir, so don't rely on it)
     git(["add", "-A", "--", ".", ":(exclude).code-graph", *[f":(exclude,glob){g}" for g in JUNK_GLOBS]], wt)
     git(["rm", "-r", "--cached", "-q", "--ignore-unmatch", "--", ".code-graph"], wt)
+    merging = bool(git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], wt)[1].strip())
+    if git(["diff", "--cached", "--quiet"], wt)[0] == 0 and not merging:  # nothing staged (any locale): keep HEAD
+        return git(["rev-parse", "--short", "HEAD"], wt)[1].strip()
     code, out = git(["commit", "-q", "-m", f"{task.id}: {task.title}\n\nAutomated by AgentDesk ({tiers}).\n\n{p.cfg['repo']['co_author']}"], wt)
-    if code != 0 and "nothing to commit" not in out:
+    if code != 0:
         raise RuntimeError(out)
     return git(["rev-parse", "--short", "HEAD"], wt)[1].strip()
+
+
+_DECISION = re.compile(r"(?m)^[ \t>*_-]*NEEDS_DECISION:[ \t]*")
+_NO_CHANGES = re.compile(r"(?m)^[ \t>*_-]*NO_CHANGES_NEEDED:")
+
+
+def worktree_changed(wt: Path, start_sha: str) -> bool:
+    """The worker left something to commit: new commits since `start_sha`, uncommitted changes, or a merge in progress."""
+    if git(["rev-parse", "HEAD"], wt)[1].strip() != start_sha:
+        return True
+    code, out = git(["status", "--porcelain", "--", ".", ":(exclude).code-graph", *[f":(exclude,glob){g}" for g in JUNK_GLOBS]], wt)
+    return code != 0 or bool(out.strip()) or (wt / ".git").is_file() and bool(git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], wt)[1].strip())
+
+
+def decision_needed(summary: str, wt: Path, start_sha: str) -> str:
+    """The question a finished attempt leaves for the user, or "" when the task is really done: the worker asked
+    (`NEEDS_DECISION:`), or it changed nothing without saying why nothing was needed (`NO_CHANGES_NEEDED:`)."""
+    m = _DECISION.search(summary or "")
+    if m:
+        q = summary[m.end():].split("\nNOTES:")[0].strip()
+        return (q or "The worker stopped for a decision without stating it; see its summary.")[:3000]
+    if not worktree_changed(wt, start_sha) and not _NO_CHANGES.search(summary or ""):
+        tail = (summary or "").strip()[-1500:] or "(no summary)"
+        return ("The worker finished without changing anything and didn't say why no change is needed. Decide how to go "
+                "on (answer with what it should do, or say no change is needed). Its summary:\n" + tail)
+    return ""
+
+
+def answer_task(p: Project, task_id: str, answer: str, who: str = "user") -> None:
+    """Record the answer to a task waiting for a decision (or any open task) in its file and put it back in the queue;
+    its worktree and branch are kept, so the next run goes on from there."""
+    answer = str(answer or "").strip()
+    if not answer:
+        raise ValueError("the answer is empty")
+    f = p.tasks_dir / f"{task_id}.md"
+    if not f.is_file():
+        raise KeyError(task_id)
+    store = Store(p)
+    state = store.load()
+    e = state["tasks"].setdefault(task_id, {})
+    if e.get("status") == "done":
+        raise ValueError(f"{task_id} is done; queue a follow-up task instead")
+    q = e.pop("question", "")
+    text = f.read_text(encoding="utf-8").rstrip()
+    block = f"\n\n## Decision ({_now()[:10]}, {who})\n\n" + (f"Question: {q.splitlines()[0][:300]}\n\n" if q else "") + answer + "\n"
+    write_atomic(f, text + block)
+    e.setdefault("decisions", []).append({"at": _now(), "question": q[:1000], "answer": answer[:3000], "by": who})
+    e.update(status="pending", crashes=0)
+    e.pop("last_failure", None)
+    store.save(state)
+    store.log(f"{task_id}: decision recorded ({who}); back in the queue")
 
 
 def keep_notes(p: Project, task: Task, summary: str) -> None:
@@ -3387,7 +3448,7 @@ def large_files_note(p: Project, store: Store, task: Task, wt: Path, entry: dict
 
 
 def ready(task: Task, state: dict) -> bool:
-    if state["tasks"].get(task.id, {}).get("status") in ("done", "blocked"):
+    if state["tasks"].get(task.id, {}).get("status") in ("done", "blocked", "needs_decision"):
         return False
     return all(state["tasks"].get(d, {}).get("status") == "done" for d in task.depends)
 
@@ -3404,6 +3465,7 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
     store.save(state)
     store.log(f"{task.id}: routed to {plan['tier']} ({plan.get('why', '')})")
     wt = await in_repo(meter, ensure_worktree, p, store, task, state)
+    start_sha = git(["rev-parse", "HEAD"], wt)[1].strip()
     preamble = await in_repo(meter, worktree_conflicts, p, task, wt, state)
     if preamble:
         Activity(p, task.id, "orchestrator").add("merge_conflict", text=preamble[:ACTIVITY_TEXT])
@@ -3412,6 +3474,19 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
         tried.append(tier)
         ok, summary = await work(p, store, task, wt, tier, preamble + plan["brief"], meter)
         if ok:
+            question = decision_needed(summary, wt, start_sha)
+            if question:
+                entry.update(status="needs_decision", question=question, finished=dt.datetime.now().isoformat(timespec="seconds"),
+                             branch=f"auto/{task.id}")
+                p.path("reports").mkdir(exist_ok=True)
+                p.path("reports").joinpath(f"{task.id}.md").write_text(
+                    f"# {task.id}: {task.title}\n\nWaiting for a decision (tiers {' → '.join(tried)}); nothing was committed, the "
+                    f"worktree keeps any work in progress.\n\n## Needs your decision\n\n{question}\n\n## Worker summary\n\n{summary}\n",
+                    encoding="utf-8")
+                store.save(state)
+                store.log(f"{task.id}: needs a decision: {question.splitlines()[0][:200]}")
+                Activity(p, task.id, "orchestrator").add("decision", text=question[:ACTIVITY_TEXT])
+                return
             sha = await in_repo(meter, commit, p, task, wt, " → ".join(tried))
             keep_notes(p, task, summary)
             # crashes and last_failure describe the unfinished work; the history stays in runs[]
@@ -3605,6 +3680,7 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
         auto and _flagged(state["tasks"].get(t, {}), retry))]
     summary = {"started": started, "done": [t for t, s_ in statuses.items() if s_ == "done"],
                "blocked": [t for t, s_ in statuses.items() if s_ == "blocked"],
+               "needs_decision": [t for t, s_ in statuses.items() if s_ == "needs_decision"],
                "stuck": sorted(stuck), "stopped": stop, "not_started": left}
     if left:
         why = next((worktree_cap_reason(p, t, state) for t in left if worktree_cap_reason(p, t, state)), None)
@@ -3615,6 +3691,7 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
     if stop:
         store.log(f"stopping: {stop}")
     store.log(f"run finished: {len(started)} task(s) started, {len(summary['done'])} done, {len(summary['blocked'])} blocked"
+              + (f", {len(summary['needs_decision'])} waiting for a decision" if summary["needs_decision"] else "")
               + (f", {len(stuck)} waiting on a blocked task" if stuck else "")
               + f"; project total {state.get('spent_usd', 0):.2f} USD")
     if summary["done"] and cfg["integrate_after"] and not stop:

@@ -52,7 +52,7 @@ td, th { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: le
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .st { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--chip); white-space: nowrap; }
-.st.done { color: var(--ok); } .st.blocked, .st.stuck { color: var(--bad); } .st.ready { color: var(--accent); } .st.waiting { opacity: .7; } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
+.st.done { color: var(--ok); } .st.blocked, .st.stuck { color: var(--bad); } .st.needs_decision { color: var(--warn); font-weight: 600; } .st.ready { color: var(--accent); } .st.waiting { opacity: .7; } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; } .muted { color: var(--muted); }
 .detail { padding: 0 14px 12px; margin: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.18); max-height: 560px; overflow: auto; }
 .detail.empty { display: none; }
@@ -1091,7 +1091,8 @@ async function refreshOnce() {
       <td class="num">${fmt(sumTok(t.tokens))}</td><td class="num">${money(t.cost)}<div class="muted">${t.runs.length?usedText(t.used_pct):""}</div></td>
       <td><button onclick="event.stopPropagation();runMode('task','${esc(t.id)}')" ${t.status==="done"||r.running?"disabled":""}>Run</button></td></tr>`;
   };
-  const groups = [["active", "Active", st.tasks.filter(t => t.status !== "done" && t.status !== "blocked"), true],
+  const groups = [["decide", "Needs your decision", st.tasks.filter(t => t.status === "needs_decision"), true],
+                  ["active", "Active", st.tasks.filter(t => !["done", "blocked", "needs_decision"].includes(t.status)), true],
                   ["blocked", "Blocked", st.tasks.filter(t => t.status === "blocked"), true],
                   ["done", "Done", st.tasks.filter(t => t.status === "done"), false]];
   $("tasks").innerHTML = st.tasks.length ? groups.filter(g => g[2].length).map(([k, title, list, dflt]) => {
@@ -1166,6 +1167,9 @@ async function showDetail(fetchText) {
   const report = d.report ? `<div class="report box">${mdBlock(d.report)}</div>` : `<div class="muted">${t.status === "done" ? "No report file." : pending ? "Not started yet." : "No report yet: it is written when the task is done."}</div>`;
   const sec = (k, title, sub, body) => `<details class="sec" data-k="${k}"><summary onclick="detailToggle(this)"><b>${title}</b> <span class="muted">${sub}</span></summary>${body}</details>`;
   const html = `<div class="dhead"><b>${esc(t.id)}: ${esc(t.title)}</b> <span class="st ${esc(t.status)}">${esc(t.status)}</span><button onclick="closeTask()">✕ Close</button></div>
+    ${t.status === "needs_decision" ? `<div class="approve"><div class="h">Needs your decision</div><pre>${esc(t.question || "")}</pre>
+      <textarea id="answer-${esc(t.id)}" rows="3" style="width:100%" placeholder="Your answer: what the worker should do"></textarea>
+      <div class="row"><button class="primary" onclick="answerTask('${esc(t.id)}')">Answer and requeue</button></div></div>` : ""}
     ${sec("prompt", "Prompt", "", `<pre class="box">${esc(d.body || "(empty task)")}</pre>`)}
     ${sec("handoff", "Orchestrator handoff", esc(routed ? [h.tier, h.model && h.model + (h.effort ? ` (${h.effort})` : "")].filter(Boolean).join(" · ") : "not started yet"), handoff)}
     ${sec("work", "Agent work", esc(act.length ? `${act.filter(e => e.kind === "tool").length} tool calls` : pending ? "not started yet" : ""), work)}
@@ -1365,6 +1369,13 @@ function showPlan(plan, running) {
   const warn = (plan.warnings||[]).length ? `<div class="muted" style="color:var(--warn)">${plan.warnings.map(esc).join("<br>")}</div>` : "";
   $("plan").innerHTML = `<div class="approve plan"><div class="h">${head}: ${esc(plan.summary)} <span>${plan.tasks.length} task(s)${plan.width ? " · up to " + plan.width + " in parallel" : ""}${plan.by === "architect" ? " · by the architect" : ""} · estimated ${money(lo)}–${money(hi)}</span></div>
     ${warn}<ol>${items}</ol><div class="row">${buttons}</div></div>`;
+}
+async function answerTask(id) {
+  const box = $("answer-" + id), text = (box && box.value || "").trim();
+  if (!text) { note("Write the answer first"); return; }
+  const r = await api(`/api/p/${cur}/task/${id}/answer`, {answer: text});
+  if (r.error) { note(r.error); return; }
+  note(`Answer recorded: ${id} is back in the queue`); detailCache = null; await refresh(); refreshAll();
 }
 async function planAct(action) {
   const r = await api(`/api/p/${cur}/plan/${action}`, {});

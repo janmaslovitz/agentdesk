@@ -4,8 +4,9 @@ Pure logic over plain data (task ids, their `depends`, optional `files`, and the
 the scheduler (core.run_dag), the architect's plan check, the dashboard and the API all agree on one answer.
 
 Statuses (state.json `tasks.<id>.status`): pending (or missing), routing, working, done, blocked, paused.
+Also needs_decision: the worker stopped for a question only the user can answer.
 Derived here, never stored: ready (pending, every dependency done), waiting (a dependency is not done yet) and
-stuck (a dependency, direct or not, is blocked: the task can't start until someone unblocks it).
+stuck (a dependency, direct or not, is blocked or waits for a decision: the task can't start until someone acts).
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 ACTIVE = ("routing", "working")
-RUNNABLE = ("pending", "paused")  # paused: the run budget stopped it; the next run goes on with it
+RUNNABLE = ("pending", "paused")
+HALTED = ("blocked", "needs_decision")  # a task here holds back everything built on it until a person acts  # paused: the run budget stopped it; the next run goes on with it
 TIER_WEIGHT = {"mechanical": 1.0, "standard": 3.0, "hard": 8.0}  # rough relative effort, for the critical path
 DEFAULT_WEIGHT = TIER_WEIGHT["standard"]
 
@@ -181,7 +183,7 @@ def ancestors(nodes: list[Node], tid: str) -> set[str]:
 
 def stuck(nodes: list[Node], state: dict) -> dict[str, str]:
     """Not-done tasks that can't start because a dependency (direct or not) is blocked: {task id: blocked id}."""
-    blocked = [n.id for n in nodes if status_of(state, n.id) == "blocked"]
+    blocked = [n.id for n in nodes if status_of(state, n.id) in HALTED]
     out: dict[str, str] = {}
     for b in blocked:
         for d in descendants(nodes, [b]):

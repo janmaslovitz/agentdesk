@@ -162,6 +162,7 @@ def status(project: str) -> dict:
         rows.append({"id": n["id"], "title": n["title"], "status": n["status"], "state": n["state"], "tier": n["tier"],
                      "depends": n["depends"], "level": n["level"], "cost_usd": round(cost, 4), "branch": e.get("branch"),
                      "commit": e.get("commit"), "last_failure": (e.get("last_failure") or "")[-300:] or None,
+                     "question": e.get("question") or None,
                      "started": e.get("started"), "finished": e.get("finished"), "stuck_on": n["stuck_on"]})
     return {"project": p.slug, "tasks": rows, "run": _run_summary(p, state, tasks), "integration": state.get("integration")}
 
@@ -328,6 +329,20 @@ def retry(project: str, id: str) -> dict:
     return {"ok": True}
 
 
+def answer(project: str, id: str, answer: str) -> dict:
+    """Answer a task that waits for a decision (status needs_decision): the answer is added to the task as a
+    "## Decision" section and the task goes back to the queue, keeping its worktree. Start a run to go on."""
+    p = _project(project)
+    _task(p, id)
+    try:
+        core.answer_task(p, str(id), str(answer or ""), "user")
+    except KeyError:
+        raise ApiError(f"no task {id!r} in {p.slug}", 404)
+    except ValueError as e:
+        raise ApiError(str(e))
+    return {"ok": True, "note": "recorded; the task is pending again (run starts it)"}
+
+
 def integrate(project: str, wait: bool = False) -> dict:
     """Merge every finished task's branch into auto/integration (dependency order) and run the final checks there.
     In the background by default; poll status (integration). wait=True does it now and returns the result."""
@@ -395,6 +410,8 @@ OPERATIONS: list[Op] = [
              "max_tasks": {"type": "integer", "minimum": 1}}, ["project"]), True),
     Op("stop", stop, "Stop the project's run; its working tasks go back to pending.", _obj(_P, ["project"]), True),
     Op("retry", retry, "Put a blocked/paused/crashed task back to pending.", _obj({**_P, "id": {"type": "string"}}, ["project", "id"]), True),
+    Op("answer", answer, "Answer a task waiting for a decision (needs_decision); it goes back to the queue with the answer.",
+       _obj({**_P, "id": {"type": "string"}, "answer": {"type": "string"}}, ["project", "id", "answer"]), True),
     Op("integrate", integrate, "Merge all finished branches into auto/integration and run the final checks.",
        _obj({**_P, "wait": {"type": "boolean"}}, ["project"]), True),
 ]
@@ -460,6 +477,8 @@ def rest(method: str, parts: list[str], query: dict, body: dict) -> tuple[int, d
                 return 200, call("add_task", {**body, "project": slug})
             if len(rest_) == 3 and rest_[0] == "tasks" and rest_[2] == "retry":
                 return 200, retry(slug, rest_[1])
+            if len(rest_) == 3 and rest_[0] == "tasks" and rest_[2] == "answer":
+                return 200, call("answer", {**body, "project": slug, "id": rest_[1]})
             if rest_ == ["plan"]:
                 return 200, call("propose_plan", {**body, "project": slug})
             if len(rest_) == 2 and rest_[0] == "plan" and rest_[1] in ("approve", "cancel", "close"):

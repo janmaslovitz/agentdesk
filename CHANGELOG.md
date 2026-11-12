@@ -5,6 +5,20 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- **Tasks can wait for a decision** (status `needs_decision`). A worker that hits a choice only the user can make ends
+  with `NEEDS_DECISION: question, options, recommendation`; a worker that changed nothing must say `NO_CHANGES_NEEDED:
+  why`, else the task also waits for a decision. Such a task is never marked done: nothing is committed, its worktree
+  keeps any work, what builds on it waits ("stuck"), it shows under "Needs your decision" on the dashboard (answer box
+  on the task), in Needs attention, on the plan card and in the Coworker's wake-up. The answer (dashboard, chat
+  `answer_task`, API `POST /api/v1/projects/{p}/tasks/{id}/answer`, MCP `answer`) is added to the task as a
+  "## Decision" section and the task goes back to the queue.
+
+### Fixed
+- A task whose worker stopped to ask, without changing anything, was marked done (its checks passed on the unchanged
+  tree) and the chain went on without it.
+- Committing a task with nothing to commit failed on a non-English git (`nothing to commit` was matched as text).
+
 ### Fixed
 - The Coworker reported finished tasks without reading them ("the reports are in reports/, I haven't read them"). The
   shared verify rule told chat agents to *say* when they hadn't checked something; it now tells them to check first.

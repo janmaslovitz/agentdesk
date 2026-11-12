@@ -478,15 +478,20 @@ def run_finished_prompt(p: "core.Project", since: str) -> str:
     state = core.Store(p).load()["tasks"]
     titles = {t.id: t.title for t in core.load_tasks(p)}
     ended = [(tid, e) for tid, e in state.items() if str(e.get("finished") or e.get("started") or "") >= since
-             and e.get("status") in ("done", "blocked", "paused", "pending")]
+             and e.get("status") in ("done", "blocked", "paused", "pending", "needs_decision")]
     lines = ["[Run finished] The worker run has ended. Tasks that ended in it:"]
     for tid, e in sorted(ended):
         lines.append(f"- {tid} {e.get('status')}: {titles.get(tid, e.get('title', ''))}"
                      + (f" — report reports/{tid}.md, branch {e.get('branch') or 'auto/' + tid}" if e.get("status") == "done" else "")
                      + (f" — last failure: {str(e.get('last_failure') or '').strip().splitlines()[0][:160]}"
-                        if e.get("status") != "done" and e.get("last_failure") else ""))
+                        if e.get("status") not in ("done", "needs_decision") and e.get("last_failure") else "")
+                     + (f" — QUESTION FOR THE USER: {str(e.get('question') or '')[:600]}" if e.get("status") == "needs_decision" else ""))
     if not ended:
         lines.append("- (none found; see the checkup below)")
+    if any(e.get("status") == "needs_decision" for _, e in ended):
+        lines.append("A task marked QUESTION FOR THE USER stopped for a decision that is theirs: put the question to the user "
+                     "plainly with the options and your recommendation, and record their answer with answer_task(id, answer). "
+                     "Tasks built on it wait. Decide yourself only if it is clearly not the user's call (then say what you chose).")
     lines.append("Now, before you write to the user: call review(id) for every task above and read what it produced (the report, "
                  "and the diff where it matters); check it against the task's goal; fix or queue a follow-up for anything blocked "
                  "or wrong; start what is ready next (run_all), or integrate() when the work is complete. Then tell the user, per "
@@ -891,7 +896,20 @@ class Chat:
                 return err(f"no task {tid}")
             return ok(review_text(p, tid))
 
-        base = [add_task, queue_status, task_activity, run_next, run_task, run_all, plan_task, stop_run, architect, plan, graph, review]
+        @tool("answer_task", "Record the user's answer to a task that waits for a decision (status needs_decision): it is added to the "
+                             "task and the task goes back to the queue. Only with the user's own answer, never one you made up.",
+              {"type": "object", "required": ["id", "answer"], "properties": {"id": {"type": "string"}, "answer": {"type": "string"}}})
+        async def answer_task(a):
+            try:
+                core.answer_task(p, str(a.get("id") or ""), str(a.get("answer") or ""), "user via chat")
+            except KeyError:
+                return err(f"no task {a.get('id')}")
+            except ValueError as e:
+                return err(str(e))
+            return ok(f"recorded; task {a.get('id')} is pending again. Start it (run_all) when ready.")
+
+        base = [add_task, queue_status, task_activity, run_next, run_task, run_all, plan_task, stop_run, architect, plan, graph, review,
+                answer_task]
         if approval:
             return base
 
@@ -1656,6 +1674,9 @@ class Chat:
                                   ". The plan waits here: tell me how to go on (I don't change the plan without asking)."))
                 elif st == "paused":
                     notes.append(f"⏸ Paused {what} (the account usage limit or the run budget was reached).")
+                elif st == "needs_decision":
+                    q = (str(e.get("question") or "").splitlines() or [""])[0]
+                    notes.append(f"❓ Needs your decision {what} — {q[:300]}. Tasks built on it wait; answer in the chat or on the task.")
             done = sum(s == "done" for s in statuses.values())
             if statuses and done == len(statuses):
                 plan["status"] = "finished"
@@ -1922,7 +1943,7 @@ def task_row(t: core.Task, e: dict) -> dict:
     return {"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "status": e.get("status", "pending"),
             "used_pct": task_used(runs) if task_used(runs) is not None or e.get("usage_share_pct") is None else e["usage_share_pct"],
             "usage_shared": e.get("usage_share_pct") is not None and task_used(runs) is None, "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
-            "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", "")}
+            "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", ""), "question": e.get("question", "")}
 
 
 def task_log(p: core.Project, task_id: str, n: int = 80) -> list[str]:
@@ -3013,6 +3034,14 @@ class Handler(BaseHTTPRequestHandler):
                 if act == "stop":
                     err = runner(p).stop()
                     return self.json({"error": err} if err else {"ok": True})
+                if act == "task" and len(parts) == 6 and parts[5] == "answer":
+                    if not ID.fullmatch(parts[4]):
+                        return self.json({"error": "bad task id"}, 400)
+                    try:
+                        core.answer_task(p, parts[4], str(d.get("answer") or ""), "user")
+                    except KeyError:
+                        return self.json({"error": "no such task"}, 404)
+                    return self.json({"ok": True})
                 if act == "tasks":
                     tid = str(d.get("id") or core.next_task_id(p))
                     deps = [x.strip() for x in str(d.get("depends", "")).split(",") if x.strip()]
