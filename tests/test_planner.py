@@ -89,12 +89,12 @@ def test_save_waits_for_a_reader(proj):
 
 def test_planner_settings_and_mode(proj, monkeypatch):
     s = tomllib.loads(core.DEFAULT_SETTINGS)["chat"]["planner"]
-    assert s == {"model": "opus", "effort": "high", "budget_usd": 4.0}
+    assert s == {"model": "sonnet", "effort": "medium", "budget_usd": 2.0}
     shipped = tomllib.loads((Path(__file__).resolve().parent.parent / "data" / "settings.toml").read_text(encoding="utf-8"))
     assert shipped["chat"]["planner"] == s
     monkeypatch.setattr(core, "settings", lambda: {"chat": {"model": "haiku"}})  # an older settings.toml
     cs = core.chat_settings("planner")
-    assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("opus", "high", 4.0)
+    assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("sonnet", "medium", 2.0)
     monkeypatch.undo()
     assert core.chat_mode(core.project(proj.slug)) == "planner"
     assert tomllib.loads(proj.path("project.toml").read_text(encoding="utf-8"))["chat_mode"] == "planner"
@@ -333,10 +333,10 @@ def fake(monkeypatch):
 def test_planner_session(chat, fake):
     fake.script = [AssistantMessage(content=[TextBlock(text="Here's the plan")], model="sonnet"), result(0.2)]
     out = chat.ask("Add a config parser")
-    assert out["text"] == "Here's the plan" and out["model"] == "opus"
+    assert out["text"] == "Here's the plan" and out["model"] == "sonnet"
     [c] = fake.made
     o = c.options
-    assert (o.model, o.effort, o.max_budget_usd, o.cwd) == ("opus", "high", 4.0, str(chat.p.dir))
+    assert (o.model, o.effort, o.max_budget_usd, o.cwd) == ("sonnet", "medium", 2.0, str(chat.p.dir))
     assert o.can_use_tool == chat.planner_permission and o.setting_sources == []
     assert set(o.allowed_tools) == {"Read", "Glob", "Grep"}
     assert {"Bash", "PowerShell", "Write", "Edit"} <= set(o.disallowed_tools)
@@ -345,7 +345,7 @@ def test_planner_session(chat, fake):
     assert chat.history[-2] == {"role": "user", "text": "Add a config parser"}
     fake.script = [result(2.3, subtype="error_max_budget_usd")]
     out = chat.ask("more")
-    assert "Planner budget of $4.00" in out["text"] and fake.made[1].options.resume == "s1"
+    assert "Planner budget of $2.00" in out["text"] and fake.made[1].options.resume == "s1"
 
 
 
@@ -371,9 +371,9 @@ def test_http_plan_card(proj, runner):
         core.set_chat_mode(proj, "assistant")
         assert post(base + "/chat/mode", {"mode": "planner"}) == {"ok": True, "mode": "planner"}
         info = get(base + "/chat")
-        assert info["mode"] == "planner" and info["budget_usd"] == 4.0 and "worktree" not in info
+        assert info["mode"] == "planner" and info["budget_usd"] == 2.0 and "worktree" not in info
         st = get(base + "/state")
-        assert st["plan"] is None and st["project"]["chat_model"] == "opus (high)"
+        assert st["plan"] is None and st["project"]["chat_model"] == "sonnet (medium)"
         assert "error" in post(base + "/plan/approve", {})
         core.propose_plan(proj, "Parser", PLAN)
         st = get(base + "/state")

@@ -290,7 +290,10 @@ Your job is to look after the project and keep it moving:
   overwriting, don't discard uncommitted changes you didn't make, prefer commands you can undo, and run
   the project's checks before committing to "{base}". Pushing, publishing, opening pull requests and
   changing remotes are allowed, but do them when the user asks for it or the task clearly includes it,
-  and say plainly that you did.
+  and say plainly that you did. These very important commands (push, releases, pull requests, remote changes,
+  hard resets, force-deleting branches, publishing, outbound uploads, stopping services) show the user an
+  approval card and wait for their answer: just run the command when it's due; if they deny it, don't retry.
+  Everything else you do without asking.
 
 The project's AgentDesk folder is {folder}:
 - state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
@@ -306,8 +309,11 @@ left. Workers run in their own worktrees, so your edits in the checkout don't co
 """
 
 PLANNER_PROMPT = """You are the Planner on the user's AgentDesk dashboard for the project "{name}" (repository
-{repo}). You turn the user's request into a plan of tasks for the workers; you don't do the work
-yourself. Be brief and plain; answer in the user's language.
+{repo}). You work out the chain of tasks together with the user: clarify the goal, scope and priorities with
+them, propose the plan, adjust it as they say, and leave the decision to start it to them. You don't do the work
+yourself. Be brief and plain; answer in the user's language. For a goal that spans several modules or many tasks,
+let the architect(goal) tool draft the graph (pass it everything the user told you), then walk the user through it
+and change it with update_plan.
 
 Read the request, then as much of the repository ({repo}) and the project's AgentDesk folder (your
 working directory: tasks/*.md is the queue, state.json the status of each task, reports/, notes.md,
@@ -502,7 +508,7 @@ def activity_digest(p: "core.Project", tid: str, last: int = 12) -> str:
     out += ["last events:"] + ["  " + _event_line(x) for x in ev[-last:]]
     return "\n".join(out)
 AUTONOMOUS = ("coworker", "planner")  # modes without approval cards: a budget per message and the usage pause
-PLANNER_TOOLS = ("propose_plan", "update_plan", "cancel_plan")
+PLANNER_TOOLS = ("propose_plan", "update_plan", "cancel_plan", "architect")
 # What the Planner may use. ToolSearch only loads tool schemas (the CLI may defer MCP tools behind it).
 PLANNER_ALLOWED = ("Read", "Glob", "Grep", "ToolSearch")
 PLAN_POLL_S = 2.0
@@ -721,14 +727,24 @@ class Chat:
         return PermissionResultAllow()
 
     async def coworker_permission(self, name: str, args: dict, ctx=None):
-        """Coworker: no approval cards. Its own run/queue tools are allowed; everything else goes through
+        """Coworker: acts on its own; only a very important shell command ([chat.coworker_confirm] patterns: pushing,
+        releases, pull requests, remote changes, hard resets, force-deleting branches, publishing, outbound uploads)
+        waits for the user's approval card. With full access everything else is allowed; otherwise it goes through
         the workers' guard, with edits limited to its worktree, tasks/ and notes.md."""
-        if name.startswith(MCP_PREFIX) or core.chat_settings("coworker").get("full_access"):
+        if name.startswith(MCP_PREFIX):
             return PermissionResultAllow()
-        wt = core.cowork_path(self.p)
-        check = core.guard(wt, also=(self.p.dir / "tasks", self.p.dir / "notes.md", self.p.dir / "chat_rules.md"), never=(Path(self.p.cfg["repo"]["worktrees"]),),
-                           extra_deny=core.COWORK_DENY, who="the Coworker")
-        return await check(name, args, ctx)
+        if not core.chat_settings("coworker").get("full_access"):
+            wt = core.cowork_path(self.p)
+            check = core.guard(wt, also=(self.p.dir / "tasks", self.p.dir / "notes.md", self.p.dir / "chat_rules.md"),
+                               never=(Path(self.p.cfg["repo"]["worktrees"]),), extra_deny=core.COWORK_DENY, who="the Coworker")
+            verdict = await check(name, args, ctx)
+            if isinstance(verdict, PermissionResultDeny):
+                return verdict
+        if name in core.SHELL_TOOLS and core.coworker_confirm_reason(str(args.get("command", ""))):
+            answer = await self.approvals.ask(name, str(args.get("command", "")), "the Coworker asks before an important action: "
+                                              + str(args.get("description") or "").strip())
+            return self._verdict(answer)
+        return PermissionResultAllow()
 
     async def coworker_hook(self, data: dict, _tool_use_id=None, _ctx=None) -> dict:
         """PreToolUse hook running the same check for every tool call, including those the CLI allows on its
@@ -989,7 +1005,21 @@ class Chat:
             except ValueError as e:
                 return err(e)
 
-        return [propose_plan, update_plan, cancel_plan]
+        @tool("architect", "Hand the heavy planning to the architect (a stronger model that reads the code deeply and checks the graph): "
+                           "it drafts the plan in the background and replaces the current draft; the user sees it on the plan card and you "
+                           "see it at the start of their next message. Use it for goals that span several modules or many tasks.",
+              {"type": "object", "required": ["goal"], "properties": {"goal": {"type": "string", "description": "the goal with "
+               "what you learned from the user: scope, constraints, what not to touch, priorities"}}})
+        async def architect(a):
+            try:
+                service.architect(p.slug, str(a.get("goal") or ""))
+            except service.ApiError as e:
+                return err(e)
+            self.watch_architect_bg()
+            return done("The architect is drafting the plan (a few minutes). Tell the user it's being prepared; when it's ready it "
+                        "appears on the plan card and you can go through it with them and change it with update_plan.")
+
+        return [propose_plan, update_plan, cancel_plan, architect]
 
     # -- sessions: the Assistant keeps one CLI process; the Coworker starts one per message (resuming the
     # session), because --max-budget-usd counts the spend of the process, which makes it a per-message budget.
@@ -1424,6 +1454,10 @@ class Chat:
             while time.time() < deadline and service.busy(self.p, "architect"):
                 time.sleep(5)
             info = core.read_json(self.p.path("architect.json"), {})
+            if not self.coworking():
+                self.note(("The architect's draft plan is ready on the plan card:\n" + plan_text(self.p))
+                          if info.get("status") == "done" else f"The architect gave no plan: {info.get('error') or 'unknown error'}")
+                return
             if info.get("status") == "done":
                 text = ("[Architect finished] The draft plan is ready:\n" + plan_text(self.p) + "\n\nReview it critically: does it cover "
                         "the goal, are the dependencies real (an unneeded one costs parallelism), does each task list its files and "

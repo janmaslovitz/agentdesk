@@ -75,7 +75,7 @@ def test_coworker_settings(monkeypatch):
     assert (cs["model"], cs["effort"], cs["budget_usd"]) == ("opus", "medium", 0.5)
     # The defaults written for a new install have the keys too (the user's own settings.toml is never read by tests).
     default = tomllib.loads(core.DEFAULT_SETTINGS)
-    assert default["chat"]["coworker"]["budget_usd"] == 5.0 and core.chat_settings("assistant")["model"] == "sonnet"
+    assert default["chat"]["coworker"]["budget_usd"] == 5.0 and core.chat_settings("assistant")["model"] == "haiku"
 
 
 # ----------------------------------------------------------------------------- guard: no approval cards, but the workers' deny list

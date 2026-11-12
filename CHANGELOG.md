@@ -23,9 +23,12 @@ them under the new version number, tags it and builds the installer (see README,
   includes the read-first and verify rules.
 
 ### Changed
-- Chat models: Assistant `sonnet` at medium effort (was `haiku`, 15 turns → 40); Planner `opus` at high effort with a
-  $4 budget (was `sonnet` medium, $2), and it is told to read the code properly instead of "keep the exploring short".
-  The Coworker stays on `sonnet` medium.
+- The Coworker asks the user (an approval card, no "Always allow") before very important shell commands only: pushing,
+  releases and pull requests, remote changes, hard resets, force-deleting branches, publishing, outbound uploads,
+  stopping services (`[chat.coworker_confirm] patterns`). Everything else it still does on its own.
+- The Planner works the plan out together with the user and can hand the heavy planning to the architect
+  (`architect(goal)`); it is told to read the code properly instead of "keep the exploring short". Models unchanged:
+  Assistant `haiku` (now up to 40 turns), Planner and Coworker `sonnet` medium.
 
 ### Changed
 - `[run] max_parallel` defaults to 8 (was 3); the Server's default `max_worktrees` is 10 (was 6).

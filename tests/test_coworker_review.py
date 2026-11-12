@@ -125,5 +125,21 @@ def test_plan_text_and_graph_text(proj):
 def test_default_chat_models():
     import tomllib
     chat = tomllib.loads(core.DEFAULT_SETTINGS)["chat"]
-    assert chat["coworker"]["model"] == "sonnet" and chat["assistant"]["model"] == "sonnet"
-    assert (chat["planner"]["model"], chat["planner"]["effort"]) == ("opus", "high")
+    assert chat["coworker"]["model"] == "sonnet" and chat["assistant"]["model"] == "haiku"
+    assert (chat["planner"]["model"], chat["planner"]["effort"]) == ("sonnet", "medium")
+
+
+def test_planner_can_hand_planning_to_the_architect(chat):
+    names = {t.name for t in chat.planner_tools()}
+    assert {"propose_plan", "update_plan", "cancel_plan", "architect"} <= names
+    assert "architect" in server.PLANNER_TOOLS
+    assert "together with the user" in server.PLANNER_PROMPT and "architect(goal)" in server.PLANNER_PROMPT
+
+
+def test_confirm_patterns_cover_only_important_actions():
+    must = ["git push origin main", "gh release create v1", "git remote set-url origin x", "git reset --hard HEAD",
+            "git branch -D x", "cargo publish", "curl -X POST https://e.x", "systemctl restart x"]
+    free = ["git merge auto/1", "git branch -d x", "gh pr list", "gh api repos/x", "cargo test", "curl -s https://e.x",
+            "git checkout main", "rm -rf /tmp/x"]
+    assert all(core.coworker_confirm_reason(c) for c in must)
+    assert not any(core.coworker_confirm_reason(c) for c in free)

@@ -31,12 +31,35 @@ def test_full_access_is_the_default():
     assert core.chat_settings("coworker")["full_access"] is True
 
 
-@pytest.mark.parametrize("cmd", ["git push origin main", "git remote add x https://e.x/r.git", "git reset --hard HEAD~1",
-                                 "git checkout main", "gh pr create", "cargo publish", "type project.toml",
-                                 "Set-Content settings.toml x"])
-def test_every_command_is_allowed(chat, cmd):
+@pytest.mark.parametrize("cmd", ["git checkout main", "git merge auto/001", "git branch -d auto/001", "gh pr list",
+                                 "type project.toml", "Set-Content settings.toml x", "cargo test", "curl -s https://e.x"])
+def test_routine_commands_run_without_asking(chat, cmd):
     for tool in ("Bash", "PowerShell"):
         assert allowed(chat, tool, {"command": cmd})
+    assert chat.approvals.pending() == []
+
+
+def answered(chat, cmd, action):
+    """Run the permission check for an important command and answer its approval card with `action`."""
+    import asyncio
+    import time
+    fut = asyncio.run_coroutine_threadsafe(chat.coworker_permission("Bash", {"command": cmd, "description": "ship it"}), server.LOOP)
+    for _ in range(100):
+        cards = chat.approvals.pending()
+        if cards:
+            break
+        time.sleep(0.02)
+    assert cards and cards[0]["detail"] == cmd and "important action" in cards[0]["reason"]
+    assert not cards[0].get("prefix")  # no "Always allow" for important actions
+    chat.approvals.resolve(cards[0]["id"], action)
+    return fut.result(5)
+
+
+@pytest.mark.parametrize("cmd", ["git push origin main", "git remote add x https://e.x/r.git", "git reset --hard HEAD~1",
+                                 "gh pr create", "cargo publish", "git branch -D auto/001", "gh release create v1"])
+def test_important_commands_wait_for_the_user(chat, cmd):
+    assert isinstance(answered(chat, cmd, "allow_once"), PermissionResultAllow)
+    assert not isinstance(answered(chat, cmd, "deny"), PermissionResultAllow)
 
 
 def test_edits_anywhere_are_allowed_including_main_checkout(chat, tmp_path):

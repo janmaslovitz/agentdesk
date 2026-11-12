@@ -210,8 +210,7 @@ max_turns = 120
 budget_usd = 12.0
 
 [chat.assistant]
-model = "sonnet"
-effort = "medium"
+model = "haiku"
 
 # Coworker: the project's curator, autonomous (no approval cards); budget_usd is per message.
 # full_access = true: works in the project checkout itself (main included) with every tool and command, no guard.
@@ -240,11 +239,23 @@ retry_crashed = 1
 run_timeout_min = 720     # kill a run (and its git / claude children) that is older than this; 0 = never
 min_free_gb = 1.0         # no run starts with less free disk space
 
+# The Coworker asks the user (an approval card) only before these shell commands: irreversible or public actions.
+# Everything else it does on its own. Regular expressions, matched case-insensitively against the command.
+[chat.coworker_confirm]
+patterns = [
+  'git\\s+push', 'git\\s+remote\\s+(add|set-url|remove|rm|rename)', '(?-i:git\\s+branch\\s+(-D|--delete\\s+--force))',
+  'git\\s+reset\\s+--hard', 'git\\s+tag\\s+(-d|--delete)',
+  'gh\\s+(pr\\s+(create|merge|close|edit|comment|review)|release\\s+(create|delete|edit|upload)|repo\\s+(create|delete|edit|rename|archive)|issue\\s+(create|close|edit|comment|delete)|workflow\\s+(run|enable|disable))',
+  'gh\\s+api\\s+.*(-X\\s*(POST|PUT|PATCH|DELETE)|--method\\s+(POST|PUT|PATCH|DELETE)|-f\\s|--field)',
+  '(cargo|npm|pnpm|yarn)\\s+publish', 'twine\\s+upload', 'curl\\s+.*(-T\\b|--upload|-d\\b|--data|-X\\s*(POST|PUT|PATCH|DELETE))',
+  'rm\\s+-[a-z]*r[a-z]*f?\\s+/(\\s|$)', 'systemctl\\s+(stop|restart|disable)', '\\b(shutdown|reboot)\\b',
+]
+
 # Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
 [chat.planner]
-model = "opus"
-effort = "high"
-budget_usd = 4.0
+model = "sonnet"
+effort = "medium"
+budget_usd = 2.0
 
 # Disk hygiene: the dashboard measures each project's cargo target dirs, worktrees and data folder in the background
 # and shows them (Disk section). auto = false: it only suggests; the user confirms each cleanup. A project can override
@@ -979,13 +990,13 @@ def read_json(path: Path, default, backup: Path | None = None):
 # ----------------------------------------------------------------------------- chat settings (project.toml / settings.toml)
 
 CHAT_MODES = ("assistant", "coworker", "planner")
-CHAT_DEFAULT_MODELS = {"assistant": "sonnet", "coworker": "sonnet", "planner": "opus"}
+CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet", "planner": "sonnet"}
 # Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
 # full_access: the Coworker curates the whole project: it works in the project checkout itself (main included),
 # with every tool and command and no guard. false = the older guarded mode in its own worktree (auto/cowork).
-CHAT_DEFAULTS = {"assistant": {"effort": "medium"}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
+CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
                              "live": True, "daily_budget_usd": 25.0, "checkup_interval_min": 0},
-                 "planner": {"effort": "high", "budget_usd": 4.0, "max_turns": 40}}
+                 "planner": {"effort": "medium", "budget_usd": 2.0, "max_turns": 30}}
 COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
 # On top of `[guard] deny`: the Coworker may not touch AgentDesk's own config from the shell (the
 # orchestrator runs project.toml's gate commands unguarded, and settings.toml holds the guard itself).
@@ -997,7 +1008,7 @@ SHELL_META = re.compile(r"[;&|`<>(){}$\n\r]")
 
 def chat_settings(mode: str) -> dict:
     """`[chat.<mode>]` from settings.toml over CHAT_DEFAULTS; the assistant's model falls back to the older
-    `[chat] model`, then CHAT_DEFAULT_MODELS (assistant and coworker: sonnet, planner: opus)."""
+    `[chat] model`, then CHAT_DEFAULT_MODELS (assistant: haiku, coworker and planner: sonnet)."""
     chat = settings().get("chat", {})
     out = {**CHAT_DEFAULTS.get(mode, {}), **chat.get(mode, {})}
     legacy = chat.get("model") if mode == "assistant" else None  # older settings.toml: [chat] model
@@ -1091,6 +1102,18 @@ def suggest_prefix(cmd: str) -> str | None:
         if len(words) == 2:
             break
     return " ".join(words) or None
+
+
+def coworker_confirm_reason(cmd: str) -> str | None:
+    """The `[chat.coworker_confirm]` pattern a shell command matches (an action the Coworker must have the user
+    approve), or None."""
+    for pat in settings().get("chat", {}).get("coworker_confirm", {}).get("patterns", []):
+        try:
+            if re.search(pat, cmd or "", re.I):
+                return pat
+        except re.error:
+            continue
+    return None
 
 
 def guard_denied(cmd: str) -> str | None:
