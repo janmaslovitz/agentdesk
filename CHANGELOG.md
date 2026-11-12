@@ -5,6 +5,28 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- The Coworker reported finished tasks without reading them ("the reports are in reports/, I haven't read them"). The
+  shared verify rule told chat agents to *say* when they hadn't checked something; it now tells them to check first.
+  After a run the Coworker is woken with the list of tasks that ended and an explicit order to review each one before it
+  writes to the user. The memory no longer records "the assistant hasn't read X" (it records a to-do instead).
+- `run_all` was described to the chat agents as "one after another", so the Coworker started tasks one by one. It now
+  says the graph runs in parallel.
+- In Coworker mode the plan card no longer asks the user to decide on a blocked task or press Start: the Coworker is
+  woken instead.
+
+### Added
+- Coworker tools: `architect(goal)` (draft a task graph; the Coworker is woken when it's ready), `plan`, `approve_plan`,
+  `cancel_plan`, `graph`, `review(id)` (a task's report, last failure, commits and changed files) and `integrate`. Its
+  instructions make it the workers' reviewer and have it delegate bigger goals to the architect and the orchestrator.
+- The Assistant gets `review`, `graph`, `plan` and `architect` (the latter behind an approval card); its prompt now
+  includes the read-first and verify rules.
+
+### Changed
+- Chat models: Assistant `sonnet` at medium effort (was `haiku`, 15 turns → 40); Planner `opus` at high effort with a
+  $4 budget (was `sonnet` medium, $2), and it is told to read the code properly instead of "keep the exploring short".
+  The Coworker stays on `sonnet` medium.
+
 ### Changed
 - `[run] max_parallel` defaults to 8 (was 3); the Server's default `max_worktrees` is 10 (was 6).
 - `[hygiene] max_worktrees` counts only worktrees of unfinished tasks: finished-but-unmerged work no longer stalls a

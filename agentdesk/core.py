@@ -210,7 +210,8 @@ max_turns = 120
 budget_usd = 12.0
 
 [chat.assistant]
-model = "haiku"
+model = "sonnet"
+effort = "medium"
 
 # Coworker: the project's curator, autonomous (no approval cards); budget_usd is per message.
 # full_access = true: works in the project checkout itself (main included) with every tool and command, no guard.
@@ -241,9 +242,9 @@ min_free_gb = 1.0         # no run starts with less free disk space
 
 # Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
 [chat.planner]
-model = "sonnet"
-effort = "medium"
-budget_usd = 2.0
+model = "opus"
+effort = "high"
+budget_usd = 4.0
 
 # Disk hygiene: the dashboard measures each project's cargo target dirs, worktrees and data folder in the background
 # and shows them (Disk section). auto = false: it only suggests; the user confirms each cleanup. A project can override
@@ -978,13 +979,13 @@ def read_json(path: Path, default, backup: Path | None = None):
 # ----------------------------------------------------------------------------- chat settings (project.toml / settings.toml)
 
 CHAT_MODES = ("assistant", "coworker", "planner")
-CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet", "planner": "sonnet"}
+CHAT_DEFAULT_MODELS = {"assistant": "sonnet", "coworker": "sonnet", "planner": "opus"}
 # Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
 # full_access: the Coworker curates the whole project: it works in the project checkout itself (main included),
 # with every tool and command and no guard. false = the older guarded mode in its own worktree (auto/cowork).
-CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
+CHAT_DEFAULTS = {"assistant": {"effort": "medium"}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
                              "live": True, "daily_budget_usd": 25.0, "checkup_interval_min": 0},
-                 "planner": {"effort": "medium", "budget_usd": 2.0, "max_turns": 30}}
+                 "planner": {"effort": "high", "budget_usd": 4.0, "max_turns": 40}}
 COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
 # On top of `[guard] deny`: the Coworker may not touch AgentDesk's own config from the shell (the
 # orchestrator runs project.toml's gate commands unguarded, and settings.toml holds the guard itself).
@@ -996,7 +997,7 @@ SHELL_META = re.compile(r"[;&|`<>(){}$\n\r]")
 
 def chat_settings(mode: str) -> dict:
     """`[chat.<mode>]` from settings.toml over CHAT_DEFAULTS; the assistant's model falls back to the older
-    `[chat] model`, then haiku (coworker: sonnet)."""
+    `[chat] model`, then CHAT_DEFAULT_MODELS (assistant and coworker: sonnet, planner: opus)."""
     chat = settings().get("chat", {})
     out = {**CHAT_DEFAULTS.get(mode, {}), **chat.get(mode, {})}
     legacy = chat.get("model") if mode == "assistant" else None  # older settings.toml: [chat] model

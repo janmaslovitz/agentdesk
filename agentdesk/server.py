@@ -132,8 +132,11 @@ def run_args(p: core.Project, mode: str, tid: str = "") -> list[str] | None:
 # ----------------------------------------------------------------------------- chat
 
 CHAT_PROMPT = """You are the assistant on the user's AgentDesk dashboard for the project "{name}"
-(repository {repo}). Agents work on it task by task. Be brief and plain; answer in the user's
-language.
+(repository {repo}). Worker agents run its tasks in parallel, in dependency order. Be brief and plain;
+answer in the user's language. Find things out yourself: when the user mentions a task, a report, a branch or an
+earlier decision, read it first (review(id) shows a task's report and changes; graph() the task graph; plan() the
+plan), then answer from what you found. For a goal bigger than one task, offer architect(goal): it drafts a
+dependency graph of tasks the user approves on the plan card.
 
 Your working directory is the project's AgentDesk folder:
 - state.json: per task status (pending/routing/working/done/blocked/paused), tier, runs (model,
@@ -179,7 +182,8 @@ question, one short acknowledging clause is enough. Don't repeat it later in the
 MEMORY_PROMPT = """You maintain the running memory of a project chat assistant. Below are the current memory and the latest
 exchange. Return the full updated memory and nothing else, as Markdown with exactly these sections, in this order:
 {sections}
-Rules: key facts, decisions, open threads and user preferences only, as short bullet points. Drop what is outdated or
+Rules: key facts, decisions, open threads and user preferences only, as short bullet points. Record unfinished work as
+a to-do ("read and review reports 037-038"), never as a fact about the assistant ("the assistant hasn't read X"). Drop what is outdated or
 trivial. Never store secrets (keys, tokens, passwords) or file contents. Keep it under {words} words in total.
 {extra}
 Current memory:
@@ -223,6 +227,18 @@ How you work: the user expects a colleague who acts, not one who waits for instr
 - Ask only when a decision is really the user's: scope, priorities, something destructive or public they haven't
   okayed. Otherwise take the sensible default, do it, and say what you chose.
 - Carry work through to a checked result; don't hand back half-done steps or a list of things the user could do.
+- You are the reviewer of the workers' output. When tasks finish (you are woken with "[Run finished]"), read each
+  finished task's report (review(id) gives the report and the branch's changes; read more of the diff or the files
+  when it matters) BEFORE you report. Tell the user the substance: what each task found or changed, with the key
+  facts and numbers, your verdict (good / needs a fix / needs a follow-up) and what you did about it. A status line
+  ("037 done, commit abc, I haven't read the report") is not a report. Never tell the user that you haven't read
+  a report, a diff or a file: read it, then speak. Unread work is not finished work.
+- Delegate the AgentDesk way: for a goal bigger than one task, call architect(goal); it drafts a dependency graph of
+  tasks and wakes you. Review the draft critically (scope, dependencies, files, acceptance criteria) and
+  approve_plan() it (or cancel_plan() and call architect again with a sharper goal). The orchestrator then runs the
+  graph in parallel and wakes you when the run ends. Use run_all for queued tasks (every ready task runs in
+  parallel, in dependency order); run_task only when exactly one task should run. After a run with finished work,
+  integrate() merges the finished branches into auto/integration and runs the final checks; review that branch.
 - The user's rules for working with them live in {folder}/chat_rules.md and are shown at the end of these
   instructions; they override the defaults here. When the user asks you to change how you work (tone, autonomy,
   what to report, what to do on your own), update chat_rules.md at once (a short Markdown bullet list; replace a
@@ -243,8 +259,10 @@ The project's AgentDesk folder is {folder}:
 - state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
   finished tasks. agentdesk.log: what happened. You may read all of it.
 - tasks/*.md: the queue; you may write task files there and append to notes.md (durable facts).
-Your tools for the workers (the agentdesk server), no approval needed: add_task, queue_status,
-task_activity(id) (the agent timeline: when asked what an agent is doing, read it and describe it in a sentence or two), run_next, run_task(id), run_all, plan_task(id), stop_run. Only one run per project goes at a time.
+Your tools for the workers (the agentdesk server), no approval needed: architect(goal), plan(), approve_plan(),
+cancel_plan(), graph(), review(id), integrate(), add_task, queue_status, task_activity(id) (the agent timeline: when
+asked what an agent is doing, read it and describe it in a sentence or two), run_all, run_task(id), run_next,
+plan_task(id), stop_run, checkup, watch_run. Only one run per project goes at a time; it runs many tasks in parallel.
 Delegate bigger pieces of work to the workers as tasks; do small things yourself.
 
 Shell commands (Bash/PowerShell) run without asking, but a guard refuses pushing, changing remotes,
@@ -278,8 +296,10 @@ The project's AgentDesk folder is {folder}:
 - state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
   finished tasks. agentdesk.log: what happened. notes.md: durable facts (append what future you needs).
 - tasks/*.md: the queue. project.toml: repo, base branch, checks (you may edit it; keep it valid TOML).
-Your tools for the workers (the agentdesk server): add_task, queue_status, task_activity(id) (the agent timeline: when asked what an agent is doing, read it and describe it in a sentence or two), run_next, run_task(id),
-run_all, plan_task(id), stop_run. Only one run per project goes at a time.
+Your tools for the workers (the agentdesk server), no approval needed: architect(goal), plan(), approve_plan(),
+cancel_plan(), graph(), review(id), integrate(), add_task, queue_status, task_activity(id) (the agent timeline: when
+asked what an agent is doing, read it and describe it in a sentence or two), run_all, run_task(id), run_next,
+plan_task(id), stop_run, checkup, watch_run. Only one run per project goes at a time; it runs many tasks in parallel.
 
 You have a budget per message (${budget:.2f}); finish with a short summary of what you did and what's
 left. Workers run in their own worktrees, so your edits in the checkout don't collide with theirs.
@@ -291,14 +311,18 @@ yourself. Be brief and plain; answer in the user's language.
 
 Read the request, then as much of the repository ({repo}) and the project's AgentDesk folder (your
 working directory: tasks/*.md is the queue, state.json the status of each task, reports/, notes.md,
-agentdesk.log) as you need to plan well, with Read, Glob and Grep. Keep the exploring short. Then
+agentdesk.log) as you need to plan well, with Read, Glob and Grep: read enough of the code to name the real files,
+functions and interfaces each task touches (a plan built on guesses fails in the workers' hands). Then
 call propose_plan with:
 - summary: one line on what the plan achieves;
 - tasks, in order, each with a short title; goal (what to change, constraints, and how to tell it's
   done: the worker reads only its task); files (the files it touches); tier (mechanical | standard |
   hard, or empty to let the router decide); depends (what must be done first: d1, d2, ... for this
   plan's tasks by position, or ids of tasks already queued).
-Prefer few, self-contained tasks; split only where one worker would otherwise do too much at once.
+Prefer few, self-contained tasks; split only where one worker would otherwise do too much at once. Each goal ends
+with checkable acceptance criteria (tests that pass, commands that succeed, behaviour). Tests must stay valid as
+the plan fills in (no "nothing registered yet" or exact-count assertions on shared collections); a task that
+generates data must also show that normal data triggers nothing.
 Tasks run in parallel (each in its own branch) as soon as their dependencies are done: list the files each task
 touches, and never let two tasks that may run at the same time edit the same file (add a depends, or merge them);
 propose_plan answers with WARNING lines for such overlaps: fix them with update_plan.
@@ -317,15 +341,18 @@ state in brackets.
 
 VERIFY_RULE = """
 Check before you report: every claim in your answer must come from something you read or ran in this
-session (the file, state.json, the report, the git state, the command output), not from memory, a log line
-or a status you saw earlier. Before saying that something is done, broken, merged or missing, look at the
-source and, where it is cheap, run the check. If you did not check something, say so plainly instead of
-presenting it as fact; if you were wrong earlier, correct it.
+session (the file, state.json, the report, the diff, the git state, the command output), not from memory, a log
+line or a status you saw earlier. Before saying that something is done, broken, merged or missing, look at the
+source and, where it is cheap, run the check. Anything you can read or run, you check BEFORE answering: "I
+haven't read / checked it" is never a statement to make, it is a step to do first. Only what truly can't be
+checked yet (work still running, a machine you can't reach) is reported as pending, with how and when you'll
+know. If you were wrong earlier, correct it.
 """
 # the same rule for every chat agent of every project
 COWORKER_PROMPT += VERIFY_RULE
 COWORKER_FULL_PROMPT += VERIFY_RULE
 PLANNER_PROMPT += VERIFY_RULE
+CHAT_PROMPT += VERIFY_RULE
 
 COWORKER_LIVE_ADDENDUM = """
 This is a live session: it stays open between messages, so you can be interactive like a teammate.
@@ -390,6 +417,77 @@ def _event_line(ev: dict) -> str:
     return f"{at} {who}{kind} {str(what).strip()}"[:220]
 
 
+def plan_text(p: "core.Project") -> str:
+    """The current plan as plain text for the Coworker (tasks in dependency order, levels, files, warnings)."""
+    v = core.plan_view(p)
+    if not v:
+        return "no plan"
+    lines = [f"{v['status']} plan v{v.get('version', 1)}" + (" by the architect" if v.get("by") == "architect" else "")
+             + f": {v.get('summary', '')}"]
+    for t in v["tasks"]:
+        lines.append(f"- {t['id']} [{t.get('tier') or 'router'}, level {t.get('level')}] {t['title']}"
+                     + (f" — after {', '.join(t['depends'])}" if t["depends"] else "") + f" ({t['status']})")
+        if t.get("files"):
+            lines.append(f"    files: {', '.join(t['files'][:8])}")
+        if v["status"] == "draft" and t.get("goal"):
+            lines.append(f"    goal: {t['goal'][:400]}")
+    for w in v.get("warnings", []):
+        lines.append(f"WARNING: {w}")
+    lo, hi = v.get("estimate", [0, 0])
+    lines.append(f"Up to {v.get('width') or '?'} task(s) in parallel; estimated ${lo:.2f}-${hi:.2f}.")
+    return "\n".join(lines)
+
+
+def graph_text(p: "core.Project") -> str:
+    g = service.graph(p.slug)
+    lines = [f"L{n['level'] if n['level'] is not None else '?'} {n['id']} {n['state']} {n['tier'] or '-'} {n['title']}"
+             + (f" — after {', '.join(n['depends'])}" if n["depends"] else "") + (f" (stuck on {n['stuck_on']})" if n["stuck_on"] else "")
+             for n in sorted(g["nodes"], key=lambda n: (n["level"] if n["level"] is not None else 99, n["id"]))]
+    lines += [f"ERROR: {e}" for e in g["errors"]]
+    lines += [f"overlap: {c['a']} and {c['b']} may run in parallel but both touch {', '.join(c['files'][:4])}" for c in g["conflicts"]]
+    return "\n".join(lines) or "no tasks"
+
+
+def review_text(p: "core.Project", tid: str) -> str:
+    """What a task produced: its report, last failure, and its branch's commits and changed files vs the base."""
+    e = core.Store(p).load()["tasks"].get(tid, {})
+    base = p.cfg["repo"]["base"]
+    br = e.get("branch") or f"auto/{tid}"
+    out = [f"task {tid}: status {e.get('status', 'pending')}, tier {e.get('tier') or '-'}, branch {br}"
+           + (f", commit {e['commit']}" if e.get("commit") else "")]
+    if e.get("last_failure"):
+        out.append("last failure:\n" + str(e["last_failure"])[-1500:])
+    rep = p.path("reports") / f"{tid}.md"
+    out.append("report:\n" + (rep.read_text(encoding="utf-8")[:12000] if rep.is_file() else "(no report file)"))
+    if core.branch_exists(p, br):
+        _, log = core.git(["log", "--oneline", "-n", "20", f"{base}..{br}"], p.repo)
+        _, stat = core.git(["diff", "--stat", f"{base}...{br}"], p.repo)
+        out.append("commits:\n" + (log.strip() or "(none beyond the base)"))
+        out.append("changed files:\n" + "\n".join(stat.strip().splitlines()[-60:]))
+    return "\n\n".join(out)
+
+
+def run_finished_prompt(p: "core.Project", since: str) -> str:
+    """The Coworker's wake-up after a run: which tasks ended and what to do about them."""
+    state = core.Store(p).load()["tasks"]
+    titles = {t.id: t.title for t in core.load_tasks(p)}
+    ended = [(tid, e) for tid, e in state.items() if str(e.get("finished") or e.get("started") or "") >= since
+             and e.get("status") in ("done", "blocked", "paused", "pending")]
+    lines = ["[Run finished] The worker run has ended. Tasks that ended in it:"]
+    for tid, e in sorted(ended):
+        lines.append(f"- {tid} {e.get('status')}: {titles.get(tid, e.get('title', ''))}"
+                     + (f" — report reports/{tid}.md, branch {e.get('branch') or 'auto/' + tid}" if e.get("status") == "done" else "")
+                     + (f" — last failure: {str(e.get('last_failure') or '').strip().splitlines()[0][:160]}"
+                        if e.get("status") != "done" and e.get("last_failure") else ""))
+    if not ended:
+        lines.append("- (none found; see the checkup below)")
+    lines.append("Now, before you write to the user: call review(id) for every task above and read what it produced (the report, "
+                 "and the diff where it matters); check it against the task's goal; fix or queue a follow-up for anything blocked "
+                 "or wrong; start what is ready next (run_all), or integrate() when the work is complete. Then tell the user, per "
+                 "task, what it found or changed (the substance, with key facts), your verdict and what you did next.")
+    return "\n".join(lines)
+
+
 def activity_digest(p: "core.Project", tid: str, last: int = 12) -> str:
     """What an agent is doing now, from the task's timeline (runs/<id>.jsonl): status, counts and the last events."""
     e = core.Store(p).load()["tasks"].get(tid, {})
@@ -408,7 +506,7 @@ PLANNER_TOOLS = ("propose_plan", "update_plan", "cancel_plan")
 # What the Planner may use. ToolSearch only loads tool schemas (the CLI may defer MCP tools behind it).
 PLANNER_ALLOWED = ("Read", "Glob", "Grep", "ToolSearch")
 PLAN_POLL_S = 2.0
-NEEDS_APPROVAL = {"run_next": "Start a run of the next ready task", "run_task": "Start a run of task {id}",
+NEEDS_APPROVAL = {"architect": "Let the architect (a strong model, a few dollars) draft a plan of tasks for the goal", "run_next": "Start a run of the next ready task", "run_task": "Start a run of task {id}",
                   "run_all": "Start a run of all ready tasks", "plan_task": "Preview the router's plan for task {id} (a cheap model call)",
                   "stop_run": "Stop the current run"}
 APPROVAL_TIMEOUT_S = 600
@@ -733,7 +831,8 @@ class Chat:
         async def run_task(a):
             return start("task", str(a.get("id", "")))
 
-        @tool("run_all", f"Start a run of all ready tasks, one after another{needs}.", {})
+        @tool("run_all", f"Start a run of the whole task graph: every task whose dependencies are done runs in parallel (up to [run] max_parallel), "
+                         f"the rest start as their dependencies finish{needs}.", {})
         async def run_all(_a):
             return start("all")
 
@@ -746,7 +845,37 @@ class Chat:
             e = runner(p).stop()
             return err(e) if e else ok("run stopped")
 
-        base = [add_task, queue_status, task_activity, run_next, run_task, run_all, plan_task, stop_run]
+        @tool("architect", "Hand a goal to the architect: it reads the repository and drafts a dependency graph of tasks (a draft "
+                           "plan) for the workers. I am woken when the draft is ready; then I review it and approve_plan() or cancel_plan().",
+              {"type": "object", "required": ["goal"], "properties": {"goal": {"type": "string", "description": "what to achieve, "
+               "the context the architect needs (what was found so far, constraints, what not to touch)"}}})
+        async def architect(a):
+            try:
+                service.architect(p.slug, str(a.get("goal") or ""))
+            except service.ApiError as e:
+                return err(str(e))
+            self.watch_architect_bg()
+            return ok("the architect is working; I will be woken with the draft plan")
+
+        @tool("plan", "The current plan (draft or approved): tasks in dependency order with tiers, levels, files, warnings, estimate.", {})
+        async def plan(_a):
+            return ok(plan_text(p))
+
+        @tool("graph", "The task graph: each task's state (ready / waiting / stuck / working / done / blocked), level and dependencies; "
+                       "cycles and files two parallel tasks both touch.", {})
+        async def graph(_a):
+            return ok(graph_text(p))
+
+        @tool("review", "Review a task's output: its report (reports/<id>.md), last failure if any, and its branch's commits and changed "
+                        "files against the base. Use it before telling the user anything about a finished task.",
+              {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}})
+        async def review(a):
+            tid = str(a.get("id") or "").strip()
+            if not any(t.id == tid for t in core.load_tasks(p)):
+                return err(f"no task {tid}")
+            return ok(review_text(p, tid))
+
+        base = [add_task, queue_status, task_activity, run_next, run_task, run_all, plan_task, stop_run, architect, plan, graph, review]
         if approval:
             return base
 
@@ -757,7 +886,7 @@ class Chat:
 
         @tool("watch_run", "Wake me when the current worker run ends or fails. Use right after starting a run; costs nothing while waiting.", {})
         async def watch_run(_a):
-            if not runner(p).running():
+            if not run_alive(p)[0]:
                 return ok("no run is going")
             self.watch_run_bg()
             return ok("watching: I will be woken with a report when the run ends")
@@ -774,7 +903,35 @@ class Chat:
             self.schedule_checkup(m)
             return ok(f"checkup scheduled in {m:g} minutes")
 
-        return base + [checkup, watch_run, schedule_checkup]
+        @tool("approve_plan", "Approve the draft plan: its tasks are queued and the orchestrator runs the graph in parallel. I am woken "
+                              "when the run ends.", {})
+        async def approve_plan(_a):
+            try:
+                r = self.approve_plan()
+            except (ValueError, KeyError, OSError) as e:
+                return err(str(e))
+            self.watch_run_bg()
+            return ok(f"approved: tasks {', '.join(r['ids'].values())} queued. {r.get('note', '')}")
+
+        @tool("cancel_plan", "Drop the draft plan (its draft tasks go away; queued tasks stay).", {})
+        async def cancel_plan(_a):
+            try:
+                r = self.cancel_plan()
+            except (ValueError, OSError) as e:
+                return err(str(e))
+            return ok(f"draft plan dropped ({r['removed']} draft task(s))")
+
+        @tool("integrate", "Merge every finished task branch into auto/integration (dependency order, conflicts skipped with what builds "
+                           "on them) and run the final checks there. I am woken with the result.", {})
+        async def integrate(_a):
+            try:
+                service.integrate(p.slug)
+            except service.ApiError as e:
+                return err(str(e))
+            self.watch_run_bg()
+            return ok("integrating in the background; I will be woken with the result (reports/integration.md)")
+
+        return base + [checkup, watch_run, schedule_checkup, approve_plan, cancel_plan, integrate]
 
     def planner_tools(self) -> list:
         """The Planner's tools: they only write the draft plan (plan.json and tasks/drafts/)."""
@@ -838,10 +995,12 @@ class Chat:
     # session), because --max-budget-usd counts the spend of the process, which makes it a per-message budget.
 
     def _assistant_options(self):
-        self.model = core.chat_settings("assistant")["model"]
+        cs = core.chat_settings("assistant")
+        self.model = cs["model"]
         prompt = self.with_memory(CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p)))
         # Only read-only tools go in allowed_tools: anything listed there skips can_use_tool.
-        return core.options(self.p, model=self.model, cwd=str(self.p.dir), system_prompt=prompt + ACK_RULE, max_turns=15,
+        return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.dir), system_prompt=prompt + ACK_RULE,
+                            max_turns=40,
                             allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools())},
                             disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
@@ -1240,18 +1399,41 @@ class Chat:
             return
         self.watching_run = True
 
+        since = dt.datetime.now().isoformat(timespec="seconds")
+
         def loop():
             try:
                 deadline = time.time() + 6 * 3600
+                time.sleep(3)  # a run just started may not hold its lock yet
                 while time.time() < deadline:
                     time.sleep(5)
-                    if not runner(self.p).running():
-                        self.inject("[Run finished] " + self.checkup_report(), "⏱ The run ended; waking the Coworker")
+                    if not run_alive(self.p)[0]:
+                        self.inject(run_finished_prompt(self.p, since) + "\n\n" + self.checkup_report(),
+                                    "⏱ The run ended; waking the Coworker")
                         return
             finally:
                 self.watching_run = False
 
         threading.Thread(target=loop, daemon=True, name=f"watch-run-{self.p.slug}").start()
+
+    def watch_architect_bg(self) -> None:
+        """Wake the Coworker when the architect's draft is ready (or it failed)."""
+        def loop():
+            time.sleep(3)
+            deadline = time.time() + 3600
+            while time.time() < deadline and service.busy(self.p, "architect"):
+                time.sleep(5)
+            info = core.read_json(self.p.path("architect.json"), {})
+            if info.get("status") == "done":
+                text = ("[Architect finished] The draft plan is ready:\n" + plan_text(self.p) + "\n\nReview it critically: does it cover "
+                        "the goal, are the dependencies real (an unneeded one costs parallelism), does each task list its files and "
+                        "checkable acceptance criteria? Then call approve_plan(), or cancel_plan() and architect() again with a "
+                        "sharper goal. Tell the user in two or three lines what the plan does and that it's running.")
+            else:
+                text = f"[Architect failed] {info.get('error') or 'no draft was produced'}. Decide how to go on."
+            self.inject(text, "⏱ The architect finished; waking the Coworker")
+
+        threading.Thread(target=loop, daemon=True, name=f"watch-architect-{self.p.slug}").start()
 
     def schedule_checkup(self, minutes: float) -> None:
         def later():
@@ -1398,6 +1580,13 @@ class Chat:
         self.watcher = threading.Thread(target=loop, daemon=True)
         self.watcher.start()
 
+    def coworking(self) -> bool:
+        """The project's chat is a live Coworker: plan events go to it, not to the user."""
+        try:
+            return core.chat_mode(self.p) == "coworker" and self.is_live()
+        except Exception:
+            return False
+
     def plan_tick(self) -> bool:
         """Report the approved plan's progress (task started, done, blocked, paused; the run ending; the
         plan finishing), and start the queue if the plan waits for a run that was going. A blocked task is
@@ -1429,7 +1618,8 @@ class Chat:
                 elif st == "blocked":
                     why = next((ln.strip() for ln in str(e.get("last_failure") or "").splitlines() if ln.strip()), "")
                     notes.append(f"✗ Blocked {what}" + (f" — {why[:200]}" if why else "") +
-                                 ". The plan waits here: tell me how to go on (I don't change the plan without asking).")
+                                 (". The Coworker looks into it when the run ends." if self.coworking() else
+                                  ". The plan waits here: tell me how to go on (I don't change the plan without asking)."))
                 elif st == "paused":
                     notes.append(f"⏸ Paused {what} (the account usage limit or the run budget was reached).")
             done = sum(s == "done" for s in statuses.values())
@@ -1443,7 +1633,7 @@ class Chat:
             elif plan.get("was_running") and not running:
                 rest = ", ".join(f"{t} ({s})" for t, s in statuses.items() if s != "done")
                 notes.append(f"The run ended: {done} of {len(statuses)} plan tasks done; not done: {rest}. "
-                             "Press Start on the plan card to go on.")
+                             + ("The Coworker takes it from here." if self.coworking() else "Press Start on the plan card to go on."))
             plan["was_running"] = running
             core.save_plan(p, plan)
         for n in notes:

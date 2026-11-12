@@ -261,8 +261,8 @@ def test_chat_model_settings(monkeypatch):
     monkeypatch.setattr(core, "settings", lambda: {"chat": {"model": "sonnet", "assistant": {"model": "haiku"}}})
     assert core.chat_settings("assistant")["model"] == "haiku"
     monkeypatch.setattr(core, "settings", lambda: {})
-    assert core.chat_settings("assistant")["model"] == "haiku"
-    assert tomllib.loads(core.DEFAULT_SETTINGS)["chat"]["assistant"]["model"] == "haiku"
+    assert core.chat_settings("assistant")["model"] == "sonnet"
+    assert tomllib.loads(core.DEFAULT_SETTINGS)["chat"]["assistant"]["model"] == "sonnet"
 
 
 # ----------------------------------------------------------------------------- HTTP

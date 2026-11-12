@@ -42,9 +42,9 @@ model = "haiku"
 
 # Planner: reads only and writes a draft plan of tasks; nothing runs before you approve it. budget_usd is per message.
 [chat.planner]
-model = "sonnet"
-effort = "medium"
-budget_usd = 2.0
+model = "opus"
+effort = "high"
+budget_usd = 4.0
 
 [guard]
 deny = [
