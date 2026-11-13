@@ -516,18 +516,18 @@ def activity_digest(p: "core.Project", tid: str, last: int = 12) -> str:
     tools = [x for x in ev if x.get("kind") == "tool"]
     files = sorted({Path(str(x["file"])).name for x in tools if x.get("file")})[-8:]
     errs = sum(1 for x in ev if x.get("kind") == "tool_error")
-    out = [head, "now: " + activity_phase(e, ev),
+    out = [head, "now: " + activity_phase(e, ev, tid),
            f"tool calls: {len(tools)}, tool errors: {errs}" + (f", files touched: {', '.join(files)}" if files else "")]
     out += ["last events:"] + ["  " + _event_line(x) for x in ev[-last:]]
     return "\n".join(out)
 
 
-def activity_phase(e: dict, ev: list[dict]) -> str:
+def activity_phase(e: dict, ev: list[dict], tid: str = "<id>") -> str:
     """Where the task is in its pipeline, in plain words, from its live status and the last timeline event. The status
     comes from state.json at the moment of the call, so it is the queue status itself, not a guess."""
     status = e.get("status", "pending")
     if status == "done":
-        return f"done (finished {e.get('finished', '?')}); branch {e.get('branch') or 'auto/?'}, report reports/<id>.md"
+        return f"done (finished {e.get('finished', '?')}); branch {e.get('branch') or 'auto/?'}, report reports/{tid}.md"
     if status == "needs_decision":
         return f"waiting for the user's decision: {str(e.get('question') or '')[:300]}"
     if status in ("blocked", "paused"):
