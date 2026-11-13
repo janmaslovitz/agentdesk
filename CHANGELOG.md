@@ -5,11 +5,6 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
-### Fixed
-- **Log in** for a subscription account needed a terminal window (`x-terminal-emulator` on Linux), so it failed on the
-  headless Server ("couldn't open a terminal"). It now works from the dashboard everywhere: `claude auth login` runs
-  in the background, the dialog opens its sign-in link and takes the code the sign-in page shows.
-
 ### Added
 - **Review step.** After the checks pass, a reviewer (`[review]`, Sonnet low effort) compares the change with the
   task's goal and acceptance criteria and sends unfinished work back with concrete fixes; a question only the user can
@@ -20,12 +15,6 @@ them under the new version number, tags it and builds the installer (see README,
 - **Notifications** (`[notify]`): Telegram and/or a webhook for decisions, blocked tasks, pauses, finished runs and
   integrations.
 - `tools/deploy_server.sh`: deploy a checkout to an installed Server (import check, backups, commit stamp, restart).
-
-### Fixed
-- An answer or a retry recorded while a run was going was overwritten by the run's next save of state.json; a run now
-  writes only the tasks it is working on and takes the others from disk.
-
-### Added
 - **Tasks can wait for a decision** (status `needs_decision`). A worker that hits a choice only the user can make ends
   with `NEEDS_DECISION: question, options, recommendation`; a worker that changed nothing must say `NO_CHANGES_NEEDED:
   why`, else the task also waits for a decision. Such a task is never marked done: nothing is committed, its worktree
@@ -33,19 +22,39 @@ them under the new version number, tags it and builds the installer (see README,
   on the task), in Needs attention, on the plan card and in the Coworker's wake-up. The answer (dashboard, chat
   `answer_task`, API `POST /api/v1/projects/{p}/tasks/{id}/answer`, MCP `answer`) is added to the task as a
   "## Decision" section and the task goes back to the queue.
+- Coworker tools: `architect(goal)` (draft a task graph; the Coworker is woken when it's ready), `plan`, `approve_plan`,
+  `cancel_plan`, `graph`, `review(id)` (a task's report, last failure, commits and changed files) and `integrate`. Its
+  instructions make it the workers' reviewer and have it delegate bigger goals to the architect and the orchestrator.
+- The Assistant gets `review`, `graph`, `plan` and `architect` (the latter behind an approval card); its prompt now
+  includes the read-first and verify rules.
 
 ### Changed
 - **Worker runs survive a restart or an update of the Server.** The unit uses `KillMode=process` (systemd signals only
   the gateway, which stops the user instances itself) and an instance no longer ends the runs when it stops; each run
   holds its project's `run.lock`, so the next instance sees it and leaves its tasks alone. `stop_runs_on_shutdown =
   true` in `server.toml` restores the old behaviour. A machine reboot still ends everything (recovered at start).
+- The Coworker asks the user (an approval card, no "Always allow") before very important shell commands only: pushing,
+  releases and pull requests, remote changes, hard resets, force-deleting branches, publishing, outbound uploads,
+  stopping services (`[chat.coworker_confirm] patterns`). Everything else it still does on its own.
+- The Planner works the plan out together with the user and can hand the heavy planning to the architect
+  (`architect(goal)`); it is told to read the code properly instead of "keep the exploring short". Models unchanged:
+  Assistant `haiku` (now up to 40 turns), Planner and Coworker `sonnet` medium.
+- `[run] max_parallel` defaults to 8 (was 3); the Server's default `max_worktrees` is 10 (was 6).
+- `[hygiene] max_worktrees` counts only worktrees of unfinished tasks: finished-but-unmerged work no longer stalls a
+  parallel run. A run notes when the limit is below `max_parallel`, and warns about ready tasks it ended without starting.
+- Workers are told to write tests that stay true as the project grows (no "nothing registered yet" / exact-count
+  assertions on shared collections); when a check fails in a test file the task didn't change, the retry message says so.
+- The architect asks foundation tasks for growth-safe tests and data generators for proof of no false positives.
 
 ### Fixed
+- **Log in** for a subscription account needed a terminal window (`x-terminal-emulator` on Linux), so it failed on the
+  headless Server ("couldn't open a terminal"). It now works from the dashboard everywhere: `claude auth login` runs
+  in the background, the dialog opens its sign-in link and takes the code the sign-in page shows.
+- An answer or a retry recorded while a run was going was overwritten by the run's next save of state.json; a run now
+  writes only the tasks it is working on and takes the others from disk.
 - A task whose worker stopped to ask, without changing anything, was marked done (its checks passed on the unchanged
   tree) and the chain went on without it.
 - Committing a task with nothing to commit failed on a non-English git (`nothing to commit` was matched as text).
-
-### Fixed
 - The Coworker reported finished tasks without reading them ("the reports are in reports/, I haven't read them"). The
   shared verify rule told chat agents to *say* when they hadn't checked something; it now tells them to check first.
   After a run the Coworker is woken with the list of tasks that ended and an explicit order to review each one before it
@@ -54,29 +63,6 @@ them under the new version number, tags it and builds the installer (see README,
   says the graph runs in parallel.
 - In Coworker mode the plan card no longer asks the user to decide on a blocked task or press Start: the Coworker is
   woken instead.
-
-### Added
-- Coworker tools: `architect(goal)` (draft a task graph; the Coworker is woken when it's ready), `plan`, `approve_plan`,
-  `cancel_plan`, `graph`, `review(id)` (a task's report, last failure, commits and changed files) and `integrate`. Its
-  instructions make it the workers' reviewer and have it delegate bigger goals to the architect and the orchestrator.
-- The Assistant gets `review`, `graph`, `plan` and `architect` (the latter behind an approval card); its prompt now
-  includes the read-first and verify rules.
-
-### Changed
-- The Coworker asks the user (an approval card, no "Always allow") before very important shell commands only: pushing,
-  releases and pull requests, remote changes, hard resets, force-deleting branches, publishing, outbound uploads,
-  stopping services (`[chat.coworker_confirm] patterns`). Everything else it still does on its own.
-- The Planner works the plan out together with the user and can hand the heavy planning to the architect
-  (`architect(goal)`); it is told to read the code properly instead of "keep the exploring short". Models unchanged:
-  Assistant `haiku` (now up to 40 turns), Planner and Coworker `sonnet` medium.
-
-### Changed
-- `[run] max_parallel` defaults to 8 (was 3); the Server's default `max_worktrees` is 10 (was 6).
-- `[hygiene] max_worktrees` counts only worktrees of unfinished tasks: finished-but-unmerged work no longer stalls a
-  parallel run. A run notes when the limit is below `max_parallel`, and warns about ready tasks it ended without starting.
-- Workers are told to write tests that stay true as the project grows (no "nothing registered yet" / exact-count
-  assertions on shared collections); when a check fails in a test file the task didn't change, the retry message says so.
-- The architect asks foundation tasks for growth-safe tests and data generators for proof of no false positives.
 
 
 ## 1.6.0 - 2026-11-11
