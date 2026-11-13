@@ -41,6 +41,7 @@ SETTINGS = {
     "tls_key": ("tls_key", "str"),
     "session_hours": ("session_hours", "float"),
     "session_idle_minutes": ("session_idle_minutes", "float"),
+    "remember_days": ("remember_days", "float"),
     "allowed_hosts": ("allowed_hosts", "list"),
     # disk budget (docs/SERVER.md "Disk budget")
     **{k: (k, "float") for k in ("disk_total_gb", "disk_reserve_gb", "soft_limit_pct", "hard_limit_pct", "quota_gb",

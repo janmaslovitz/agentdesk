@@ -1,8 +1,13 @@
-"""Server-side login sessions and the failed-login throttle (both in memory: a gateway restart logs everyone out)."""
+"""Server-side login sessions and the failed-login throttle. Sessions are also kept in <home>/sessions.json (only
+hashes of the cookie values, mode 0600), so a gateway restart or update doesn't log anyone out; the throttle is in
+memory only."""
 
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+from pathlib import Path
 import secrets
 import threading
 import time
@@ -21,6 +26,7 @@ class Session:
     created: float
     last_seen: float
     ip: str = ""
+    remember: bool = False  # "Remember me": lasts remember_s with no idle timeout
 
 
 @dataclass
@@ -28,16 +34,30 @@ class SessionTable:
     max_age_s: float = 12 * 3600
     idle_s: float = 2 * 3600
     clock: object = time.time
+    remember_s: float = 30 * 86400
+    path: Path | None = None  # where sessions survive a restart (None: memory only)
     _rows: dict = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _saved: float = 0.0
 
-    def create(self, username: str, ip: str = "") -> tuple[str, Session]:
+    SAVE_LAST_SEEN_S = 300  # a request only refreshes last_seen on disk this often
+
+    def __post_init__(self):
+        self._load()
+
+    def expired(self, s: Session, now: float) -> bool:
+        if s.remember:
+            return now - s.created > self.remember_s
+        return now - s.created > self.max_age_s or now - s.last_seen > self.idle_s
+
+    def create(self, username: str, ip: str = "", remember: bool = False) -> tuple[str, Session]:
         """A new random session id (the cookie value) and its row."""
         sid = secrets.token_urlsafe(32)
         now = self.clock()
-        s = Session(username, secrets.token_urlsafe(24), now, now, ip)
+        s = Session(username, secrets.token_urlsafe(24), now, now, ip, bool(remember))
         with self._lock:
             self._rows[_key(sid)] = s
+            self._save()
         return sid, s
 
     def get(self, sid: str | None) -> Session | None:
@@ -49,17 +69,23 @@ class SessionTable:
             s = self._rows.get(k)
             if s is None:
                 return None
-            if now - s.created > self.max_age_s or now - s.last_seen > self.idle_s:
+            if self.expired(s, now):
                 del self._rows[k]
+                self._save()
                 return None
             s.last_seen = now
+            if now - self._saved > self.SAVE_LAST_SEEN_S:
+                self._save()
             return s
 
     def drop(self, sid: str | None) -> Session | None:
         if not sid:
             return None
         with self._lock:
-            return self._rows.pop(_key(sid), None)
+            s = self._rows.pop(_key(sid), None)
+            if s is not None:
+                self._save()
+            return s
 
     def drop_user(self, username: str) -> int:
         """End every session of a user (password change, disabled, removed)."""
@@ -67,17 +93,55 @@ class SessionTable:
             gone = [k for k, s in self._rows.items() if s.username == username]
             for k in gone:
                 del self._rows[k]
+            if gone:
+                self._save()
         return len(gone)
 
     def sweep(self) -> None:
         now = self.clock()
         with self._lock:
-            for k in [k for k, s in self._rows.items() if now - s.created > self.max_age_s or now - s.last_seen > self.idle_s]:
+            gone = [k for k, s in self._rows.items() if self.expired(s, now)]
+            for k in gone:
                 del self._rows[k]
+            if gone:
+                self._save()
 
     def users(self) -> set[str]:
         with self._lock:
             return {s.username for s in self._rows.values()}
+
+    # -- persistence (called with the lock held, except _load at construction)
+    def _save(self) -> None:
+        self._saved = self.clock()
+        if self.path is None:
+            return
+        rows = {k: {"username": s.username, "csrf": s.csrf, "created": s.created, "last_seen": s.last_seen,
+                    "ip": s.ip, "remember": s.remember} for k, s in self._rows.items()}
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(rows, fh)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass  # sessions still work from memory; they just won't survive a restart
+
+    def _load(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        try:
+            rows = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        now = self.clock()
+        for k, r in (rows if isinstance(rows, dict) else {}).items():
+            try:
+                s = Session(str(r["username"]), str(r["csrf"]), float(r["created"]), float(r["last_seen"]),
+                            str(r.get("ip", "")), bool(r.get("remember")))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not self.expired(s, now):
+                self._rows[str(k)] = s
 
 
 @dataclass

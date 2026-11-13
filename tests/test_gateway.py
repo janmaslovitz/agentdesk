@@ -149,6 +149,45 @@ def test_session_expiry_idle_and_absolute():
     assert t.drop_user("bob") == 1 and t.get(sid) is None
 
 
+def test_remember_me_has_no_idle_timeout_and_its_own_limit():
+    clk = Clock()
+    t = SessionTable(max_age_s=100, idle_s=30, clock=clk, remember_s=1000)
+    sid, s = t.create("alice", remember=True)
+    clk.t += 500  # far past the idle and normal limits
+    assert t.get(sid) is s
+    clk.t += 501
+    assert t.get(sid) is None
+
+
+def test_sessions_survive_a_restart(tmp_path):
+    clk = Clock()
+    f = tmp_path / "sessions.json"
+    a = SessionTable(max_age_s=100, idle_s=30, clock=clk, path=f)
+    sid, s = a.create("alice", "1.2.3.4", remember=True)
+    gone, _ = a.create("bob")
+    a.drop(gone)
+    assert sid not in f.read_text() and (f.stat().st_mode & 0o777) == 0o600  # hashes only, private
+    b = SessionTable(max_age_s=100, idle_s=30, clock=clk, path=f)
+    got = b.get(sid)
+    assert got and got.username == "alice" and got.csrf == s.csrf and got.remember and b.get(gone) is None
+    short, _ = b.create("carol")
+    clk.t += 31  # carol idles out while the gateway is down
+    assert SessionTable(max_age_s=100, idle_s=30, clock=clk, path=f).get(short) is None
+    f.write_text("{broken")
+    assert SessionTable(path=f).get(sid) is None  # a broken file just starts empty
+
+
+def test_login_page_remember_box_and_cookie_lifetime(gw):
+    c = Client(gw.port)
+    assert b'name="remember"' in c.req("GET", "/login")[2]
+    st, r, _ = c.req("POST", "/login", f"username=alice&password={PW.replace(' ', '+')}&remember=1".encode(),
+                     {"Content-Type": "application/x-www-form-urlencoded"})
+    assert st == 303 and f"Max-Age={30 * 86400}" in r.getheader("Set-Cookie")
+    st, r, _ = Client(gw.port).login("alice")  # box unticked: the normal login length
+    assert st == 303 and f"Max-Age={12 * 3600}" in r.getheader("Set-Cookie")
+    assert (gw.home / "sessions.json").exists()
+
+
 def test_throttle_per_user_and_ip():
     clk = Clock()
     th = Throttle(max_failures=3, ip_max_failures=10, window_s=60, lockout_s=120, clock=clk)

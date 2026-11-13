@@ -63,17 +63,19 @@ form,.box{{background:#fff;padding:28px 32px;border-radius:10px;box-shadow:0 2px
 h1{{font-size:20px;margin:0 0 18px}} label{{display:block;margin:12px 0 4px;font-size:13px}}
 input{{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #c8ccd4;border-radius:6px;font:inherit}}
 button{{margin-top:20px;width:100%;padding:9px;border:0;border-radius:6px;background:#2f6feb;color:#fff;font:inherit;cursor:pointer}}
+.chk{{display:flex;gap:8px;align-items:center;margin-top:14px}} .chk input{{width:auto;margin:0}}
 .err{{color:#c62828;font-size:13px;margin:10px 0 0}} .muted{{color:#778;font-size:13px}}
 </style></head><body>{body}</body></html>"""
 
 
-def login_page(error: str = "", next_url: str = "/", username: str = "") -> bytes:
+def login_page(error: str = "", next_url: str = "/", username: str = "", remember: bool = True) -> bytes:
     err = f'<p class="err" role="alert">{html.escape(error)}</p>' if error else ""
     body = (f'<form method="post" action="/login"><h1>AgentDesk</h1>'
             f'<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required '
             f'value="{html.escape(username)}">'
             f'<label for="p">Password</label><input id="p" name="password" type="password" autocomplete="current-password" required>'
-            f'<input type="hidden" name="next" value="{html.escape(safe_next(next_url))}">{err}'
+            + ('<label class="chk"><input type="checkbox" name="remember" value="1" checked> Remember me</label>' if remember else "")
+            + f'<input type="hidden" name="next" value="{html.escape(safe_next(next_url))}">{err}'
             f'<button type="submit">Sign in</button></form>')
     return PAGE.format(title="Sign in", body=body).encode("utf-8")
 
@@ -113,7 +115,9 @@ class Gateway:
         self.home, self.cfg, self.clock = home, cfg, clock
         self.audit = Audit(home / "audit.log")
         self.users = UserStore(home, self.audit)
-        self.sessions = SessionTable(float(cfg["session_hours"]) * 3600, float(cfg["session_idle_minutes"]) * 60, clock)
+        self.sessions = SessionTable(float(cfg["session_hours"]) * 3600, float(cfg["session_idle_minutes"]) * 60, clock,
+                                     float(cfg.get("remember_days", 30)) * 86400, home / "sessions.json")
+        self.can_remember = float(cfg.get("remember_days", 30)) > 0
         w = float(cfg["login_window_minutes"]) * 60
         self.login_lock = threading.Lock()  # one password check at a time: parallel guesses cannot all pass the throttle
         self.throttle = Throttle(int(cfg["login_max_failures"]), int(cfg["login_ip_max_failures"]), w,
@@ -404,7 +408,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/gateway/health":
             return self.send(200, json.dumps(self.gw.health()).encode("utf-8"), "application/json")
         if path == "/login":
-            return self.login_post() if self.command == "POST" else self.send(200, login_page(next_url=self.query("next")))
+            return self.login_post() if self.command == "POST" else self.send(200, login_page(next_url=self.query("next"), remember=self.gw.can_remember))
         sid = self.cookie_value()
         sess = self.gw.sessions.get(sid)
         try:
@@ -456,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             msg = f"Too many failed sign-ins. Try again in {max(1, int(wait // 60) + 1)} minutes."
             if as_json:
                 return self.send(429, json.dumps({"error": msg}).encode(), "application/json", {"Retry-After": str(int(wait) + 1)})
-            return self.send(429, login_page(msg, nxt, name), headers={"Retry-After": str(int(wait) + 1)})
+            return self.send(429, login_page(msg, nxt, name, self.gw.can_remember), headers={"Retry-After": str(int(wait) + 1)})
         try:
             user = self.gw.users.authenticate(name, password)
         except RuntimeError as e:
@@ -465,12 +469,13 @@ class Handler(BaseHTTPRequestHandler):
             locked = self.gw.throttle.blocked_for(name, self.ip) > 0
             self.gw.audit.log("login failed", user=name, ip=self.ip, **({"locked": True} if locked else {}))
             msg = "Wrong user name or password."
-            return self.json({"error": msg}, 401) if as_json else self.send(401, login_page(msg, nxt, name))
+            return self.json({"error": msg}, 401) if as_json else self.send(401, login_page(msg, nxt, name, self.gw.can_remember))
         self.gw.throttle.success(name, self.ip)
         self.gw.sessions.drop(self.cookie_value())  # never keep a session id from before the login
-        sid, sess = self.gw.sessions.create(user["username"], self.ip)
-        self.gw.audit.log("login", user=user["username"], ip=self.ip)
-        cookie = self.set_cookie(sid, int(self.gw.sessions.max_age_s))
+        remember = self.gw.can_remember and str(d.get("remember", "")).lower() in ("1", "on", "true", "yes")
+        sid, sess = self.gw.sessions.create(user["username"], self.ip, remember)
+        self.gw.audit.log("login", user=user["username"], ip=self.ip, **({"remember": True} if remember else {}))
+        cookie = self.set_cookie(sid, int(self.gw.sessions.remember_s if remember else self.gw.sessions.max_age_s))
         if as_json:
             return self.send(200, json.dumps({"ok": True, "username": user["username"], "csrf": sess.csrf}).encode(),
                              "application/json", {"Set-Cookie": cookie})

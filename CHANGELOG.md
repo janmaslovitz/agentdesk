@@ -5,6 +5,13 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- **Remember me** on the server's sign-in page (ticked by default): the login lasts `remember_days` (default 30,
+  `0` hides the box) with no idle timeout. Without it, a login lasts as before (`session_hours`,
+  `session_idle_minutes`).
+- Logins survive a restart or update of the server: sessions are kept in `sessions.json` (hashes of the cookie values
+  only, mode 0600). Changing a password or disabling a user still ends their sessions.
+
 ### Changed
 - "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
   step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and

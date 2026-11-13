@@ -16,6 +16,7 @@ DEFAULTS: dict = {
     "allowed_hosts": [],           # if set, the Host header must be one of these ("name" or "name:port")
     "session_hours": 12.0,         # a login lasts at most this long
     "session_idle_minutes": 120.0,  # ... and ends after this long without a request
+    "remember_days": 30.0,         # "Remember me" at sign-in: the login lasts this long, with no idle timeout (0 = no box)
     "login_max_failures": 5,       # failed logins per user + IP within login_window_minutes before a lockout
     "login_ip_max_failures": 30,   # failed logins per IP (any user names) within the window
     "login_window_minutes": 15.0,
@@ -43,6 +44,7 @@ port = 8080
 # allowed_hosts = ["agentdesk.lan", "192.168.1.5:8080"]
 session_hours = 12
 session_idle_minutes = 120
+remember_days = 30          # "Remember me" on the sign-in page keeps a login this long (0 hides the box)
 idle_stop_minutes = 30      # stop idle user instances (runs, chats and builds keep them alive)
 autostart_instances = true  # after a reboot, start the instances of users who were active so their queues go on
 # shutdown_grace_seconds = 25   log_max_mb = 10   log_keep = 5   min_free_gb = 1

@@ -514,8 +514,10 @@ The server home (`--home`, else `AGENTDESK_SERVER_HOME`, else `~/agentdesk-serve
 
 ```
 server.toml         settings (written with comments on first start): host, port, tls_cert/tls_key, allowed_hosts,
-                    session_hours, session_idle_minutes, login_max_failures, login_lockout_minutes, idle_stop_minutes,
+                    session_hours, session_idle_minutes, remember_days, login_max_failures, login_lockout_minutes, idle_stop_minutes,
                     run_as_users, run_as
+sessions.json       live logins (hashes of the cookie values only, 0600), so a restart or update keeps people signed in;
+                    "Remember me" at sign-in keeps a login remember_days (default 30) with no idle timeout
 users.json          users: role (admin|user), scrypt password hash (salted), disabled, created, home, projects, accounts
 users/<name>/       each user's AgentDesk data folder
 audit.log           sign-ins, failed sign-ins, lockouts, user changes, instance starts/stops (JSON lines; no passwords)
