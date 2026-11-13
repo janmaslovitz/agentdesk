@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.6.1 - 2026-11-13
+
 ### Added
 - **Review step.** After the checks pass, a reviewer (`[review]`, Sonnet low effort) compares the change with the
   task's goal and acceptance criteria and sends unfinished work back with concrete fixes; a question only the user can
