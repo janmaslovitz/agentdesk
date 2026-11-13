@@ -15,6 +15,8 @@ them under the new version number, tags it and builds the installer (see README,
   row kept in view, and an open task's details take at most half of it.
 
 ### Fixed
+- **Retry** (dashboard, chat, API, MCP) works while a run is going: the run takes the change from disk and starts the
+  task when it's ready (before, it refused with "a run is going: stop it first").
 - Checks failed with `[Errno 2] No such file or directory: '/tmp/agentdesk-worker-home'` after a restart of the
   Server: the service's private /tmp goes away while its runs go on. The workers' scratch home and TMPDIR now live in
   the data folder (`.scratch/`), a command that couldn't start is tried again, and a check that can't run at all is

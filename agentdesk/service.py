@@ -316,20 +316,21 @@ def stop(project: str) -> dict:
 
 
 def retry(project: str, id: str) -> dict:
-    """Put a blocked, paused or crashed task back to pending (its worktree and branch stay; the next run goes on)."""
+    """Put a blocked, paused or crashed task back to pending (its worktree and branch stay). Allowed while a run is
+    going: the run takes changes to tasks it isn't working on from disk and starts the task when it's ready."""
     p = _project(project)
     t = _task(p, id)
-    if busy(p):
-        raise ApiError("a run is going: stop it first (or wait)", 409)
     store = core.Store(p)
     state = store.load()
     e = state["tasks"].setdefault(t.id, {"title": t.title})
     if e.get("status") == "done":
         raise ApiError(f"{t.id} is done")
+    if e.get("status") in ("routing", "working"):
+        raise ApiError(f"{t.id} is being worked on right now")
     e.update(status="pending", crashes=0)
     e.pop("last_failure", None)
     store.save(state)
-    store.log(f"api: {t.id} set back to pending")
+    store.log(f"api: {t.id} set back to pending" + (" (the run going now picks it up)" if busy(p) else ""))
     return {"ok": True}
 
 

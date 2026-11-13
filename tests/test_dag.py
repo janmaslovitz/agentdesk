@@ -506,3 +506,33 @@ def test_a_running_run_keeps_answers_and_retries_made_meanwhile(project, monkeyp
     st = core.Store(project).load()
     assert st["tasks"]["1"]["status"] == "done"
     assert st["tasks"]["2"]["status"] == "pending" and st["tasks"]["2"]["decisions"][0]["answer"] == "B"
+
+
+def test_retry_works_while_a_run_is_going_and_the_run_picks_it_up(project, monkeypatch):
+    add(project, "1"); add(project, "2")
+    st = core.Store(project).load()
+    st["tasks"]["2"] = {"status": "blocked", "last_failure": "env", "crashes": 2}
+    core.Store(project).save(st)
+    monkeypatch.setattr(service, "busy", lambda p, kind="run": True)
+    started = []
+
+    async def fake(p, store, task, meter):
+        started.append(task.id)
+        meter.state["tasks"].setdefault(task.id, {})["status"] = "working"
+        store.save(meter.state)
+        if task.id == "1":
+            service.retry(p.slug, "2")      # the user requeues 2 while 1 runs
+            await asyncio.sleep(0.01)
+        meter.state["tasks"][task.id].update(status="done", branch=f"auto/{task.id}")
+        store.save(meter.state)
+
+    monkeypatch.setattr(core, "do_task", fake)
+    asyncio.run(core.run_dag(project, max_parallel=1))
+    assert started == ["1", "2"] and core.Store(project).load()["tasks"]["2"]["status"] == "done"
+    st = core.Store(project).load()
+    st["tasks"]["3"] = {"status": "working"}
+    core.Store(project).save(st)
+    add(project, "3")
+    import pytest
+    with pytest.raises(service.ApiError, match="worked on"):
+        service.retry(project.slug, "3")
