@@ -6,6 +6,9 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - A run looks for newly ready work every `[run] recheck_seconds` (default 30), so a task added, retried or answered
   while long tasks go starts as soon as a slot is free instead of waiting for a running task to end. A task retried
   or answered after it failed in the same run starts again in that run.
@@ -18,6 +21,9 @@ them under the new version number, tags it and builds the installer (see README,
   hard/xhigh (`[tiers.*] max_effort`). The dashboard shows the effort next to the tier.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - The Tasks panel fills the window below the top bar; the list scrolls inside it (wheel or scrollbar) with the header
   row kept in view, and an open task's details take at most half of it.
 
@@ -56,6 +62,9 @@ them under the new version number, tags it and builds the installer (see README,
   includes the read-first and verify rules.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - **Worker runs survive a restart or an update of the Server.** The unit uses `KillMode=process` (systemd signals only
   the gateway, which stops the user instances itself) and an instance no longer ends the runs when it stops; each run
   holds its project's `run.lock`, so the next instance sees it and leaves its tasks alone. `stop_runs_on_shutdown =
@@ -117,6 +126,9 @@ them under the new version number, tags it and builds the installer (see README,
 - Checks get `AGENTDESK_TASK_ID` and `AGENTDESK_WORKTREE` so parallel checks can keep ports, databases and temp files apart.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - Server: **+ Add** is a real "New project" flow: AgentDesk makes the folder, runs `git init` on the base branch and a first
   commit, and can also create a GitHub repository (public or private) with a logged-in gh account, set it as origin and
   push. A failed GitHub step keeps the local project. The second tab is "Import existing repo" (clone by URL). Folder
@@ -135,6 +147,9 @@ them under the new version number, tags it and builds the installer (see README,
 ## 1.5.6 - 2026-10-26
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - The chat opens fast however long it is: the page loads the last 30 entries behind a loading skeleton and fetches older ones
   when you scroll up (`GET /chat?limit=&before=`); long tool output is cut in pages. JSON answers are gzipped.
 - `chat.json` is saved compact, and once it passes 600 entries the old part moves to `chat_archive.jsonl` (still reachable by
@@ -144,6 +159,9 @@ them under the new version number, tags it and builds the installer (see README,
 ## 1.5.5 - 2026-10-26
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - Import is a short wizard (.zip / git URL / folder in the desktop window) with required fields marked, progress, cancel and an
   inline name-clash field; folder paths and Browse are hidden in a browser. The project folder is derived from the repo or
   archive name (never overwritten: `-2`, `-3`), shown as "Will be created at ..." before importing.
@@ -261,6 +279,9 @@ them under the new version number, tags it and builds the installer (see README,
   guesses can't exceed the limit; a right password on the last allowed attempt no longer leaves a lockout behind.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - The dashboard checks the Host header of every request and the Origin of every POST against a configurable list
   (loopback by default), so the UI also works from `http://192.168.x.x:8765` when allowed, and foreign origins stay rejected.
 - "Open build folder" no longer fails when the machine has no file manager.
@@ -303,6 +324,9 @@ them under the new version number, tags it and builds the installer (see README,
   prints a version's notes.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - `agentdesk.spec` works on every platform (the Windows icon, version resource and imports only on Windows).
 - On macOS and Linux the "Update available" button opens the release page instead of installing (the in-app updater
   stays Windows-only).
@@ -324,6 +348,9 @@ them under the new version number, tags it and builds the installer (see README,
   remembered per project. API: `GET .../build` returns `versions` and `tasks`, `POST .../build` takes `version` and `tasks`.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - Project page: the Git and Build sections share one row (half the width each, stacked under 900 px); the Build log
   is folded, and the plain ref build, Clean + rebuild and Custom build moved into a small **More** menu.
 - Less explanatory text in the dashboard: no chat placeholder, no long tooltips, no empty-state hints.
@@ -354,6 +381,9 @@ them under the new version number, tags it and builds the installer (see README,
   uses the folder; `auto = true` cleans by itself. Every action and the space freed is logged.
 - Chat: message text is selectable and copyable (copy button on messages and tool output; polling never resets a selection).
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - Task list: Active, Blocked and Done are collapsible groups (Done is collapsed by default).
 - Faster orchestration: the router's model call is skipped for tasks with a fixed `tier`, the task list is cached
   until files change, and the Claude SDK is imported lazily (quicker start).
@@ -362,6 +392,9 @@ them under the new version number, tags it and builds the installer (see README,
 ## 1.1.2 - 2026-10-20
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - Task detail: clicking a task shows, in order, the prompt, the orchestrator's handoff (tier, model, router's reasoning,
   runs), what the agent did (recorded activity) and the agent's report.
 ### Fixed
@@ -400,6 +433,9 @@ them under the new version number, tags it and builds the installer (see README,
   git and build panels, project export/import, auto-runner for every project, plain-folder projects with local git.
 
 ### Changed
+- "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
+  step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
+  chat agents are told to state what the tools show instead of writing "I didn't check".
 - The 85% usage pause is gone: usage never blocks runs or the Coworker. The Coworker budget is $5 per burst.
 - Settings fall back to the built-in defaults for any key the file lacks.
 

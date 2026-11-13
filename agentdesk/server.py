@@ -352,7 +352,9 @@ line or a status you saw earlier. Before saying that something is done, broken, 
 source and, where it is cheap, run the check. Anything you can read or run, you check BEFORE answering: "I
 haven't read / checked it" is never a statement to make, it is a step to do first. Only what truly can't be
 checked yet (work still running, a machine you can't reach) is reported as pending, with how and when you'll
-know. If you were wrong earlier, correct it.
+know. If you were wrong earlier, correct it. Never write "I didn't check", "I don't know whether", "I haven't verified":
+a tool's output (task_activity, status, graph, review) is the live state, so state it as fact; if something isn't
+covered, call the tool that covers it first.
 """
 # the same rule for every chat agent of every project
 COWORKER_PROMPT += VERIFY_RULE
@@ -413,7 +415,8 @@ def _event_line(ev: dict) -> str:
     """One timeline event as a short line for the chat: '09:31 tool Edit core.py'."""
     at = str(ev.get("at", ""))[11:16]
     kind = ev.get("kind", "")
-    who = "router " if ev.get("role") == "router" else ""
+    role = ev.get("role") or "worker"
+    who = "" if role == "worker" else f"{role} "
     if kind == "tool":
         what = f"{ev.get('name', '')} {ev.get('input') or ev.get('file') or ''}"
     elif kind == "result":
@@ -513,9 +516,38 @@ def activity_digest(p: "core.Project", tid: str, last: int = 12) -> str:
     tools = [x for x in ev if x.get("kind") == "tool"]
     files = sorted({Path(str(x["file"])).name for x in tools if x.get("file")})[-8:]
     errs = sum(1 for x in ev if x.get("kind") == "tool_error")
-    out = [head, f"tool calls: {len(tools)}, tool errors: {errs}" + (f", files touched: {', '.join(files)}" if files else "")]
+    out = [head, "now: " + activity_phase(e, ev),
+           f"tool calls: {len(tools)}, tool errors: {errs}" + (f", files touched: {', '.join(files)}" if files else "")]
     out += ["last events:"] + ["  " + _event_line(x) for x in ev[-last:]]
     return "\n".join(out)
+
+
+def activity_phase(e: dict, ev: list[dict]) -> str:
+    """Where the task is in its pipeline, in plain words, from its live status and the last timeline event. The status
+    comes from state.json at the moment of the call, so it is the queue status itself, not a guess."""
+    status = e.get("status", "pending")
+    if status == "done":
+        return f"done (finished {e.get('finished', '?')}); branch {e.get('branch') or 'auto/?'}, report reports/<id>.md"
+    if status == "needs_decision":
+        return f"waiting for the user's decision: {str(e.get('question') or '')[:300]}"
+    if status in ("blocked", "paused"):
+        return f"{status}" + (f": {str(e.get('last_failure') or '').strip()[:200]}" if e.get("last_failure") else "")
+    if status not in ("working", "routing"):
+        return f"{status} (not running)"
+    last = ev[-1] if ev else {}
+    role, kind = last.get("role") or "worker", last.get("kind")
+    if role == "worker" and kind == "result":
+        return ("the worker's attempt has ended; AgentDesk is running the project's checks (gates) on it now. When they "
+                "pass, the reviewer looks at the diff and the task becomes done; if anything fails, the worker gets it back")
+    if kind == "check":
+        return ("checks " + ("passed; the reviewer is next" if last.get("ok") else "failed; the worker gets the failures back"))
+    if role == "reviewer":
+        if kind == "review":
+            return "reviewed (" + str(last.get("text") or "")[:120] + "); AgentDesk is committing and closing the task"
+        return "the reviewer is reading the diff"
+    if role == "router":
+        return "the router is picking the model for the task"
+    return f"the worker is on it ({len([x for x in ev if x.get('kind') == 'tool'])} tool calls so far)"
 AUTONOMOUS = ("coworker", "planner")  # modes without approval cards: a budget per message and the usage pause
 PLANNER_TOOLS = ("propose_plan", "update_plan", "cancel_plan", "architect")
 # What the Planner may use. ToolSearch only loads tool schemas (the CLI may defer MCP tools behind it).

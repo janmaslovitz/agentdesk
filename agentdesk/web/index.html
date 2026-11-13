@@ -1371,7 +1371,7 @@ function showMode(p) {
   $("quick").hidden = pl;
 }
 const ASKS = {
-  agent: "What is the agent doing right now? Read the task timeline with task_activity (the working task, or the latest one if none is working) and describe it in one or two plain sentences: what it is on, the last step, anything stuck or failing.",
+  agent: "What is the agent doing right now? Read the task timeline with task_activity (the working task, or the latest one if none is working) and describe it in one or two plain sentences: what it is on, the last step, anything stuck or failing. Its \"now:\" line is the live queue status: state it as fact.",
   queue: "Give a short queue status: how many tasks are done, working, pending or blocked, what runs now and what comes next.",
   attention: "Run a checkup and tell me briefly what needs my attention: failed or blocked tasks, unmerged branches, limits.",
   spend: "How much has been spent today and in total (agents and chat), the token use, and where the account usage stands? Keep it short.",
