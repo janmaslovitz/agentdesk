@@ -812,11 +812,12 @@ class Chat:
               {"type": "object", "required": ["title", "body"], "properties": {
                   "title": {"type": "string"}, "body": {"type": "string"},
                   "tier": {"type": "string", "enum": core.TIER_ORDER, "description": "optional; else the router decides"},
+                  "effort": {"type": "string", "enum": ["low", "medium", "high"], "description": "optional; else the router or the tier decides"},
                   "depends": {"type": "array", "items": {"type": "string"}, "description": "ids of tasks that must be done first"}}})
         async def add_task(a):
             tid = core.next_task_id(p)
             core.add_task(p, tid, str(a.get("title") or "Untitled"), str(a.get("body") or ""), a.get("tier") or None,
-                          [str(x) for x in a.get("depends") or []])
+                          [str(x) for x in a.get("depends") or []], None, a.get("effort") or None)
             return ok(f"queued task {tid}")
 
         @tool("queue_status", "The tasks with their status and tier, and whether a run is going.", {})
@@ -1000,6 +1001,7 @@ class Chat:
             "goal": {"type": "string", "description": "what to change, constraints, and how to tell it's done"},
             "files": {"type": "array", "items": {"type": "string"}, "description": "files it touches"},
             "tier": {"type": "string", "enum": core.TIER_ORDER, "description": "optional; else the router decides"},
+            "effort": {"type": "string", "enum": ["low", "medium", "high"], "description": "optional: how hard the model thinks"},
             "depends": {"type": "array", "items": {"type": "string"},
                         "description": "d1, d2, ... (this plan's tasks by position) or ids of queued tasks"}}}
         plan_schema = {"type": "object", "required": ["tasks"], "properties": {
@@ -2036,7 +2038,8 @@ def task_row(t: core.Task, e: dict) -> dict:
     for r in runs:
         for k, v in (r.get("tokens") or {}).items():
             tok[k] = tok.get(k, 0) + v
-    return {"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "status": e.get("status", "pending"),
+    return {"id": t.id, "title": t.title, "depends": t.depends, "tier": e.get("tier") or t.tier, "effort": e.get("effort") or t.effort,
+            "status": e.get("status", "pending"),
             "used_pct": task_used(runs) if task_used(runs) is not None or e.get("usage_share_pct") is None else e["usage_share_pct"],
             "usage_shared": e.get("usage_share_pct") is not None and task_used(runs) is None, "why": e.get("why", ""), "runs": runs, "cost": round(sum((r.get("cost_usd") or 0) for r in runs), 4), "tokens": tok,
             "commit": e.get("commit"), "branch": e.get("branch"), "failure": e.get("last_failure", ""), "question": e.get("question", "")}

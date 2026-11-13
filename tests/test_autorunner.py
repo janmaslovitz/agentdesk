@@ -216,7 +216,7 @@ def test_finishing_a_task_resets_crashes(project, monkeypatch, tmp_path):
     async def fake_route(_p, _store, _task, _meter):
         return {"tier": "small", "why": "", "brief": "b"}
 
-    async def fake_work(_p, _store, _task, _wt, _tier, _brief, _meter):
+    async def fake_work(_p, _store, _task, _wt, _tier, _brief, _meter, _effort=None):
         return True, "summary"
 
     monkeypatch.setattr(core, "route", fake_route)

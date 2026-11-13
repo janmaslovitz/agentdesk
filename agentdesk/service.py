@@ -160,6 +160,7 @@ def status(project: str) -> dict:
         e = state["tasks"].get(n["id"], {})
         cost = sum((r.get("cost_usd") or 0) for r in e.get("runs", []))
         rows.append({"id": n["id"], "title": n["title"], "status": n["status"], "state": n["state"], "tier": n["tier"],
+                     "effort": e.get("effort"),
                      "depends": n["depends"], "level": n["level"], "cost_usd": round(cost, 4), "branch": e.get("branch"),
                      "commit": e.get("commit"), "last_failure": (e.get("last_failure") or "")[-300:] or None,
                      "question": e.get("question") or None,
@@ -195,7 +196,7 @@ def log(project: str, lines: int = 80) -> dict:
 # ----------------------------------------------------------------------------- tasks and plans
 
 def add_task(project: str, title: str, body: str = "", tier: str | None = None, depends: list | None = None,
-             files: list | None = None, id: str | None = None) -> dict:
+             files: list | None = None, id: str | None = None, effort: str | None = None) -> dict:
     """Queue one task. Its dependencies must exist and must not form a cycle."""
     p = _project(project)
     title = str(title or "").strip()
@@ -211,7 +212,7 @@ def add_task(project: str, title: str, body: str = "", tier: str | None = None, 
     if errors:
         raise ApiError("; ".join(errors))
     try:
-        core.add_task(p, tid, title, str(body or ""), tier or None, deps, [str(f) for f in files or []])
+        core.add_task(p, tid, title, str(body or ""), tier or None, deps, [str(f) for f in files or []], effort or None)
     except ValueError as e:
         raise ApiError(str(e))
     conflicts = [c for c in dag.concurrent_conflicts(nodes) if tid in c[:2]]
@@ -383,6 +384,7 @@ _PLAN_TASK = {"type": "object", "required": ["title", "goal"], "properties": {
     "body": {"type": "string", "description": "more detail, e.g. acceptance criteria"},
     "files": {"type": "array", "items": {"type": "string"}, "description": "files/folders it touches"},
     "tier": {"type": "string", "enum": core.TIER_ORDER},
+    "effort": {"type": "string", "enum": ["low", "medium", "high"], "description": "optional; else the router / the tier decides"},
     "depends": {"type": "array", "items": {"type": "string"}, "description": "d1, d2 ... (earlier plan tasks) or queued task ids"}}}
 
 OPERATIONS: list[Op] = [
@@ -398,7 +400,8 @@ OPERATIONS: list[Op] = [
     Op("add_task", add_task, "Queue one task (checked against the graph: dependencies exist, no cycle).",
        _obj({**_P, "title": {"type": "string"}, "body": {"type": "string", "description": "goal, where, constraints, done when"},
              "tier": {"type": "string", "enum": core.TIER_ORDER}, "depends": {"type": "array", "items": {"type": "string"}},
-             "files": {"type": "array", "items": {"type": "string"}}, "id": {"type": "string"}}, ["project", "title"]), True),
+             "files": {"type": "array", "items": {"type": "string"}}, "id": {"type": "string"},
+             "effort": {"type": "string", "enum": ["low", "medium", "high"]}}, ["project", "title"]), True),
     Op("plan", plan, "The project's draft or approved plan, and the architect's state.", _obj(_P, ["project"])),
     Op("propose_plan", propose_plan, "Save a draft plan (a task graph) for approval; replaces an existing draft.",
        _obj({**_P, "summary": {"type": "string"}, "tasks": {"type": "array", "items": _PLAN_TASK}}, ["project", "tasks"]), True),

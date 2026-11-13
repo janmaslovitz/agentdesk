@@ -13,7 +13,7 @@ def test_route_skips_the_model_when_tier_is_set(project, monkeypatch):
     meter = core.Meter(project, store, store.load())
     task = core.Task("1", "t", "do the thing", "standard")
     plan = asyncio.run(core.route(project, store, task, meter))
-    assert plan == {"tier": "standard", "why": "set in the task file", "brief": "do the thing"}
+    assert plan == {"tier": "standard", "why": "set in the task file", "brief": "do the thing", "effort": None}
     assert any(e.get("kind") == "routed" for e in core.read_activity(project, "1"))
 
 

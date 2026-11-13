@@ -23,7 +23,7 @@ def proj(project):
 
 def fake_worker(monkeypatch, summary, edit=None):
     """core.work replaced: optionally edits the worktree, then reports success with `summary`."""
-    async def work(p, store, task, wt, tier, brief, meter):
+    async def work(p, store, task, wt, tier, brief, meter, effort=None):
         if edit:
             (wt / f"{task.id}-{edit}").write_text("changed\n", encoding="utf-8")
         return True, summary

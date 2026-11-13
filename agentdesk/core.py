@@ -150,6 +150,7 @@ def _data_home() -> Path:
 
 DATA = _data_home()
 TIER_ORDER = ["mechanical", "standard", "hard"]
+EFFORTS = ["low", "medium", "high", "xhigh", "max"]   # the models' effort levels, weakest first
 
 DEFAULT_SETTINGS = """# AgentDesk settings. Edit here or in the dashboard.
 
@@ -218,6 +219,7 @@ next = "standard"
 [tiers.standard]
 model = "sonnet"
 effort = "medium"
+max_effort = "high"       # before moving up a tier, a task that keeps failing gets one more round at this effort
 max_turns = 80
 budget_usd = 4.0
 next = "hard"
@@ -225,6 +227,7 @@ next = "hard"
 [tiers.hard]
 model = "opus"
 effort = "high"
+max_effort = "xhigh"
 max_turns = 120
 budget_usd = 12.0
 
@@ -1261,6 +1264,7 @@ class Task:
     depends: list[str] = field(default_factory=list)
     crates: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)   # what it touches (optional): the graph checks overlaps with it
+    effort: str | None = None                          # low | medium | high (optional; else the router or the tier decides)
 
 
 _TASK_SKIP = object()  # cached verdict for a file that isn't a runnable task (no header, draft, invalid)
@@ -1277,7 +1281,8 @@ def _parse_task(f: Path):
         if h.get("status") == "draft":
             return _TASK_SKIP
         return Task(str(h["id"]), h["title"], m.group(2).strip(), h.get("tier"), [str(d) for d in h.get("depends", [])],
-                    list(h.get("crates", [])), [str(x) for x in h.get("files", [])])
+                    list(h.get("crates", [])), [str(x) for x in h.get("files", [])],
+                    h.get("effort") if h.get("effort") in EFFORTS else None)
     except (tomllib.TOMLDecodeError, KeyError):
         return _TASK_SKIP
 
@@ -1305,14 +1310,18 @@ def load_tasks(p: Project) -> list[Task]:
 
 
 def add_task(p: Project, task_id: str, title: str, body: str, tier: str | None = None, depends: list[str] | None = None,
-             files: list[str] | None = None) -> Path:
+             files: list[str] | None = None, effort: str | None = None) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", task_id) or task_id in (COWORK,):
         raise ValueError("task ids use letters, digits, - and _ (and start with a letter or digit)")
     if tier and tier not in TIER_ORDER:
         raise ValueError(f"tier is one of {', '.join(TIER_ORDER)} (or empty: the router decides)")
     head = [f"id = {toml_str(task_id)}", f"title = {toml_str(title)}"]
+    if effort and effort not in EFFORTS:
+        raise ValueError(f"effort is one of {', '.join(EFFORTS)} (or empty: the router or the tier decides)")
     if tier:
         head.append(f"tier = {toml_str(tier)}")
+    if effort:
+        head.append(f"effort = {toml_str(effort)}")
     if depends:
         head.append("depends = [" + ", ".join(toml_str(d) for d in depends) + "]")
     if files:
@@ -1391,12 +1400,15 @@ def check_plan_tasks(p: Project, tasks) -> list[dict]:
         tier = t.get("tier") or None
         if tier is not None and tier not in TIER_ORDER:
             raise ValueError(f"{key}: tier is one of {', '.join(TIER_ORDER)} (or empty: the router decides)")
+        effort = t.get("effort") or None
+        if effort is not None and effort not in EFFORTS:
+            raise ValueError(f"{key}: effort is one of {', '.join(EFFORTS)} (or empty)")
         deps = list(dict.fromkeys(str(d).strip() for d in t.get("depends") or [] if str(d).strip()))
         for d in deps:
             if d == key or (d not in keys and d not in queued):
                 raise ValueError(f"{key}: depends on {d!r}, which is neither another task of this plan (d1..d{len(keys)}) nor a queued task")
         out.append({"key": key, "title": title[:200], "goal": str(t.get("goal") or "").strip(), "body": str(t.get("body") or "").strip(),
-                    "files": [str(f) for f in t.get("files") or []][:30], "tier": tier, "depends": deps})
+                    "files": [str(f) for f in t.get("files") or []][:30], "tier": tier, "effort": effort, "depends": deps})
     plan_order(out)  # refuses cycles
     return out
 
@@ -1435,6 +1447,8 @@ def _write_drafts(p: Project, tasks: list[dict]) -> None:
         head = [f"id = {toml_str(t['key'])}", f"title = {toml_str(t['title'])}", 'status = "draft"']
         if t["tier"]:
             head.append(f"tier = {toml_str(t['tier'])}")
+        if t.get("effort"):
+            head.append(f"effort = {toml_str(t['effort'])}")
         if t["depends"]:
             head.append("depends = [" + ", ".join(toml_str(x) for x in t["depends"]) + "]")
         (d / f"{t['key']}.md").write_text("+++\n" + "\n".join(head) + "\n+++\n\n" + plan_task_body(t) + "\n", encoding="utf-8")
@@ -1525,7 +1539,8 @@ def approve_plan(p: Project) -> dict[str, str]:
             ids[t["key"]] = f"{n:03d}"
             n += 1
         for t in order:
-            add_task(p, ids[t["key"]], t["title"], plan_task_body(t), t["tier"], [ids.get(d, d) for d in t["depends"]], t["files"])
+            add_task(p, ids[t["key"]], t["title"], plan_task_body(t), t["tier"], [ids.get(d, d) for d in t["depends"]], t["files"],
+                     t.get("effort"))
         _clear_drafts(p)
         plan.update(status="approved", ids=ids, approved=_now(), seen={})
         save_plan(p, plan)
@@ -2857,6 +2872,7 @@ def guard(wt: Path, also: tuple[Path, ...] = (), never: tuple[Path, ...] = (), e
 
 ROUTER_SCHEMA = {"type": "object", "required": ["tier", "why", "brief"], "properties": {
     "tier": {"type": "string", "enum": TIER_ORDER}, "why": {"type": "string"}, "brief": {"type": "string"},
+    "effort": {"type": "string", "enum": ["low", "medium", "high"]},
     "crates": {"type": "array", "items": {"type": "string"}}}}
 
 ROUTER_PROMPT = """You route a coding task to the cheapest worker that will do it well, and write its brief.
@@ -2864,6 +2880,9 @@ ROUTER_PROMPT = """You route a coding task to the cheapest worker that will do i
 Tiers: mechanical (clear, local edits: strings, renames, small fixes with an obvious cause, docs),
 standard (normal feature work or debugging in a few files), hard (design across modules, subtle
 algorithms, unclear root causes, UI architecture).
+Effort, within the tier (how hard the model thinks): low for a clear, well-specified change; medium for normal
+work; high when it needs careful reasoning (tricky logic, many interacting pieces) but not a stronger model. Prefer
+a cheaper tier at higher effort over a stronger tier when the work is narrow but subtle.
 
 Explore the repository read-only (Read, Grep, Glob; keep it short) to find the files involved. Then
 write the brief: the goal, the relevant files with line hints, constraints from the project's
@@ -3084,7 +3103,7 @@ def read_activity(p: Project, task_id: str, limit: int = 500) -> list[dict]:
 async def route(p: Project, store: Store, task: Task, meter: Meter) -> dict:
     if task.tier in TIER_ORDER:  # the task file decides: no model call
         Activity(p, task.id, "router").add("routed", tier=task.tier, text="set in the task file")
-        return {"tier": task.tier, "why": "set in the task file", "brief": task.body}
+        return {"tier": task.tier, "why": "set in the task file", "brief": task.body, "effort": task.effort}
     _load_sdk()
     r = settings()["router"]
     opts = options(p, role="router", log=store.log, model=r["model"], max_turns=int(r["max_turns"]), max_budget_usd=float(r["budget_usd"]), cwd=str(p.repo),
@@ -3144,6 +3163,7 @@ ARCHITECT_SCHEMA = {"type": "object", "required": ["summary", "tasks"], "propert
         "done_when": {"type": "array", "items": {"type": "string"}},
         "files": {"type": "array", "items": {"type": "string"}},
         "tier": {"type": "string", "enum": TIER_ORDER},
+        "effort": {"type": "string", "enum": ["low", "medium", "high"]},
         "depends": {"type": "array", "items": {"type": "string"}}}}}}}
 
 ARCHITECT_PROMPT = """You are the architect of an automated coding team. Turn the goal below into a dependency graph of
@@ -3163,6 +3183,9 @@ README). Be thorough but don't read everything. Then design the graph:
 - done_when: concrete, checkable acceptance criteria (tests that pass, commands that succeed, behaviour).
 - tier: mechanical (clear local edits), standard (normal feature or debugging work), hard (cross-module design,
   subtle algorithms). Choose the cheapest tier that will do it well.
+- effort (optional): low for a clear, well-specified change, medium for normal work, high when the work is narrow but
+  needs careful reasoning. A cheaper tier at higher effort often beats a stronger tier; leave it out to use the
+  tier's own.
 - depends: the 1-based positions of earlier tasks in your list as "d1", "d2", ..., or ids of queued tasks below.
   Only real dependencies: an unneeded edge costs parallelism.
 - Tests must stay valid as the graph fills in: a foundation task's tests must not assert that nothing is
@@ -3199,6 +3222,7 @@ def architect_review(p: Project, raw: dict) -> tuple[list[dict] | None, list[str
             return None, ["each task must be an object"], []
         crit = [str(c).strip() for c in t.get("done_when") or [] if str(c).strip()]
         conv.append({"title": t.get("title"), "goal": t.get("goal"), "files": t.get("files") or [], "tier": t.get("tier") or None,
+                     "effort": t.get("effort") or None,
                      "depends": t.get("depends") or [], "body": ("## Done when\n" + "\n".join(f"- {c}" for c in crit)) if crit else ""})
     try:
         norm = check_plan_tasks(p, conv)
@@ -3368,10 +3392,44 @@ async def review_attempt(p: Project, store: Store, task: Task, wt: Path, summary
     return verdict
 
 
-async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter) -> tuple[bool, str]:
+def effort_ladder(tier: str, effort: str | None = None) -> list[tuple[str, str | None]]:
+    """The rungs a task climbs while its attempts fail: (tier, effort) pairs. Within a tier: the chosen effort (the
+    router's or the task file's, else the tier's own), then once more at the tier's `max_effort` if that is higher;
+    then the next tier at its own effort, and so on. E.g. standard/medium → standard/high → hard/high → hard/xhigh."""
+    tiers, out, seen = settings()["tiers"], [], set()
+    if tier not in tiers:  # a tier the settings don't know: one rung as given (the worker falls back as before)
+        return [(tier, effort if effort in EFFORTS else None)]
+    t, e = tier, effort
+    while t and t in tiers and t not in seen:
+        seen.add(t)
+        cfg = tiers[t]
+        base = cfg.get("effort") or None
+        top = cfg.get("max_effort") or base
+        rank = lambda x: EFFORTS.index(x) if x in EFFORTS else -1
+        start = e if e in EFFORTS else base
+        if start and top and rank(start) > rank(top):
+            start = top
+        out.append((t, start))
+        if top and top in EFFORTS and rank(top) > rank(start):
+            out.append((t, top))
+        t, e = cfg.get("next"), None
+    return out
+
+
+def rung_label(tier: str, effort: str | None) -> str:
+    return f"{tier}/{effort}" if effort else tier
+
+
+_TIER_EFFORT = object()  # work(): use the tier's own effort
+
+
+async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief: str, meter: Meter,
+               effort=_TIER_EFFORT) -> tuple[bool, str]:
     _load_sdk()
     s = settings()
-    t = s["tiers"][tier]
+    t = dict(s["tiers"].get(tier) or s["tiers"]["standard"])
+    if effort is not _TIER_EFFORT:
+        t["effort"] = effort
     entry = meter.state["tasks"][task.id]
     gate_env = {k: str(v) for k, v in p.cfg.get("gates", {}).get("env", {}).items()}
     opts = options(p, role="worker", log=store.log, model=t["model"], effort=t.get("effort"), max_turns=int(t["max_turns"]), max_budget_usd=float(t["budget_usd"]),
@@ -3655,20 +3713,25 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
     entry.update(status="routing", started=dt.datetime.now().isoformat(timespec="seconds"))
     store.save(state)
     plan = await route(p, store, task, meter)
-    entry.update(tier=plan["tier"], why=plan.get("why", ""), brief=plan.get("brief", ""), status="working")
+    effort = plan.get("effort") if plan.get("effort") in EFFORTS else (task.effort if task.effort in EFFORTS else None)
+    entry.update(tier=plan["tier"], effort=effort, why=plan.get("why", ""), brief=plan.get("brief", ""), status="working")
     if plan.get("crates") and not task.crates:
         task.crates = [c for c in plan["crates"] if re.fullmatch(r"[A-Za-z0-9_-]+", c)]
     store.save(state)
-    store.log(f"{task.id}: routed to {plan['tier']} ({plan.get('why', '')})")
+    store.log(f"{task.id}: routed to {rung_label(plan['tier'], effort)} ({plan.get('why', '')})")
     wt = await in_repo(meter, ensure_worktree, p, store, task, state)
     start_sha = git(["rev-parse", "HEAD"], wt)[1].strip()
     preamble = await in_repo(meter, worktree_conflicts, p, task, wt, state)
     if preamble:
         Activity(p, task.id, "orchestrator").add("merge_conflict", text=preamble[:ACTIVITY_TEXT])
-    tier, tried = plan["tier"], []
-    while tier:
-        tried.append(tier)
-        ok, summary = await work(p, store, task, wt, tier, preamble + plan["brief"], meter)
+    ladder, tried = effort_ladder(plan["tier"], effort), []
+    for step, (tier, eff) in enumerate(ladder):
+        if step:
+            store.log(f"{task.id}: escalating to {rung_label(tier, eff)}")
+            Activity(p, task.id, "orchestrator").add("escalate", tier=tier, effort=eff)
+            entry.update(tier=tier, effort=eff)
+        tried.append(rung_label(tier, eff))
+        ok, summary = await work(p, store, task, wt, tier, preamble + plan["brief"], meter, eff)
         if ok:
             question = decision_needed(summary, wt, start_sha)
             if question:
@@ -3701,10 +3764,6 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
             entry["status"] = "paused"
             store.save(state)
             return
-        tier = settings()["tiers"][tier].get("next")
-        if tier:
-            store.log(f"{task.id}: escalating to {tier}")
-            Activity(p, task.id, "orchestrator").add("escalate", tier=tier)
     entry["status"] = "blocked"
     store.save(state)
     store.log(f"{task.id}: blocked after {' → '.join(tried)}")
