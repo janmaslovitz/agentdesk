@@ -5,6 +5,21 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Added
+- **Effort per task.** The router, the architect, plans and task files (`effort = "high"`) pick low / medium / high
+  within a tier, and a failing task raises effort before the model: standard/medium → standard/high → hard/high →
+  hard/xhigh (`[tiers.*] max_effort`). The dashboard shows the effort next to the tier.
+
+### Changed
+- The Tasks panel fills the window below the top bar; the list scrolls inside it (wheel or scrollbar) with the header
+  row kept in view, and an open task's details take at most half of it.
+
+### Fixed
+- Checks failed with `[Errno 2] No such file or directory: '/tmp/agentdesk-worker-home'` after a restart of the
+  Server: the service's private /tmp goes away while its runs go on. The workers' scratch home and TMPDIR now live in
+  the data folder (`.scratch/`), a command that couldn't start is tried again, and a check that can't run at all is
+  reported as an environment failure (the attempt is retried as a crash) instead of failing the task and escalating it.
+
 
 ## 1.6.1 - 2026-11-13
 

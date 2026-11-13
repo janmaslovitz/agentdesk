@@ -55,6 +55,10 @@ tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel {
 .st.done { color: var(--ok); } .st.blocked, .st.stuck { color: var(--bad); } .st.needs_decision { color: var(--warn); font-weight: 600; } .st.ready { color: var(--accent); } .st.waiting { opacity: .7; } .st.working, .st.routing { color: var(--accent); } .st.paused { color: var(--warn); }
 .num { font-variant-numeric: tabular-nums; white-space: nowrap; } .muted { color: var(--muted); }
 .detail { padding: 0 14px 12px; margin: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--bg); box-shadow: 0 2px 10px rgba(0,0,0,.18); max-height: 560px; overflow: auto; }
+/* Tasks fill the screen below the top bar: the list scrolls inside (wheel or scrollbar), the header row stays. */
+#taskSec.fit .tscroll { flex: 1 1 auto; min-height: 140px; overflow-y: auto; }
+#taskSec.fit .detail { flex: 0 1 auto; max-height: 50%; }
+.tscroll thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); box-shadow: inset 0 -1px 0 var(--line); }
 .detail.empty { display: none; }
 .detail .dhead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 0; margin-bottom: 4px; background: var(--bg); border-bottom: 1px solid var(--line); }
 .detail .dhead b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -675,6 +679,18 @@ function pickProject(slug) {
   refresh();  // the project's own state first; the overview follows on its timer
 }
 
+function fitTasks() {
+  // The Tasks panel reaches from where it starts to the bottom of the window; on narrow screens (one column) it grows as before.
+  const sec = $("taskSec");
+  if (!sec) return;
+  if (window.innerWidth <= 1100) { sec.classList.remove("fit"); sec.style.height = ""; return; }
+  const top = sec.getBoundingClientRect().top + window.scrollY;
+  sec.classList.add("fit");
+  sec.style.height = Math.max(320, window.innerHeight - top - 14) + "px";
+}
+window.addEventListener("resize", fitTasks);
+setInterval(fitTasks, 1000);  // what sits above it (cards, the plan, notes) changes height now and then
+
 function shell() {
   $("main").innerHTML = `
   <div class="top"><h2 id="pTitle"></h2><span class="m" id="pMeta"></span><span id="runstate" class="pill">idle</span>
@@ -689,9 +705,10 @@ function shell() {
     <div class="card"><div class="k">Chat</div><div class="v num" id="chatc"></div><div class="s num" id="chatt"></div></div>
   </div>
   <div class="grid">
-    <section><h3>Tasks <span class="muted" id="tiers"></span></h3>
+    <section id="taskSec"><h3>Tasks <span class="muted" id="tiers"></span></h3>
+      <div class="tscroll" id="tScroll">
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
-      <div class="muted" id="tierAvg" style="margin:6px 0"></div>
+      <div class="muted" id="tierAvg" style="margin:6px 14px"></div></div>
       <div class="detail empty" id="detail"></div></section>
     <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')">Coworker</button><button data-mode="planner" onclick="setMode('planner')">Planner</button></span>
         <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
@@ -1049,7 +1066,7 @@ async function refresh() {
 async function refreshOnce() {
   const want = cur;
   if (!cur) { $("main").innerHTML = `<div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dProject')">Add project</button></div>`; return; }
-  if (!$("tasks")) shell();
+  if (!$("tasks")) { shell(); requestAnimationFrame(fitTasks); }
   let s0; try { s0 = await api(`/api/p/${want}/state`); } catch { return; }
   if (want !== cur) { refreshAgain = true; return; }  // switched project while waiting: fetch again for the new one
   if (s0.error) return;
