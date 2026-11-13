@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.6.2 - 2026-11-13
+
 ### Added
 - **Effort per task.** The router, the architect, plans and task files (`effort = "high"`) pick low / medium / high
   within a tier, and a failing task raises effort before the model: standard/medium → standard/high → hard/high →
