@@ -207,6 +207,7 @@ def cmd_graph(p: core.Project) -> None:
 def cmd_architect(p: core.Project, goal: str) -> None:
     import json
     lock = hold_lock(p, "architect", "architect.pid")
+    core.use_stable_tmp()
     info = {"status": "running", "goal": goal[:4000], "started": core._now(), "pid": os.getpid()}
     core.write_json(p.path("architect.json"), info)
     try:
@@ -300,6 +301,7 @@ def main() -> None:
     elif args.cmd == "run":
         p = core.project(args.project)
         lock = hold_lock(p, "run", "runner.pid")
+        core.use_stable_tmp()
         try:
             core.run_async(core.run_queue(p, args.task, args.max, args.parallel, args.auto, args.budget))
         finally:
@@ -321,6 +323,7 @@ def main() -> None:
     elif args.cmd == "integrate":
         p = core.project(args.project)
         lock = hold_lock(p, "run", "runner.pid")
+        core.use_stable_tmp()
         try:
             import json
             print(json.dumps(core.integrate(p, final=not args.no_checks), ensure_ascii=False, indent=2))

@@ -117,11 +117,14 @@ def _hide_child_consoles() -> None:
 
 
 _hide_child_consoles()
+SCRATCH_NAME = "agentdesk-worker-home"
+
+
 def _is_scratch_path(p: str) -> bool:
-    import tempfile
+    """The workers' throw-away AGENTDESK_HOME (now <data>/.scratch/agentdesk-worker-home; formerly in the temp folder)."""
     try:
-        return Path(p).resolve() == (Path(tempfile.gettempdir()) / "agentdesk-worker-home").resolve()
-    except OSError:
+        return Path(p).name == SCRATCH_NAME
+    except (OSError, ValueError):
         return False
 
 
@@ -1609,23 +1612,59 @@ def plan_brief(p: Project) -> str:
 
 def scratch_home() -> str:
     """A throw-away AGENTDESK_HOME for commands run by workers and checks, so tests of AgentDesk itself
-    (or a stray `stop`) can never touch the real data folder, pid files or settings."""
-    import tempfile
-    d = Path(tempfile.gettempdir()) / "agentdesk-worker-home"
+    (or a stray `stop`) can never touch the real data folder, pid files or settings. It lives in the data folder,
+    not in the system temp folder: a service's private /tmp disappears when the service restarts, while its runs go
+    on (and then couldn't start a single check)."""
+    d = DATA / ".scratch" / SCRATCH_NAME
     d.mkdir(parents=True, exist_ok=True)
     return str(d)
 
 
+def work_tmp() -> str:
+    """TMPDIR for runs, workers and checks: in the data folder, so it outlives a restart of the service (see above)."""
+    d = DATA / ".scratch" / "tmp"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)
+
+
+def use_stable_tmp() -> None:
+    """For a run / integration / architect process: temp files go to work_tmp() for this process and its children."""
+    import tempfile
+    t = work_tmp()
+    os.environ["TMPDIR"] = os.environ["TEMP"] = os.environ["TMP"] = t
+    tempfile.tempdir = None  # re-read on next use
+
+
+ENV_FAILURE = "COULD NOT RUN (the environment, not the task)"
+
+
 def run(cmd, cwd: Path, env: dict | None = None, timeout: int = 3600, shell: bool = False) -> tuple[int, str]:
-    try:
-        r = subprocess.run(cmd, cwd=cwd, env={**os.environ, "AGENTDESK_HOME": scratch_home(), **(env or {})}, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout, shell=shell,
-                           stdin=subprocess.DEVNULL, **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
-    except subprocess.TimeoutExpired as e:
-        return 124, f"timed out after {timeout}s\n{str(e.stdout or '')[-2000:]}"
-    except OSError as e:
-        return 127, str(e)
+    """Run a command; (exit code, output). A command that couldn't even start (a folder it needs vanished) is tried
+    once more after recreating the scratch folders; if it still can't, code 127 and the error."""
+    last = ""
+    for attempt in range(2):
+        try:
+            full = {**os.environ, "AGENTDESK_HOME": scratch_home(), "TMPDIR": work_tmp(), **(env or {})}
+            r = subprocess.run(cmd, cwd=cwd, env=full, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=timeout, shell=shell,
+                               stdin=subprocess.DEVNULL, **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
+            return r.returncode, (r.stdout or "") + (r.stderr or "")
+        except subprocess.TimeoutExpired as e:
+            return 124, f"timed out after {timeout}s\n{str(e.stdout or '')[-2000:]}"
+        except OSError as e:
+            last = str(e)
+            if attempt == 0:
+                time.sleep(1)
+    return 127, last
+
+
+def environment_failure(code: int, out: str) -> bool:
+    """A check that failed because it couldn't run at all (exit 127: the command or a folder it needs is missing),
+    as opposed to a check that ran and found a problem in the task's work."""
+    if code != 127:
+        return False
+    o = (out or "").strip()
+    return o.startswith("[Errno") or bool(re.search(r"(^|: )(command )?not found\b|No such file or directory", o[:500]))
 
 
 def git(args: list[str], cwd: Path) -> tuple[int, str]:
@@ -2375,6 +2414,12 @@ def run_gates(p: Project, store: Store, wt: Path, kind: str, crates: list[str] |
         cmd = cmd.replace("{crates}", sel)
         store.log(f"  gate: {cmd}")
         code, out = run(cmd, wt, env=env, timeout=int(g.get("timeout_s", 3600)), shell=True)
+        if environment_failure(code, out):
+            store.log(f"  gate couldn't run ({out.strip()[:160]}); trying once more")
+            time.sleep(2)
+            code, out = run(cmd, wt, env=env, timeout=int(g.get("timeout_s", 3600)), shell=True)
+            if environment_failure(code, out):
+                return False, f"$ {cmd}\n{ENV_FAILURE}: {out.strip()[:1500]}"
         if code != 0:
             return False, f"$ {cmd}\n{trim(out, int(g.get('max_feedback_chars', 6000)))}"
     return True, ""
@@ -2942,7 +2987,8 @@ def options(p: Project, role: str | None = None, log=None, **kw) -> ClaudeAgentO
     # `scratch=False` (the full-access Coworker, which also installs and starts AgentDesk): don't hand the agent the
     # workers' throw-away data home, or whatever it launches would use it instead of the real data.
     scratch = kw.pop("scratch", True)
-    env = {**account_env(p.account), **({"AGENTDESK_HOME": scratch_home()} if scratch else {}), **kw.pop("env", {})}
+    env = {**account_env(p.account), **({"AGENTDESK_HOME": scratch_home(), "TMPDIR": work_tmp()} if scratch else {}),
+           **kw.pop("env", {})}
     try:
         extra = mcp_servers(p, role, log)
     except Exception as e:  # never break a run over optional config
@@ -3475,6 +3521,9 @@ async def work(p: Project, store: Store, task: Task, wt: Path, tier: str, brief:
                             store.save(meter.state)
                     meter.release(tok)  # (already released by end() unless the answer had no result)
                     ok, failure = await check_worktree(p, store, task, wt, meter)
+                    if not ok and ENV_FAILURE in failure:
+                        act.add("check", ok=False, text=failure[-ACTIVITY_TEXT:])
+                        raise RuntimeError("the checks could not run (the environment, not the task): " + failure.splitlines()[-1][:300])
                     gates = p.cfg.get("gates", {}).get("quick", [])
                     act.add("check", ok=ok, gates=len(gates), text="; ".join(gates) if ok else failure[-ACTIVITY_TEXT:])
                     if ok and not _DECISION.search(summary or "") and review_cfg()["enabled"] and reviews < review_cfg()["rounds"]:
