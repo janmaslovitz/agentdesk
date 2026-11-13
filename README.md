@@ -166,13 +166,16 @@ Tasks form a dependency graph (`depends` in the task header). A run (**Run all**
 task whose dependencies are done, up to `[run] max_parallel` at once (default 8; `--parallel N` for one run), each in its
 own worktree on `auto/<id>`. Among ready tasks the one on the longest remaining chain goes first (tasks weighted by tier:
 mechanical 1, standard 3, hard 8). A blocked task holds back only what depends on it ("stuck" on the dashboard); the
-rest goes on. Each task starts at most once per run; tasks added while it runs are picked up.
+rest goes on. Each task starts at most once per run unless it is retried or answered meanwhile; tasks added, retried
+or answered while a run goes start within `recheck_seconds` (default 30) when a slot is free, without waiting for a
+running task to end.
 
 ```toml
 [run]                 # settings.toml, or a project's project.toml to override
 max_parallel = 8
 gate_parallel = 0     # checks at the same time (0 = all); 1 if the checks share one build folder
 integrate_after = false
+recheck_seconds = 30  # how often a run looks for newly ready work
 ```
 
 - **Several dependencies:** the task's worktree starts from the first dependency's branch and gets the others merged in.

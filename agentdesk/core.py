@@ -179,6 +179,9 @@ retries_per_tier = 2
 max_parallel = 8
 gate_parallel = 0
 integrate_after = false
+# A run looks for newly ready work (a retry, an answer, a task added meanwhile) at least this often, not only when a
+# running task ends.
+recheck_seconds = 30
 
 # Notifications: a short message when something needs a person or a run ends. Telegram: set the bot token in the
 # environment variable named by telegram_token_env (never here) and the chat id; webhook_url: a JSON POST
@@ -1472,6 +1475,11 @@ def _clear_drafts(p: Project) -> int:
 
 def _now() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def now_iso() -> str:
+    """A fine-grained timestamp for ordering events within a run (a task started vs. put back in the queue)."""
+    return dt.datetime.now().isoformat(timespec="microseconds")
 
 
 def propose_plan(p: Project, summary: str, tasks) -> dict:
@@ -3721,7 +3729,7 @@ def answer_task(p: Project, task_id: str, answer: str, who: str = "user") -> Non
     block = f"\n\n## Decision ({_now()[:10]}, {who})\n\n" + (f"Question: {q.splitlines()[0][:300]}\n\n" if q else "") + answer + "\n"
     write_atomic(f, text + block)
     e.setdefault("decisions", []).append({"at": _now(), "question": q[:1000], "answer": answer[:3000], "by": who})
-    e.update(status="pending", crashes=0)
+    e.update(status="pending", crashes=0, requeued=now_iso())
     e.pop("last_failure", None)
     store.save(state)
     store.log(f"{task_id}: decision recorded ({who}); back in the queue")
@@ -3822,7 +3830,7 @@ async def do_task(p: Project, store: Store, task: Task, meter: Meter) -> None:
 
 def run_cfg(p: Project | None = None) -> dict:
     """[run] from settings.toml with the project's [run] on top: max_parallel (>= 1), gate_parallel (0 = all),
-    integrate_after."""
+    integrate_after, recheck_seconds (> 0)."""
     cfg = dict(settings().get("run", {}))
     if p is not None:
         cfg.update(p.cfg.get("run", {}) or {})
@@ -3834,7 +3842,12 @@ def run_cfg(p: Project | None = None) -> dict:
         g = max(0, int(cfg.get("gate_parallel", 0)))
     except (TypeError, ValueError):
         g = 0
-    return {"max_parallel": n, "gate_parallel": g, "integrate_after": bool(cfg.get("integrate_after", False))}
+    try:
+        r = float(cfg.get("recheck_seconds", 30))
+    except (TypeError, ValueError):
+        r = 30.0
+    return {"max_parallel": n, "gate_parallel": g, "integrate_after": bool(cfg.get("integrate_after", False)),
+            "recheck_seconds": r if r > 0 else 30.0}
 
 
 class RunLock:
@@ -3940,6 +3953,7 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
     meter.gate_sem = asyncio.Semaphore(g) if 0 < g < n else None
     retry = autorunner_cfg(p)["retry_crashed"] if auto else 0
     started: list[str] = []
+    started_at: dict[str, str] = {}
     said: set[str] = set()
     stop = None
     run_before = meter.mark()
@@ -3961,7 +3975,9 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
                     store.log(f"task graph: {e} (the tasks involved can't start)")
             stop = stop or meter.stop_reason()
             if not stop and (max_tasks is None or len(started) < max_tasks):
-                skip = set(started)  # each task at most once per run (one that ends not done waits for the next run)
+                # Each task at most once per run (one that ends not done waits for the next run), unless someone
+                # put it back in the queue (a retry, an answer) after this run started it.
+                skip = {t for t in started if t in running or state["tasks"].get(t, {}).get("requeued", "") <= started_at[t]}
                 if auto:
                     skip |= {tid for tid in tasks if _flagged(state["tasks"].get(tid, {}), retry)}
                 for tid in dag.ready(nodes, state, skip):
@@ -3975,12 +3991,18 @@ async def run_dag(p: Project, max_parallel: int | None = None, max_tasks: int | 
                         break
                     store.owned.add(tid)
                     running[tid] = asyncio.create_task(_guarded_task(p, store, tasks[tid], meter), name=f"task-{tid}")
-                    started.append(tid)
+                    if tid in started:
+                        store.log(f"{tid}: put back in the queue; starting it again")
+                    else:
+                        started.append(tid)
+                    started_at[tid] = now_iso()
                     if len(running) > 1 or n > 1:
                         store.log(f"{tid}: started ({len(running)} of {n} slots busy)")
             if not running:
                 break
-            finished, _ = await asyncio.wait(running.values(), return_when=asyncio.FIRST_COMPLETED)
+            # Wake up when a task ends, or after recheck_seconds to pick up work queued meanwhile.
+            finished, _ = await asyncio.wait(running.values(), timeout=cfg["recheck_seconds"],
+                                             return_when=asyncio.FIRST_COMPLETED)
             for tid in [t for t, job in running.items() if job in finished]:
                 running.pop(tid)
                 store.owned.discard(tid)

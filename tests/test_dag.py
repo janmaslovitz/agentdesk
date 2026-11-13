@@ -536,3 +536,55 @@ def test_retry_works_while_a_run_is_going_and_the_run_picks_it_up(project, monke
     import pytest
     with pytest.raises(service.ApiError, match="worked on"):
         service.retry(project.slug, "3")
+
+
+def _recheck(monkeypatch, seconds=0.05):
+    real = core.run_cfg
+    monkeypatch.setattr(core, "run_cfg", lambda p=None: {**real(p), "recheck_seconds": seconds})
+
+
+def test_run_picks_up_work_queued_while_a_long_task_goes(project, monkeypatch):
+    """A task added or retried mid-run starts on the next recheck, not only when a running task ends; a task retried
+    after it failed in this run starts again."""
+    add(project, "long"); add(project, "fails")
+    _recheck(monkeypatch)
+    seen = {"order": []}
+
+    async def fake(p, store, task, meter):
+        seen["order"].append(task.id)
+        meter.state["tasks"].setdefault(task.id, {})["status"] = "working"
+        if task.id == "long":
+            await asyncio.sleep(0.15)
+            assert "new" in seen["order"]  # started while this one was still going
+            for _ in range(40):  # wait for the retried task's second go
+                if seen["order"].count("fails") == 2:
+                    break
+                await asyncio.sleep(0.02)
+        elif task.id == "fails" and seen["order"].count("fails") == 1:
+            meter.state["tasks"]["fails"]["status"] = "blocked"
+            store.save(meter.state)
+            await asyncio.sleep(0)
+            return
+        meter.state["tasks"][task.id].update(status="done", branch=f"auto/{task.id}")
+        store.save(meter.state)
+
+    monkeypatch.setattr(core, "do_task", fake)
+
+    async def go():
+        run = asyncio.create_task(core.run_dag(project, max_parallel=4))
+        await asyncio.sleep(0.03)
+        add(project, "new")
+        service.call("retry", {"project": project.slug, "id": "fails"})
+        return await run
+    res = asyncio.run(go())
+    assert seen["order"].count("fails") == 2 and "new" in seen["order"]
+    assert sorted(res["done"]) == ["fails", "long", "new"] and res["started"].count("fails") == 1
+    assert "fails: put back in the queue; starting it again" in project.path("agentdesk.log").read_text()
+
+
+def test_a_task_that_fails_is_not_restarted_without_a_retry(project, monkeypatch):
+    add(project, "1")
+    _recheck(monkeypatch, 0.01)
+    seen = fake_tasks(monkeypatch, {"1": "blocked"})
+    res = asyncio.run(core.run_dag(project, max_parallel=2))
+    assert seen["order"] == ["1"] and res["blocked"] == ["1"]

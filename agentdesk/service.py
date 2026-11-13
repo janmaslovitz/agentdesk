@@ -327,7 +327,7 @@ def retry(project: str, id: str) -> dict:
         raise ApiError(f"{t.id} is done")
     if e.get("status") in ("routing", "working"):
         raise ApiError(f"{t.id} is being worked on right now")
-    e.update(status="pending", crashes=0)
+    e.update(status="pending", crashes=0, requeued=core.now_iso())
     e.pop("last_failure", None)
     store.save(state)
     store.log(f"api: {t.id} set back to pending" + (" (the run going now picks it up)" if busy(p) else ""))

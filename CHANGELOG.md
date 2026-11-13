@@ -5,6 +5,10 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Changed
+- A run looks for newly ready work every `[run] recheck_seconds` (default 30), so a task added, retried or answered
+  while long tasks go starts as soon as a slot is free instead of waiting for a running task to end. A task retried
+  or answered after it failed in the same run starts again in that run.
 
 ## 1.6.2 - 2026-11-13
 
