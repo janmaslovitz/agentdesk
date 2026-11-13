@@ -5,6 +5,11 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Fixed
+- **Log in** for a subscription account needed a terminal window (`x-terminal-emulator` on Linux), so it failed on the
+  headless Server ("couldn't open a terminal"). It now works from the dashboard everywhere: `claude auth login` runs
+  in the background, the dialog opens its sign-in link and takes the code the sign-in page shows.
+
 ### Added
 - **Review step.** After the checks pass, a reviewer (`[review]`, Sonnet low effort) compares the change with the
   task's goal and acceptance criteria and sends unfinished work back with concrete fixes; a question only the user can

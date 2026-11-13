@@ -300,6 +300,15 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
   <div class="row"><button onclick="closeDlg('dAccount')">Cancel</button><button class="primary" onclick="addAccount()">Add</button></div>
 </dialog>
 
+<dialog id="dLogin"><h3>Sign in: <span id="lName"></span></h3>
+  <p class="muted">1. Open the sign-in page and log in with the Claude account this AgentDesk account should use.</p>
+  <p><a id="lUrl" href="#" target="_blank" rel="noopener">Open the sign-in page ↗</a></p>
+  <p class="muted">2. The page then shows a code. Copy it and paste it here.</p>
+  <input id="lCode" placeholder="paste the code" autocomplete="off">
+  <p id="lMsg" class="muted"></p>
+  <div class="row"><button onclick="loginCancel()">Cancel</button><button class="primary" id="lGo" onclick="loginCode()">Sign in</button></div>
+</dialog>
+
 <dialog id="dTask"><h3>Add task</h3>
   <label>Title</label><input id="tTitle">
   <label>Tier</label><select id="tTier"><option value="">automatic (router decides)</option><option>mechanical</option><option>standard</option><option>hard</option></select>
@@ -586,11 +595,29 @@ async function addAccount() {
   if (r.error) return note(r.error);
   closeDlg("dAccount"); refreshAll();
 }
+let loginFor = "";
 async function login(name) {
+  loginFor = name;
+  $("lName").textContent = name; $("lCode").value = ""; $("lMsg").textContent = "Starting the sign-in…";
+  $("lUrl").style.visibility = "hidden"; $("lGo").disabled = true; $("dLogin").showModal();
   const r = await api(`/api/accounts/${encodeURIComponent(name)}/login`, {});
-  if (r.error) return note(r.error);
-  let n = 0;  // check every 3 s for up to 3 minutes
-  const t = setInterval(() => { refreshAll(); if (++n > 60) clearInterval(t); }, 3000);
+  if (r.error) { $("lMsg").textContent = r.error; return; }
+  $("lUrl").href = r.url; $("lUrl").style.visibility = "visible"; $("lGo").disabled = false; $("lMsg").textContent = "";
+  window.open(r.url, "_blank", "noopener");
+}
+async function loginCode() {
+  const code = $("lCode").value.trim();
+  if (!code) { $("lMsg").textContent = "Paste the code from the sign-in page first."; return; }
+  $("lGo").disabled = true; $("lMsg").textContent = "Signing in…";
+  const r = await api(`/api/accounts/${encodeURIComponent(loginFor)}/login/code`, {code});
+  $("lGo").disabled = false;
+  if (r.error) { $("lMsg").textContent = r.error; return; }
+  if (!r.ok) { $("lMsg").textContent = "Not signed in: " + (r.message || "unknown error") + " Press Cancel and try again."; return; }
+  closeDlg("dLogin"); note(`Signed in: ${loginFor}`); refreshAll();
+}
+async function loginCancel() {
+  if (loginFor) await api(`/api/accounts/${encodeURIComponent(loginFor)}/login/cancel`, {});
+  closeDlg("dLogin");
 }
 async function addTask() {
   const r = await api(`/api/p/${cur}/tasks`, {title: $("tTitle").value, tier: $("tTier").value, depends: $("tDeps").value, body: $("tBody").value});

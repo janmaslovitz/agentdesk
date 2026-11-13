@@ -1892,26 +1892,116 @@ def add_account(name: str, kind: str, value: str) -> str | None:
     return None
 
 
-def open_login(name: str) -> str | None:
-    """Open a console running the Claude CLI for this account; the user types /login there."""
-    a = core.account(name)
-    if a.get("kind") == "api_key":
-        return "API-key accounts don't log in; set the environment variable instead"
-    env = {**os.environ, **core.account_env(a)}
-    cli = core.bundled_cli()
-    _AUTH_CACHE.pop(name, None)  # the next status check asks the CLI again
+LOGIN_URL = re.compile(r"https://\S+/oauth/authorize\S+")
+LOGIN_TIMEOUT_S = 900
+
+
+class LoginFlow:
+    """Signing a subscription account in from the dashboard, with no terminal: `claude auth login` runs in the
+    background, prints a sign-in link (shown to the user) and waits for the code the sign-in page gives back, which
+    the user pastes on the dashboard and code() hands to the CLI. Works the same on a desktop and a headless server."""
+
+    def __init__(self, name: str, console: bool = False):
+        a = core.account(name)
+        if a.get("kind") == "api_key":
+            raise ValueError("API-key accounts don't log in; set the environment variable instead")
+        self.name, self.started, self.out = name, time.time(), []
+        env = {**os.environ, **core.account_env(a), "BROWSER": "true"}  # never try to open a browser on the server
+        cfg = env.get("CLAUDE_CONFIG_DIR")
+        if cfg:
+            Path(cfg).mkdir(parents=True, exist_ok=True)
+        args = [core.bundled_cli(), "auth", "login"] + (["--console"] if console else [])
+        kw: dict = {"creationflags": core.no_console_flags()} if sys.platform == "win32" else {"start_new_session": True}
+        self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, **kw)
+        threading.Thread(target=self._read, daemon=True, name=f"login-{name}").start()
+
+    def _read(self) -> None:
+        for chunk in iter(lambda: self.proc.stdout.read1(4096), b""):
+            self.out.append(chunk.decode("utf-8", "replace"))
+
+    def text(self) -> str:
+        return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", "".join(self.out))
+
+    def url(self, wait_s: float = 20.0) -> str | None:
+        end = time.time() + wait_s
+        while time.time() < end:
+            m = LOGIN_URL.search(self.text())
+            if m:
+                return m.group(0)
+            if self.proc.poll() is not None:
+                return None
+            time.sleep(0.1)
+        return None
+
+    def code(self, code: str, wait_s: float = 60.0) -> tuple[bool, str]:
+        if self.proc.poll() is not None:
+            return False, "the sign-in expired; press Log in again"
+        try:
+            self.proc.stdin.write((code.strip() + "\n").encode("utf-8"))
+            self.proc.stdin.flush()
+        except OSError as e:
+            return False, f"couldn't pass the code on: {e}"
+        try:
+            self.proc.wait(wait_s)
+        except subprocess.TimeoutExpired:
+            self.cancel()
+            return False, "no answer from the sign-in within a minute; try again"
+        time.sleep(0.2)
+        tail = self.text().split("Paste code here if prompted >")[-1].strip()
+        return self.proc.returncode == 0, tail[-400:] or ("signed in" if self.proc.returncode == 0 else "the sign-in failed")
+
+    def cancel(self) -> None:
+        if self.proc.poll() is None:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+
+    def expired(self) -> bool:
+        return time.time() - self.started > LOGIN_TIMEOUT_S or self.proc.poll() is not None
+
+
+LOGINS: dict[str, LoginFlow] = {}
+
+
+def start_login(name: str, console: bool = False) -> dict:
+    """Begin signing an account in: {ok, url} (the user opens it, signs in, and brings back a code) or {error}."""
+    old = LOGINS.pop(name, None)
+    if old:
+        old.cancel()
     try:
-        if sys.platform == "win32":
-            subprocess.Popen(["cmd", "/c", "start", "Claude login", "cmd", "/k", cli, "/login"], env=env)
-        elif sys.platform == "darwin":
-            cfg = env.get("CLAUDE_CONFIG_DIR", "")
-            script = f'tell app "Terminal" to do script "CLAUDE_CONFIG_DIR={cfg} \\"{cli}\\" /login"'
-            subprocess.Popen(["osascript", "-e", script])
-        else:
-            subprocess.Popen(["x-terminal-emulator", "-e", cli, "/login"], env=env)
+        flow = LoginFlow(name, console)
+    except (ValueError, KeyError) as e:
+        return {"error": str(e)}
     except OSError as e:
-        return f"couldn't open a terminal: {e}"
-    return None
+        return {"error": f"couldn't start the Claude CLI: {e}"}
+    url = flow.url()
+    if not url:
+        flow.cancel()
+        return {"error": "the Claude CLI gave no sign-in link: " + (flow.text().strip()[-300:] or "no output")}
+    LOGINS[name] = flow
+    return {"ok": True, "url": url}
+
+
+def finish_login(name: str, code: str) -> dict:
+    flow = LOGINS.get(name)
+    if flow is None or flow.expired():
+        LOGINS.pop(name, None)
+        return {"error": "no sign-in is waiting for this account (it may have expired); press Log in again"}
+    if not str(code or "").strip():
+        return {"error": "paste the code from the sign-in page"}
+    ok, message = flow.code(str(code))
+    LOGINS.pop(name, None)
+    _AUTH_CACHE.pop(name, None)  # the next status check asks the CLI again
+    a = core.account(name)
+    return {"ok": ok, "message": message, "status": auth_status(a, fresh=True) if ok else None}
+
+
+def cancel_login(name: str) -> dict:
+    flow = LOGINS.pop(name, None)
+    if flow:
+        flow.cancel()
+    return {"ok": True}
 
 
 # ----------------------------------------------------------------------------- views
@@ -2974,8 +3064,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json({"error": str(e) if "between" in str(e) else "enter a number from 0 to 100"}, 400)
                 return self.json({"ok": True})
             if len(parts) == 4 and parts[:2] == ["api", "accounts"] and parts[3] == "login":
-                err = open_login(parts[2])
-                return self.json({"error": err} if err else {"ok": True})
+                return self.json(start_login(parts[2], d.get("console") is True))
+            if len(parts) == 5 and parts[:2] == ["api", "accounts"] and parts[3] == "login" and parts[4] in ("code", "cancel"):
+                if parts[4] == "cancel":
+                    return self.json(cancel_login(parts[2]))
+                return self.json(finish_login(parts[2], str(d.get("code") or "")))
             if len(parts) >= 4 and parts[:2] == ["api", "p"]:
                 p = self.proj(parts[2])
                 if p is None:

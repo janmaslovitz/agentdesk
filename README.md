@@ -70,9 +70,10 @@ set the `AGENTDESK_HOME` environment variable to that folder.
 ## Accounts
 
 Sidebar → Accounts → **+ Add**:
-- **Claude subscription**: a separate login kept in its own folder. Press **Log in**; a console
-  opens; type `/login` and sign in with that account. The account named `default` uses your
-  normal Claude Code login.
+- **Claude subscription**: a separate login kept in its own folder. Press **Log in**: the sign-in page opens in a new
+  tab (the dialog has the link too); log in with that Claude account, copy the code the page shows and paste it in
+  the dialog. No terminal is needed, so it works the same on a desktop and on a headless server (`claude auth login`
+  runs in the background and gets the code). The account named `default` uses your normal Claude Code login.
 - **API key**: name an environment variable (e.g. `ANTHROPIC_API_KEY_WORK`) holding the key. AgentDesk
   reads it when it starts and never stores keys.
 
