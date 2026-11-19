@@ -3,8 +3,10 @@ import json
 import os
 import signal
 import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -19,18 +21,19 @@ from agentdesk.gateway import app, config, instances, users
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs unix sockets")
 def test_sd_notify_sends_to_notify_socket(monkeypatch):
-    import shutil
-    import tempfile
-    short = tempfile.mkdtemp(prefix="sdn", dir="/tmp" if os.path.isdir("/tmp") else None)  # AF_UNIX paths are limited to ~100 bytes
+    # an AF_UNIX path is limited to ~104 bytes: pytest's tmp_path (a long TMPDIR, a deep worktree) can exceed it
+    short = tempfile.mkdtemp(prefix="adn", dir="/tmp" if os.path.isdir("/tmp") else None)
     path = os.path.join(short, "n.sock")
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     srv.bind(path)
     srv.settimeout(2)
     monkeypatch.setenv("NOTIFY_SOCKET", path)
     assert reliability.sd_notify("READY=1")
-    assert srv.recv(100) == b"READY=1"
-    srv.close()
-    shutil.rmtree(short, ignore_errors=True)
+    try:
+        assert srv.recv(100) == b"READY=1"
+    finally:
+        srv.close()
+        shutil.rmtree(short, ignore_errors=True)
 
 
 def test_sd_notify_is_noop_outside_systemd(monkeypatch):

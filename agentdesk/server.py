@@ -26,7 +26,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, dag, hygiene, projedit, reliability, service
+from . import attachments, core, dag, hygiene, projedit, reliability, service
 
 _SDK_NAMES = ('AgentDefinition', 'AssistantMessage', 'ClaudeSDKClient', 'HookMatcher', 'PermissionResultAllow', 'PermissionResultDeny', 'RateLimitEvent', 'ResultMessage', 'SystemMessage', 'TaskNotificationMessage', 'TaskStartedMessage', 'TextBlock', 'ToolResultBlock', 'ToolUseBlock', 'UserMessage', 'create_sdk_mcp_server')
 
@@ -621,6 +621,7 @@ class Chat:
         self.client: ClaudeSDKClient | None = None
         self.archived = 0  # entries moved out of chat.json into chat_archive.jsonl (older than the live tail)
         self.history: list[dict] = self.load_history()
+        self.sweep_attachments()
         self.lock = threading.Lock()
         self.approvals = Approvals(loop)
         self.busy = False
@@ -665,6 +666,23 @@ class Chat:
                 data = old + data  # could not archive: keep everything where it was
         self.archived = self._archive_count()
         return data
+
+    def sweep_attachments(self) -> None:
+        """Drop uploads nobody sent (older than a day) and sent files no transcript entry refers to any more."""
+        keep: set[str] = set()
+        for m in self.history:
+            keep.update(a.get("id") for a in (m.get("attachments") or []) if isinstance(a, dict) and isinstance(a.get("id"), str))
+        try:
+            with self.p.path("chat_archive.jsonl").open(encoding="utf-8") as f:
+                for line in f:
+                    for m in re.findall(r'"id"\s*:\s*"([0-9a-f]{12})"', line):
+                        keep.add(m)
+        except OSError:
+            pass
+        try:
+            attachments.sweep(self.p, keep)
+        except Exception as e:  # a failed cleanup never keeps the chat from opening
+            core.Store(self.p).log(f"attachment cleanup failed: {e or type(e).__name__}")
 
     def _archive_count(self) -> int:
         try:
@@ -1162,7 +1180,8 @@ class Chat:
     def _answer(self, text: str, tools=(), cost: float = 0.0, tokens: dict | None = None) -> dict:
         return {"text": text, "tools": list(tools), "cost": cost, "tokens": tokens or {}, "model": self.model}
 
-    async def _ask(self, text: str) -> dict:
+    async def _ask(self, text: str, attachments_meta: list | None = None) -> dict:
+        text += attachments.prompt_block(self.p, attachments_meta)
         mode = core.chat_mode(self.p)
         coworker = mode in AUTONOMOUS  # coworker or planner: per-message budget and the usage pause
         acct = self.p.account.get("name", "default")
@@ -1398,7 +1417,7 @@ class Chat:
                     except Exception:
                         pass
 
-    async def _live_send(self, text: str) -> dict:
+    async def _live_send(self, text: str, attachments_meta: list | None = None) -> dict:
         cs = core.chat_settings("coworker")
         cap = float(cs.get("daily_budget_usd") or 0)
         if cap and self.daily_spent() >= cap:
@@ -1415,8 +1434,8 @@ class Chat:
         self.busy, self.auto_turn = True, False
         self.last_event, self.idle_warned = time.time(), False
         if not text.startswith("[Scheduled checkup]"):
-            self.live_prompt = text  # the memory is updated from it when the burst ends
-        await client.query(text)
+            self.live_prompt = text  # the memory is updated from it when the burst ends (the plain text)
+        await client.query(text + attachments.prompt_block(self.p, attachments_meta))
         return {"started": True, "live": True}
 
     def inject(self, text: str, label: str) -> None:
@@ -1536,18 +1555,27 @@ class Chat:
         data = core.read_json(self.p.path("chat_usage.json"), {"spent_usd": 0.0, "tokens": {}})
         return data if isinstance(data, dict) else {"spent_usd": 0.0, "tokens": {}}
 
-    def start(self, text: str) -> dict:
+    @staticmethod
+    def _user_entry(text: str, metas: list[dict]) -> dict:
+        entry = {"role": "user", "text": text}
+        if metas:
+            entry["attachments"] = [{k: m.get(k) for k in ("id", "name", "size", "mime", "kind")} for m in metas]
+        return entry
+
+    def start(self, text: str, attachments_ids: list | None = None) -> dict:
         """Answer in the background and return at once: a request held open for minutes gets dropped by the
-        window/proxy ("chat falls off"). The page polls /chat until `busy` is false."""
+        window/proxy ("chat falls off"). The page polls /chat until `busy` is false. `attachments_ids`: uploaded
+        files to send with the message (refused with AttachmentError, nothing claimed, when one is unknown or sent)."""
         if self.is_live():  # no waiting: you can write while it works, and its answers stream in as entries
+            metas = attachments.claim(self.p, attachments_ids) if attachments_ids else []
             with self.note_lock:
-                self.history.append({"role": "user", "text": text})
+                self.history.append(self._user_entry(text, metas))
                 try:
                     self.save_history()
                 except OSError:
                     pass
             try:
-                return asyncio.run_coroutine_threadsafe(self._live_send(text), self.loop).result(timeout=90)
+                return asyncio.run_coroutine_threadsafe(self._live_send(text, metas), self.loop).result(timeout=90)
             except Exception as e:
                 self.client = None
                 self.busy = False
@@ -1556,16 +1584,19 @@ class Chat:
                 return {"error": msg}
         if self.busy:
             return {"error": "the assistant is still answering the previous message"}
+        metas = attachments.claim(self.p, attachments_ids) if attachments_ids else []
         self.busy = True
-        threading.Thread(target=self.ask, args=(text,), daemon=True, name=f"chat-{self.p.slug}").start()
+        threading.Thread(target=self.ask, args=(text, metas), daemon=True, name=f"chat-{self.p.slug}").start()
         return {"started": True}
 
-    def ask(self, text: str) -> dict:
+    def ask(self, text: str, attachments_meta: list | None = None) -> dict:
+        """Answer one message (blocking). `attachments_meta`: the metas attachments.claim returned for it."""
+        metas = list(attachments_meta or [])
         with self.lock:
-            self.history.append({"role": "user", "text": text})
+            self.history.append(self._user_entry(text, metas))
             self.save_history()
             self.busy = True
-            fut = asyncio.run_coroutine_threadsafe(self._ask(text), self.loop)
+            fut = asyncio.run_coroutine_threadsafe(self._ask(text, metas) if metas else self._ask(text), self.loop)
             ok = True
             try:
                 # Approvals can wait up to 10 minutes each, so the answer may take a while.
@@ -1600,6 +1631,10 @@ class Chat:
                 self.p.path("chat.json").unlink(missing_ok=True)
                 self.p.path("chat_archive.jsonl").unlink(missing_ok=True)
                 self.p.path("chat_memory.md").unlink(missing_ok=True)
+                try:
+                    attachments.remove_all(self.p)
+                except OSError:
+                    pass
 
     @staticmethod
     def _slim(m: dict, cap: int = 2000) -> dict:
@@ -2927,6 +2962,37 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return {}
 
+    def attachment_upload(self, p: core.Project, query: dict) -> dict:
+        """POST /api/p/<slug>/attachments?name=<file>: the raw body is streamed into <project dir>/attachments."""
+        self.close_connection = True  # on a refusal the body is not (fully) read, so the connection can't be reused
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        try:
+            meta = attachments.store(p, query.get("name", ""), self.rfile, n)
+        except attachments.AttachmentError as e:
+            return {"ok": False, "message": str(e)}
+        return {"ok": True, "attachment": meta}
+
+    def attachment_get(self, p: core.Project, aid: str) -> None:
+        f = attachments.file_path(p, aid)
+        meta = attachments.get(p, aid) if f else None
+        if f is None or meta is None:
+            return self.send(404, b"not found", "text/plain")
+        try:
+            data = f.read_bytes()
+        except OSError:
+            return self.send(404, b"not found", "text/plain")
+        mime = str(meta.get("mime") or "application/octet-stream")
+        if meta.get("kind") == "image" and mime in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            disp = "inline"
+        else:
+            disp = "attachment"
+        fname = attachments.sanitize_name(meta.get("name", ""))
+        self.send(200, data, mime, {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox",
+                                    "Content-Disposition": f'{disp}; filename="{fname}"'})
+
     def proj(self, slug: str) -> core.Project | None:
         try:
             return core.project(slug)
@@ -3055,6 +3121,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(chat(p).info(num("since"), min(num("limit") or 0, 500) or None, num("before")))
             if len(parts) == 4 and parts[3] == "pending":
                 return self.json({"pending": chat(p).approvals.pending()})
+            if len(parts) == 5 and parts[3] == "attachments":
+                return self.attachment_get(p, parts[4])
             if len(parts) == 5 and parts[3] == "task":
                 t = next((t for t in core.load_tasks(p) if t.id == parts[4]), None)
                 if t is None:
@@ -3067,7 +3135,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
         parts = [x for x in self.path.split("?")[0].split("/") if x]
         query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
-        upload = parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")
+        upload = (parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")) \
+            or (len(parts) == 4 and parts[:2] == ["api", "p"] and parts[3] == "attachments")  # raw bodies, not JSON
         d = {} if upload else self.body()
         if parts[:2] == ["api", "v1"]:
             code, obj = service.rest("POST", [urllib.parse.unquote(x) for x in parts[2:]], query, d if isinstance(d, dict) else {})
@@ -3240,11 +3309,23 @@ class Handler(BaseHTTPRequestHandler):
                     deps = [x.strip() for x in str(d.get("depends", "")).split(",") if x.strip()]
                     core.add_task(p, tid, str(d.get("title", "")).strip() or "Untitled", str(d.get("body", "")), d.get("tier") or None, deps)
                     return self.json({"ok": True, "id": tid})
+                if act == "attachments" and len(parts) == 4:
+                    return self.json(self.attachment_upload(p, query))
+                if act == "attachments" and len(parts) == 6 and parts[5] == "delete":
+                    if not attachments.delete(p, parts[4]):
+                        return self.json({"ok": False, "message": "no such unsent attachment"}, 404)
+                    return self.json({"ok": True})
                 if act == "chat" and len(parts) == 4:
                     text = str(d.get("text", "")).strip()[:4000]
-                    if not text:
+                    ids = d.get("attachments") or []
+                    if not isinstance(ids, list):
+                        return self.json({"error": "attachments must be a list of ids"}, 400)
+                    if not text and not ids:
                         return self.json({"error": "empty"})
-                    return self.json(chat(p).start(text))
+                    try:
+                        return self.json(chat(p).start(text, ids))
+                    except attachments.AttachmentError as e:
+                        return self.json({"error": str(e)}, 400)
                 if act == "chat" and parts[4:] == ["interrupt"]:
                     return self.json({"ok": chat(p).interrupt()})
                 if act == "chat" and parts[4:] == ["reset"]:
