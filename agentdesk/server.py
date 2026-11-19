@@ -26,7 +26,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, dag, hygiene, reliability, service
+from . import core, dag, hygiene, projedit, reliability, service
 
 _SDK_NAMES = ('AgentDefinition', 'AssistantMessage', 'ClaudeSDKClient', 'HookMatcher', 'PermissionResultAllow', 'PermissionResultDeny', 'RateLimitEvent', 'ResultMessage', 'SystemMessage', 'TaskNotificationMessage', 'TaskStartedMessage', 'TextBlock', 'ToolResultBlock', 'ToolUseBlock', 'UserMessage', 'create_sdk_mcp_server')
 
@@ -2812,6 +2812,58 @@ def repo_dir_for_import(d: dict, upload: Path | None) -> Path:
         str(d.get("filename") or ""), export_name))
 
 
+def settings_route(p: core.Project, d: dict) -> dict:
+    """POST /api/p/<slug>/settings: fields or raw toml; refused while anything runs; new chat session after a save."""
+    if project_busy(p) or runner(p).running() or core.build_job(p).running():
+        return {"ok": False, "message": "a run or build is in progress for this project; stop it first"}
+    if "toml" in d:
+        res = projedit.save_toml(p, d["toml"], allow_repo_change=desktop())
+    else:
+        res = projedit.update_settings(p, {k: d[k] for k in ("name", "base", "account", "quick", "final", "timeout_s") if k in d})
+    if res.get("ok"):
+        c = CHATS.get(p.slug)
+        if c is not None and not c.is_busy():
+            c.reset(keep_history=True)
+        globals()["_OV"] = None
+    return res
+
+
+def delete_route(p: core.Project, d: dict) -> tuple[dict, int]:
+    """POST /api/p/<slug>/delete {confirm, name, delete_repo}: forget the project's server-side state, then delete it."""
+    if d.get("confirm") is not True:
+        return {"ok": False, "message": "this needs confirmation"}, 400
+    if str(d.get("name") or "") != p.slug:
+        return {"ok": False, "message": "the typed name does not match the project"}, 400
+    c = CHATS.get(p.slug)
+    busy = None
+    if runner(p).running():
+        busy = "a run is in progress for this project; stop it first"
+    elif core.build_job(p).running():
+        busy = "a build is running in this project"
+    elif c is not None and c.is_busy():
+        busy = "the chat is busy; wait for it or stop it first"
+    elif project_busy(p):
+        busy = "a run or build is in progress for this project"
+    if busy:
+        return {"ok": False, "busy": True, "message": busy}, 200
+    with LOCK:
+        c = CHATS.pop(p.slug, None)
+    if c is not None:
+        c.reset(keep_history=True)  # denies approvals, disconnects the session
+    try:
+        res = projedit.delete_project(p, d.get("delete_repo") is True, busy)
+    except projedit.ProjectBusy as e:
+        return {"ok": False, "busy": True, "message": str(e)}, 200
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}, 200
+    with LOCK:
+        RUNNERS.pop(p.slug, None)
+    FLAGGED.pop(p.slug, None)
+    ITEM_LOGGED.pop(p.slug, None)
+    globals()["_OV"] = None
+    return res, 200
+
+
 def desktop() -> bool:
     """Running in the native desktop window (folder pickers, local paths); False for the server / a browser."""
     return _WINDOW is not None
@@ -2993,6 +3045,8 @@ class Handler(BaseHTTPRequestHandler):
                 if q.get("lite") != "1":  # the log poll during a build skips the git calls of the version/task list
                     info.update(core.build_plan(p, q.get("version") or None))
                 return self.json(info)
+            if len(parts) == 4 and parts[3] == "settings":
+                return self.json({**projedit.settings_view(p), "desktop": desktop()})
             if len(parts) == 4 and parts[3] == "disk":
                 return self.json(disk_view(p, "refresh=1" in (urllib.parse.urlparse(self.path).query or "")))
             if len(parts) == 4 and parts[3] == "chat":
@@ -3160,6 +3214,11 @@ class Handler(BaseHTTPRequestHandler):
                         if sel and not err:
                             core.save_build_selection(p, sel["version"], sel["tasks"], sel["seen"])
                     return self.json({"ok": False, "message": err} if err else {"ok": True})
+                if act == "settings" and len(parts) == 4:
+                    return self.json(settings_route(p, d))
+                if act == "delete" and len(parts) == 4:
+                    res, code = delete_route(p, d)
+                    return self.json(res, code)
                 if act == "disk" and parts[4:] == ["clean"]:
                     return self.json(disk_clean(p, d))
                 if act == "autorunner" and len(parts) == 4:
