@@ -259,6 +259,12 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
       <pre id="psMsg" class="msgbox" style="display:none"></pre>
       <div class="row"><button class="primary" id="psSave" onclick="psSave()">Save</button></div>
     </div>
+    <div class="grp" id="psChatAgents"><h4>Chat agents</h4>
+      <div class="hint">Per-project overrides for the chat modes and the Coworker's subagents. Only changed fields are saved; "reset to default" removes the project override.</div>
+      <div id="caBody"></div>
+      <pre id="caMsg" class="msgbox" style="display:none"></pre>
+      <div class="row"><button class="primary" id="caSave" onclick="caSave()">Save chat agents</button></div>
+    </div>
     <div class="grp" id="psAdvSec"><details id="psAdv"><summary>Advanced: project.toml</summary>
       <textarea id="psToml" rows="12" spellcheck="false" style="font-family:ui-monospace,Consolas,monospace"></textarea>
       <div class="hint" id="psTomlNote"></div>
@@ -754,6 +760,101 @@ function psFill(s) {
   $("psDelRepoL").style.display = own ? "" : "none";
   $("psRepoKeep").textContent = own ? "" : "The repository is outside the data repos folder, so it will be kept; only the project's data is deleted.";
 }
+// ---- Chat agents section of the settings dialog: GET/POST /api/p/<slug>/chat/agents
+let caData = null, caFields = [];
+const CA_LABELS = {model: "Model", effort: "Effort", budget_usd: "Budget per message (USD)", daily_budget_usd: "Daily budget (USD, 0 = none)",
+  max_turns: "Max turns", tools_off: "Tools switched off", tools: "Tools", enabled: "Enabled", prompt_extra: "Extra instructions"};
+const caId = (sec, name, key) => `ca_${sec}_${name}_${key}`;
+function caField(sec, name, view, key, ch) {
+  const id = caId(sec, name, key), eff = view.effective[key], has = Object.prototype.hasOwnProperty.call(view.project, key);
+  const init = has ? view.project[key] : eff;
+  let ctl, get;
+  if (key === "model") {
+    const cur = init == null ? "" : String(init), known = (ch.models || []).includes(cur);
+    ctl = `<select id="${id}" onchange="$('${id}_c').style.display = this.value === '' ? '' : 'none'">${(ch.models || []).map(m => `<option value="${esc(m)}"${m === cur ? " selected" : ""}>${esc(m)}</option>`).join("")}<option value=""${known ? "" : " selected"}>custom id…</option></select> <input id="${id}_c" placeholder="claude-…" value="${known ? "" : esc(cur)}" style="${known ? "display:none" : ""}">`;
+    get = () => { const v = $(id).value; return v === "" ? $(id + "_c").value.trim() : v; };
+  } else if (key === "effort") {
+    ctl = `<select id="${id}">${(ch.efforts || []).map(m => `<option value="${esc(m)}"${m === init ? " selected" : ""}>${esc(m)}</option>`).join("")}${init ? "" : '<option value="" selected>(default)</option>'}</select>`;
+    get = () => $(id).value || null;
+  } else if (key === "tools_off" || key === "tools") {
+    const list = key === "tools" ? ch.tools : ch.mode_tools, on = new Set(init || []);
+    ctl = `<div id="${id}" class="ca-tools">${(list || []).map(t => `<label class="chk"><input type="checkbox" value="${esc(t)}"${on.has(t) ? " checked" : ""}> ${esc(t)}</label>`).join(" ")}</div>`;
+    get = () => [...document.querySelectorAll(`#${id} input:checked`)].map(i => i.value);
+  } else if (key === "enabled") {
+    ctl = `<input type="checkbox" id="${id}"${init ? " checked" : ""}>`;
+    get = () => $(id).checked;
+  } else if (key === "prompt_extra") {
+    ctl = `<textarea id="${id}" rows="3" maxlength="${ch.prompt_extra_max || 4000}">${esc(init || "")}</textarea>`;
+    get = () => $(id).value;
+  } else {
+    const rg = (ch.ranges || {})[key] || [];
+    ctl = `<input type="number" id="${id}" step="${key === "max_turns" ? 1 : 0.1}"${rg.length ? ` min="${rg[0]}" max="${rg[1]}"` : ""} value="${init ?? ""}">`;
+    get = () => { const v = $(id).value; return v === "" ? null : Number(v); };
+  }
+  caFields.push({sec, name, key, get, init: init ?? null, reset: false});
+  const shown = Array.isArray(eff) ? (eff.join(", ") || "none") : key === "prompt_extra" ? (eff ? "set" : "empty") : eff ?? "default";
+  return `<div class="cafield"><label for="${id}">${CA_LABELS[key] || key}</label>${ctl}
+    <div class="hint" id="${id}_s">Effective: <code>${esc(String(shown))}</code> · ${has ? "project override" : "default"}${has ? ` <button type="button" onclick="caReset('${sec}','${name}','${key}')">reset to default</button>` : ""}</div>
+    <div class="hint err" id="caE_${sec}.${name}.${key}"></div></div>`;
+}
+function caRender(c) {
+  caData = c; caFields = [];
+  const ch = c.choices || {};
+  let out = "";
+  for (const [sec, names, keysOf, label] of [["modes", ch.modes || [], n => (ch.mode_keys || {})[n] || [], n => MODE_NAMES[n] || n],
+                                              ["agents", ch.agents || [], () => ch.agent_keys || [], n => "Subagent: " + n]]) {
+    for (const n of names) {
+      const v = c[sec][n]; if (!v) continue;
+      out += `<details class="caSec"><summary>${esc(label(n))}</summary>${keysOf(n).map(k => caField(sec, n, v, k, ch)).join("")}</details>`;
+    }
+  }
+  $("caBody").innerHTML = out;
+}
+function caReset(sec, name, key) {
+  const f = caFields.find(x => x.sec === sec && x.name === name && x.key === key);
+  if (!f) return;
+  f.reset = true;
+  $(`${caId(sec, name, key)}_s`).textContent = "Will be reset to the default when you save.";
+}
+function caChanges() {
+  const body = {};
+  for (const f of caFields) {
+    let v;
+    if (f.reset) v = null;
+    else {
+      const cur = f.get();
+      if (JSON.stringify(Array.isArray(cur) ? [...cur].sort() : cur) === JSON.stringify(Array.isArray(f.init) ? [...f.init].sort() : f.init)) continue;
+      if (cur === null || cur === "" && f.key !== "prompt_extra") continue;
+      v = cur;
+    }
+    ((body[f.sec] ||= {})[f.name] ||= {})[f.key] = v;
+  }
+  return body;
+}
+function caErr(field, t) {
+  for (const e of document.querySelectorAll("#caBody .err")) e.textContent = "";
+  const el = field ? $("caE_" + field) : null;
+  if (el) { el.textContent = t; if (el.closest("details")) el.closest("details").open = true; } else psShow("caMsg", t);
+}
+async function caLoad() {
+  psShow("caMsg", ""); $("caBody").innerHTML = "";
+  if (!cur) return;
+  let r;
+  try { r = await api(`/api/p/${encodeURIComponent(cur)}/chat/agents`); } catch (e) { r = {error: String(e)}; }
+  const c = r.config || r;
+  if (r.error || !c.modes) { psShow("caMsg", r.error || "Could not load the chat agents."); return; }
+  caRender(c);
+}
+async function caSave() {
+  if (!caData) return;
+  caErr("", ""); psShow("caMsg", "");
+  const body = caChanges();
+  if (!Object.keys(body).length) { psShow("caMsg", "Nothing changed."); return; }
+  const r = await api(`/api/p/${encodeURIComponent(cur)}/chat/agents`, body);
+  if (r.ok === false || r.error) { caErr(r.field || "", r.error || "Not saved."); return; }
+  if (r.config) caRender(r.config);
+  psShow("caMsg", "Saved."); refresh();  // /state carries chat_model; showMode() updates #chatModel
+}
 async function psOpen() {
   psData = null;
   for (const id of ["psMsg", "psTomlMsg", "psDelMsg"]) psShow(id, "");
@@ -763,6 +864,7 @@ async function psOpen() {
   try { r = await api(`/api/p/${encodeURIComponent(cur)}/settings`); } catch (e) { r = {error: String(e)}; }
   if (r.error || !r.slug) { psShow("psMsg", r.error || "Could not load the settings."); return; }
   psFill(r);
+  caLoad();
 }
 async function psSave() {
   if (!psData) return;
