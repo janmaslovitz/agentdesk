@@ -94,13 +94,12 @@ def create_from_zip(core, zip_path: str, name: str, repos: Path) -> dict:
 
 
 def remove(core, slug_: str, delete_repo: bool) -> dict:
+    """Delete the project (and, when asked and safe, its repository) with projedit's checks and audit."""
+    from .. import projedit
     p = core.project(slug_)
-    if re.search(r"[\/]", slug_) or p.dir.parent != core.DATA / "projects":
+    if re.search(r"[\\/]", slug_):
         raise ValueError("bad project")
-    repo = p.repo
-    shutil.rmtree(p.dir)
-    if delete_repo and repo.is_dir() and (core.DATA / "repos") in repo.parents:
-        shutil.rmtree(repo, ignore_errors=True)
+    projedit.delete_project(p, delete_repo)
     return {}
 
 
