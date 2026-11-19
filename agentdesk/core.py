@@ -1019,10 +1019,11 @@ def read_json(path: Path, default, backup: Path | None = None):
 
 CHAT_MODES = ("assistant", "coworker", "planner")
 CHAT_DEFAULT_MODELS = {"assistant": "haiku", "coworker": "sonnet", "planner": "sonnet"}
-# Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain).
+# Defaults for `[chat.<mode>]` keys missing from settings.toml (the model has its own fallback chain). The assistant's
+# max_turns used to be hard-coded in server.py; per-project overrides live in agentdesk/chat_agents.py.
 # full_access: the Coworker curates the whole project: it works in the project checkout itself (main included),
 # with every tool and command and no guard. false = the older guarded mode in its own worktree (auto/cowork).
-CHAT_DEFAULTS = {"assistant": {}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
+CHAT_DEFAULTS = {"assistant": {"max_turns": 40}, "coworker": {"effort": "medium", "budget_usd": 5.0, "max_turns": 60, "full_access": True,
                              "live": True, "daily_budget_usd": 25.0, "checkup_interval_min": 0},
                  "planner": {"effort": "medium", "budget_usd": 2.0, "max_turns": 30}}
 COWORK = "cowork"  # the Coworker's worktree folder and branch (auto/cowork)
