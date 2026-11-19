@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
