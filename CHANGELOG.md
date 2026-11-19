@@ -5,6 +5,17 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+### Changed
+- **Coworker acts instead of asking.** Pushing, pull requests, CI runs and releases of the project are its job: it
+  does them and reports afterwards. Only destructive or irreversible commands (force-push, hard reset, deleting
+  branches or tags, changing remotes, package publishing, stopping services) show an approval card
+  (`[chat.coworker_confirm]`). A problem it finds (a failed CI run or release build, a broken test) it fixes and
+  then reports, instead of stopping at a diagnosis.
+- Chat replies no longer open with "Понял" / "Got it": a new request gets one line naming what comes next, a plain
+  question gets the answer. Reports say what is and what was done, never what wasn't checked.
+- The chat memory records facts about the project, not the assistant's activity ("not verified", "awaiting yes"),
+  and no permission rules the user didn't state.
+
 ### Added
 - **Remember me** on the server's sign-in page (ticked by default): the login lasts `remember_days` (default 30,
   `0` hides the box) with no idle timeout. Without it, a login lasts as before (`session_hours`,

@@ -267,15 +267,17 @@ retry_crashed = 1
 run_timeout_min = 720     # kill a run (and its git / claude children) that is older than this; 0 = never
 min_free_gb = 1.0         # no run starts with less free disk space
 
-# The Coworker asks the user (an approval card) only before these shell commands: irreversible or public actions.
+# The Coworker asks the user (an approval card) only before these shell commands: destructive or irreversible ones
+# (force-push, hard reset, deleting branches or tags, remotes, package publishing, stopping services).
 # Everything else it does on its own. Regular expressions, matched case-insensitively against the command.
 [chat.coworker_confirm]
 patterns = [
-  'git\\s+push', 'git\\s+remote\\s+(add|set-url|remove|rm|rename)', '(?-i:git\\s+branch\\s+(-D|--delete\\s+--force))',
-  'git\\s+reset\\s+--hard', 'git\\s+tag\\s+(-d|--delete)',
-  'gh\\s+(pr\\s+(create|merge|close|edit|comment|review)|release\\s+(create|delete|edit|upload)|repo\\s+(create|delete|edit|rename|archive)|issue\\s+(create|close|edit|comment|delete)|workflow\\s+(run|enable|disable))',
-  'gh\\s+api\\s+.*(-X\\s*(POST|PUT|PATCH|DELETE)|--method\\s+(POST|PUT|PATCH|DELETE)|-f\\s|--field)',
-  '(cargo|npm|pnpm|yarn)\\s+publish', 'twine\\s+upload', 'curl\\s+.*(-T\\b|--upload|-d\\b|--data|-X\\s*(POST|PUT|PATCH|DELETE))',
+  'git\\s+push\\b.*(\\s(-f|--force|--force-with-lease|--mirror|--delete|-d)(\\s|=|$)|\\s\\+\\S|\\s:\\S)',
+  'git\\s+remote\\s+(add|set-url|remove|rm|rename)', '(?-i:git\\s+branch\\s+(-D|--delete\\s+--force))',
+  'git\\s+reset\\s+--hard', 'git\\s+tag\\s+(-d|--delete)', 'git\\s+clean\\s+-[a-z]*f',
+  'gh\\s+(release\\s+delete|repo\\s+(delete|archive|rename|edit\\s+.*--visibility)|issue\\s+delete)',
+  'gh\\s+api\\s+.*(-X\\s*DELETE|--method\\s+DELETE)',
+  '(cargo|npm|pnpm|yarn)\\s+publish', 'twine\\s+upload',
   'rm\\s+-[a-z]*r[a-z]*f?\\s+/(\\s|$)', 'systemctl\\s+(stop|restart|disable)', '\\b(shutdown|reboot)\\b',
 ]
 

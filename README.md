@@ -356,9 +356,12 @@ new chat session and keeps the messages on screen.
   The chat header shows the badge *Coworker: full access, no approvals*. It is the project's curator:
   it works **in the project checkout itself, main included**, with every tool and shell command and
   the queue tools (`add_task`, `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`,
-  `queue_status`), **without approval cards and without the guard**. It reviews and merges the
-  workers' branches, edits and commits on the base branch, tidies branches and worktrees, and pushes
-  or publishes when asked. Its instructions tell it to protect uncommitted work, prefer reversible
+  `queue_status`), **without the guard**. It reviews and merges the workers' branches, edits and
+  commits on the base branch, tidies branches and worktrees, fixes what it finds broken (CI, release
+  builds, tests) and pushes, opens pull requests and publishes releases itself when the work calls for
+  it. Only destructive or irreversible commands (`[chat.coworker_confirm]`: force-push, hard reset,
+  deleting branches or tags, changing remotes, package publishing, stopping services) show an approval
+  card. Its instructions tell it to protect uncommitted work, prefer reversible
   commands and run the checks before committing; nothing enforces that. Set
   `[chat.coworker] full_access = false` to get the older, guarded mode instead: own worktree
   `<worktrees>/cowork` on branch `auto/cowork`, the limits below. Limits of that guarded mode:

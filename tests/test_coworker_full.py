@@ -49,17 +49,22 @@ def answered(chat, cmd, action):
         if cards:
             break
         time.sleep(0.02)
-    assert cards and cards[0]["detail"] == cmd and "important action" in cards[0]["reason"]
+    assert cards and cards[0]["detail"] == cmd and "destructive or irreversible action" in cards[0]["reason"]
     assert not cards[0].get("prefix")  # no "Always allow" for important actions
     chat.approvals.resolve(cards[0]["id"], action)
     return fut.result(5)
 
 
-@pytest.mark.parametrize("cmd", ["git push origin main", "git remote add x https://e.x/r.git", "git reset --hard HEAD~1",
-                                 "gh pr create", "cargo publish", "git branch -D auto/001", "gh release create v1"])
-def test_important_commands_wait_for_the_user(chat, cmd):
+@pytest.mark.parametrize("cmd", ["git push --force origin main", "git remote add x https://e.x/r.git", "git reset --hard HEAD~1",
+                                 "cargo publish", "git branch -D auto/001", "gh release delete v1"])
+def test_destructive_commands_wait_for_the_user(chat, cmd):
     assert isinstance(answered(chat, cmd, "allow_once"), PermissionResultAllow)
     assert not isinstance(answered(chat, cmd, "deny"), PermissionResultAllow)
+
+
+@pytest.mark.parametrize("cmd", ["git push origin main", "gh pr create", "gh release create v1", "gh workflow run release.yml"])
+def test_push_pr_and_release_go_without_a_card(chat, cmd):
+    assert allowed(chat, "Bash", {"command": cmd}) and not chat.approvals.pending()
 
 
 def test_edits_anywhere_are_allowed_including_main_checkout(chat, tmp_path):

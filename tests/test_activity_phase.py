@@ -24,4 +24,11 @@ def test_event_lines_name_the_reviewer():
 
 
 def test_verify_rule_forbids_confessing():
-    assert "I didn't check" in server.VERIFY_RULE and server.VERIFY_RULE in server.COWORKER_PROMPT
+    assert "never what you didn't do" in server.VERIFY_RULE and server.VERIFY_RULE in server.COWORKER_PROMPT
+
+
+def test_no_acknowledgement_openers_and_coworker_acts_on_problems():
+    assert "Понял фронт" not in server.ACK_RULE and "never open with" in server.ACK_RULE
+    assert "Don't stop at a diagnosis" in server.COWORKER_ROLE
+    assert "never ask for permission first" in server.COWORKER_FULL_PROMPT
+    assert "awaiting the" in server.MEMORY_PROMPT and "explicit yes" in server.MEMORY_PROMPT

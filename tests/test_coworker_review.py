@@ -52,7 +52,9 @@ def finished_task(p, tid, title="Upstream inventory", report="Found 5143 upstrea
 
 def test_verify_rule_never_invites_unread_confessions():
     assert "say so plainly" not in server.VERIFY_RULE
-    assert "is never a statement to make" in server.VERIFY_RULE
+    assert "never what you didn't do" in server.VERIFY_RULE
+    for phrase in ("I didn't check", "I haven't read", "reported as pending"):  # no quoting the confessions it forbids
+        assert phrase not in server.VERIFY_RULE
     for prompt in (server.COWORKER_PROMPT, server.COWORKER_FULL_PROMPT, server.PLANNER_PROMPT, server.CHAT_PROMPT):
         assert "Check before you report" in prompt
 
@@ -61,7 +63,7 @@ def test_role_makes_the_coworker_a_reviewer_and_delegator():
     role = server.COWORKER_ROLE
     assert "review(id)" in role and "Unread work is not finished work" in role
     assert "architect(goal)" in role and "in parallel" in role
-    assert "never as a fact about the assistant" in server.MEMORY_PROMPT
+    assert "never about the assistant's activity" in server.MEMORY_PROMPT
 
 
 def test_run_all_is_described_as_parallel(chat):
@@ -136,10 +138,12 @@ def test_planner_can_hand_planning_to_the_architect(chat):
     assert "together with the user" in server.PLANNER_PROMPT and "architect(goal)" in server.PLANNER_PROMPT
 
 
-def test_confirm_patterns_cover_only_important_actions():
-    must = ["git push origin main", "gh release create v1", "git remote set-url origin x", "git reset --hard HEAD",
-            "git branch -D x", "cargo publish", "curl -X POST https://e.x", "systemctl restart x"]
-    free = ["git merge auto/1", "git branch -d x", "gh pr list", "gh api repos/x", "cargo test", "curl -s https://e.x",
-            "git checkout main", "rm -rf /tmp/x"]
+def test_confirm_patterns_cover_only_destructive_actions():
+    must = ["git push -f origin main", "git push --force-with-lease", "git push origin +main", "git push origin :old",
+            "git push origin --delete x", "git remote set-url origin x", "git reset --hard HEAD", "git branch -D x",
+            "git tag -d v1", "git clean -fdx", "gh release delete v1", "cargo publish", "systemctl restart x"]
+    free = ["git push origin main", "git push -u origin feature/x", "gh release create v1", "gh pr create", "gh pr merge 3",
+            "gh workflow run release.yml", "gh run rerun 1 --failed", "git merge auto/1", "git branch -d x", "gh pr list",
+            "gh api repos/x", "cargo test", "curl -X POST https://e.x", "git checkout main", "rm -rf /tmp/x"]
     assert all(core.coworker_confirm_reason(c) for c in must)
     assert not any(core.coworker_confirm_reason(c) for c in free)

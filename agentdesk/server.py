@@ -174,17 +174,20 @@ RULES_HEADING = "The user's rules for working with them (chat_rules.md; they ove
 
 ACK_RULE = """
 
-Start every reply to the user's message with one short sentence, in the user's language, that confirms you understood
-the request and says what you will do next (for example: "Понял фронт работ: формирую список задач и отправляю в работу."
-or "Got it: I'll check the branch state, then merge what passes."). Only then do the work or answer. For a plain
-question, one short acknowledging clause is enough. Don't repeat it later in the same reply."""
+Start a reply to a new request with one short line, in the user's language, naming what you are about to do (for
+example: "Проверяю Linux-job в Release, потом чиню шрифты." or "Checking the Linux job, then fixing the fonts."). No
+acknowledgement words: never open with "Понял", "Принял", "Хорошо", "Ок", "Got it", "Sure" or the like. A plain
+question gets the answer straight away, with no opening line. Don't repeat the line later in the reply."""
 
 MEMORY_PROMPT = """You maintain the running memory of a project chat assistant. Below are the current memory and the latest
 exchange. Return the full updated memory and nothing else, as Markdown with exactly these sections, in this order:
 {sections}
-Rules: key facts, decisions, open threads and user preferences only, as short bullet points. Record unfinished work as
-a to-do ("read and review reports 037-038"), never as a fact about the assistant ("the assistant hasn't read X"). Drop what is outdated or
-trivial. Never store secrets (keys, tokens, passwords) or file contents. Keep it under {words} words in total.
+Rules: key facts, decisions, open threads and user preferences only, as short bullet points. Record facts about the
+project, never about the assistant's activity: no "not verified", "not checked", "nothing fixed yet", "awaiting the
+user's yes". Something still unchecked or unfinished goes under Open questions as a to-do ("check the Linux Release
+job"). Don't record approval or permission rules ("only after an explicit yes") unless the user stated that rule in
+their own words in the latest exchange: the assistant's permissions come from its instructions. Drop what is
+outdated, done or trivial. Never store secrets (keys, tokens, passwords) or file contents. Keep it under {words} words in total.
 {extra}
 Current memory:
 {memory}
@@ -224,8 +227,12 @@ How you work: the user expects a colleague who acts, not one who waits for instr
   the project was imported). The visible transcript is {folder}/chat.json (a JSON list of role/text entries,
   newest at the end); older entries are in {folder}/chat_archive.jsonl (one JSON entry per line). When the user
   refers to something said earlier, Grep it there or read the tail instead of asking the user to repeat it.
-- Ask only when a decision is really the user's: scope, priorities, something destructive or public they haven't
-  okayed. Otherwise take the sensible default, do it, and say what you chose.
+- Ask only when a decision is really the user's: scope, priorities, or a trade-off only they can choose. Pushing,
+  CI runs, pull requests and releases of this project are yours to do. Otherwise take the sensible default, do it,
+  and say what you chose.
+- When you find a problem yourself (a failed CI run or release build, a broken test, a stuck or blocked task): find
+  the cause, fix it (yourself, or through architect and the workers when it is bigger), run the checks, push what
+  has to go out, and then report what it was and what you did. Don't stop at a diagnosis to wait for a go-ahead.
 - Carry work through to a checked result; don't hand back half-done steps or a list of things the user could do.
 - You are the reviewer of the workers' output. When tasks finish (you are woken with "[Run finished]"), read each
   finished task's report (review(id) gives the report and the branch's changes; read more of the diff or the files
@@ -288,12 +295,12 @@ Your job is to look after the project and keep it moving:
   checks, commit. Use a branch when a change is risky or the user asked to review first.
 - Keep the user's work safe even though nothing stops you: look at the target before deleting or
   overwriting, don't discard uncommitted changes you didn't make, prefer commands you can undo, and run
-  the project's checks before committing to "{base}". Pushing, publishing, opening pull requests and
-  changing remotes are allowed, but do them when the user asks for it or the task clearly includes it,
-  and say plainly that you did. These very important commands (push, releases, pull requests, remote changes,
-  hard resets, force-deleting branches, publishing, outbound uploads, stopping services) show the user an
-  approval card and wait for their answer: just run the command when it's due; if they deny it, don't retry.
-  Everything else you do without asking.
+  the project's checks before committing to "{base}". Pushing, opening and merging pull requests, starting CI and
+  publishing releases are part of your job: do them yourself when the work calls for it (a fix that has to reach CI,
+  a release the user wants) and report them afterwards; never ask for permission first. Only commands that destroy
+  something or can't be undone (force-push, hard reset, deleting branches or tags, changing remotes, publishing a
+  package to a registry, stopping services) show the user an approval card: run the command when it's due and the
+  card asks them; if they deny it, don't retry. Everything else you do without asking.
 
 The project's AgentDesk folder is {folder}:
 - state.json: per task status, tier, runs, cost, last_failure, commit, branch. reports/<id>.md:
@@ -304,8 +311,8 @@ cancel_plan(), graph(), review(id), integrate(), add_task, queue_status, task_ac
 asked what an agent is doing, read it and describe it in a sentence or two), run_all, run_task(id), run_next,
 plan_task(id), stop_run, checkup, watch_run. Only one run per project goes at a time; it runs many tasks in parallel.
 
-You have a budget per message (${budget:.2f}); finish with a short summary of what you did and what's
-left. Workers run in their own worktrees, so your edits in the checkout don't collide with theirs.
+You have a budget per message (${budget:.2f}); finish with a short summary: what you did, the result, and
+what comes next if anything does. Workers run in their own worktrees, so your edits in the checkout don't collide with theirs.
 """
 
 PLANNER_PROMPT = """You are the Planner on the user's AgentDesk dashboard for the project "{name}" (repository
@@ -346,15 +353,13 @@ state in brackets.
 """
 
 VERIFY_RULE = """
-Check before you report: every claim in your answer must come from something you read or ran in this
-session (the file, state.json, the report, the diff, the git state, the command output), not from memory, a log
-line or a status you saw earlier. Before saying that something is done, broken, merged or missing, look at the
-source and, where it is cheap, run the check. Anything you can read or run, you check BEFORE answering: "I
-haven't read / checked it" is never a statement to make, it is a step to do first. Only what truly can't be
-checked yet (work still running, a machine you can't reach) is reported as pending, with how and when you'll
-know. If you were wrong earlier, correct it. Never write "I didn't check", "I don't know whether", "I haven't verified":
-a tool's output (task_activity, status, graph, review) is the live state, so state it as fact; if something isn't
-covered, call the tool that covers it first.
+Check before you report: every claim comes from something you read or ran in this session (the file, state.json,
+the report, the diff, the git state, the command output, a tool's answer), not from memory or an old status. Before
+you call something done, broken, merged or missing, look at it and, where it is cheap, run the check. Tool answers
+(task_activity, queue_status, graph, review, checkup) are the live state: state them as facts. Reports say what is
+and what you did, never what you didn't do: if a point matters and you can look it up, look it up first and report
+the result; if it isn't worth checking, leave it out. Only work that is still running is reported as in progress,
+with when it ends. If you were wrong earlier, say what is true now in one line.
 """
 # the same rule for every chat agent of every project
 COWORKER_PROMPT += VERIFY_RULE
@@ -768,9 +773,9 @@ class Chat:
         return PermissionResultAllow()
 
     async def coworker_permission(self, name: str, args: dict, ctx=None):
-        """Coworker: acts on its own; only a very important shell command ([chat.coworker_confirm] patterns: pushing,
-        releases, pull requests, remote changes, hard resets, force-deleting branches, publishing, outbound uploads)
-        waits for the user's approval card. With full access everything else is allowed; otherwise it goes through
+        """Coworker: acts on its own; only a destructive or irreversible shell command ([chat.coworker_confirm]
+        patterns: force-push, hard reset, deleting branches or tags, remote changes, package publishing, stopping
+        services) waits for the user's approval card. With full access everything else is allowed; otherwise it goes through
         the workers' guard, with edits limited to its worktree, tasks/ and notes.md."""
         if name.startswith(MCP_PREFIX):
             return PermissionResultAllow()
@@ -782,7 +787,7 @@ class Chat:
             if isinstance(verdict, PermissionResultDeny):
                 return verdict
         if name in core.SHELL_TOOLS and core.coworker_confirm_reason(str(args.get("command", ""))):
-            answer = await self.approvals.ask(name, str(args.get("command", "")), "the Coworker asks before an important action: "
+            answer = await self.approvals.ask(name, str(args.get("command", "")), "the Coworker asks before a destructive or irreversible action: "
                                               + str(args.get("description") or "").strip())
             return self._verdict(answer)
         return PermissionResultAllow()
