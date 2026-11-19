@@ -348,15 +348,18 @@ as `chat_mode = "assistant"`, `"coworker"` or `"planner"` (default assistant). S
 new chat session and keeps the messages on screen.
 
 - **Assistant** (safe, cheap; model from `[chat.assistant] model` in `data/settings.toml`, default
-  `haiku`). It reads the project's files, state, reports, logs and the repository without asking.
+  `haiku`; a project can override it, see *Per-project chat settings* below). It reads the project's files, state, reports, logs and the repository without asking.
   It never edits your code: it may only write task files (`tasks/*.md`) and add to `notes.md`. It
   hands work to the workers with its own tools: `add_task` and `queue_status` (no approval) and
   `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`, which each show an approval card first.
 - **Coworker** (autonomous; model from `[chat.coworker]`, default `sonnet` at `effort = "medium"`).
   The chat header shows the badge *Coworker: full access, no approvals*. It is the project's curator:
   it works **in the project checkout itself, main included**, with every tool and shell command and
-  the queue tools (`add_task`, `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`,
-  `queue_status`), **without approval cards and without the guard**. It reviews and merges the
+  the AgentDesk tools (`architect`, `plan`, `graph`, `review`, `integrate`, `approve_plan`, `cancel_plan`,
+  `add_task`, `answer_task`, `task_activity`, `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`,
+  `queue_status`, `checkup`, `watch_run`, `schedule_checkup`), **without approval cards and without the guard**
+  (only the very important shell commands of `[chat.coworker_confirm]` — push, releases, pull requests, remote
+  changes, hard resets, force-deleting branches, publishing, outbound uploads — still show an approval card). It reviews and merges the
   workers' branches, edits and commits on the base branch, tidies branches and worktrees, and pushes
   or publishes when asked. Its instructions tell it to protect uncommitted work, prefer reversible
   commands and run the checks before committing; nothing enforces that. Set
@@ -370,14 +373,32 @@ new chat session and keeps the messages on screen.
   - a budget per message, `[chat.coworker] budget_usd` (default 5.0). Each message runs in a fresh
     Claude process that resumes the conversation, so the budget counts that message only; when it's
     reached the answer ends with *Stopped: … reached the Coworker budget*. The check runs after each
-    model turn, so a message can go over by one turn.
-
-
+    model turn, so a message can go over by one turn (in every mode that has a per-message budget).
+- **Planner** (`[chat.planner]`, default `sonnet`, `budget_usd` 2.0 and `max_turns` 30 per message). It only reads
+  (Read/Glob/Grep) and plans: `propose_plan`, `update_plan`, `cancel_plan` and `architect` write the draft plan, and it
+  can't edit files, run commands or start anything. Nothing runs until you press **Approve and start** on the plan card.
   After approval the chat reports each plan task starting, finishing (branch and commit) or being
   blocked, and the run ending. A blocked task is only reported: the plan waits for you, and the
   Planner doesn't rewrite an approved plan. The card's **Stop** stops the run without an approval
   card; **Start** goes on; **Close** forgets a stopped or finished plan (its tasks stay in the
   queue). One approved plan per project at a time.
+
+**Per-project chat settings.** `[chat.<mode>]` in `data/settings.toml` sets the defaults for every project; a project's
+`project.toml` can override them with the same table (and `[chat.agents.<name>]` for the subagents). Settings page:
+**GET/POST `/api/p/<slug>/chat/agents`**; a saved change starts a new chat session (or applies from the next session
+while the chat is busy).
+
+| key | modes | default | meaning |
+|---|---|---|---|
+| `model`, `effort` | all | models haiku / sonnet / sonnet; effort medium for coworker and planner | `haiku`, `sonnet`, `opus` or a full `claude-…` id; `low`/`medium`/`high` |
+| `max_turns` | all | assistant 40, coworker 60, planner 30 | turns of one message (live Coworker: one burst) |
+| `budget_usd` | coworker, planner | 5.0 / 2.0 | per message (live Coworker: per burst, checked when it ends) |
+| `daily_budget_usd` | coworker | 25 | everything the live Coworker and its subagents spend per day; `0` = no cap |
+| `tools_off` | all | `[]` | tools taken away from the mode (it can never add tools) |
+| `prompt_extra` | all | empty | up to 4000 characters of project instructions appended to the system prompt |
+
+The subagents (`explorer`, `reviewer`, `implementer`) take `enabled`, `model`, `effort`, `max_turns`, `tools` and
+`prompt_extra`; a disabled subagent is not offered to the live Coworker. A project can't change `full_access` or `live`.
 
 **Live Coworker** (default; `[chat.coworker] live = true`, needs `full_access`). The Coworker is one
 persistent session instead of a fresh process per message, and works like a teammate:

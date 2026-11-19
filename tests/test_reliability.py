@@ -21,19 +21,18 @@ from agentdesk.gateway import app, config, instances, users
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs unix sockets")
 def test_sd_notify_sends_to_notify_socket(monkeypatch):
-    # an AF_UNIX path is limited to ~104 bytes: pytest's tmp_path (a long TMPDIR, a deep worktree) can exceed it
-    short = tempfile.mkdtemp(prefix="adn", dir="/tmp" if os.path.isdir("/tmp") else None)
-    path = os.path.join(short, "n.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    srv.bind(path)
-    srv.settimeout(2)
-    monkeypatch.setenv("NOTIFY_SOCKET", path)
-    assert reliability.sd_notify("READY=1")
-    try:
-        assert srv.recv(100) == b"READY=1"
-    finally:
-        srv.close()
-        shutil.rmtree(short, ignore_errors=True)
+    # an AF_UNIX path is limited to ~104 bytes: pytest's tmp_path can be longer (deep or per-worker temp roots)
+    with tempfile.TemporaryDirectory(prefix="adn", dir="/tmp") as d:
+        path = os.path.join(d, "n.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            srv.bind(path)
+            srv.settimeout(2)
+            monkeypatch.setenv("NOTIFY_SOCKET", path)
+            assert reliability.sd_notify("READY=1")
+            assert srv.recv(100) == b"READY=1"
+        finally:
+            srv.close()
 
 
 def test_sd_notify_is_noop_outside_systemd(monkeypatch):
