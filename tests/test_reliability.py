@@ -3,8 +3,10 @@ import json
 import os
 import signal
 import socket
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -18,15 +20,24 @@ from agentdesk.gateway import app, config, instances, users
 # ----------------------------------------------------------------------------- sd_notify / watchdog
 
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs unix sockets")
-def test_sd_notify_sends_to_notify_socket(tmp_path, monkeypatch):
-    path = str(tmp_path / "n.sock")
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    srv.bind(path)
-    srv.settimeout(2)
-    monkeypatch.setenv("NOTIFY_SOCKET", path)
-    assert reliability.sd_notify("READY=1")
-    assert srv.recv(100) == b"READY=1"
-    srv.close()
+def test_sd_notify_sends_to_notify_socket(monkeypatch):
+    # an AF_UNIX path is limited to ~104 bytes: pytest's tmp_path can be longer (deep or per-worker temp roots)
+    try:  # a short root; /tmp may be missing or read-only in a sandbox
+        tempfile.TemporaryDirectory(prefix="adn", dir="/tmp").cleanup()
+        short = "/tmp"
+    except OSError:
+        short = None
+    with tempfile.TemporaryDirectory(prefix="adn", dir=short) as d:
+        path = os.path.join(d, "n.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        try:
+            srv.bind(path)
+            srv.settimeout(2)
+            monkeypatch.setenv("NOTIFY_SOCKET", path)
+            assert reliability.sd_notify("READY=1")
+            assert srv.recv(100) == b"READY=1"
+        finally:
+            srv.close()
 
 
 def test_sd_notify_is_noop_outside_systemd(monkeypatch):

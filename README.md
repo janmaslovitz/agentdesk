@@ -125,6 +125,24 @@ are shown, and `POST /api/projects` refuses a folder path sent by the browser. *
 The desktop App keeps its **A folder on this computer** and **From GitHub** tabs with Browse and the
 "choose the folder to clone into" option.
 
+**Editing a project.** The project's **Settings** dialog edits the name, the base
+branch, the account, the `quick` and `final` checks and `timeout_s` (the check timeout, 60 to 86400 seconds; default
+as in `[gates]`). A base branch must exist in the repository and an account must be one of the server's accounts.
+The **Advanced: project.toml** editor shows the file itself and saves it after validation: it must be valid TOML and at most
+64 KB; `name` is text; `[repo]` needs `path` and `base` as text; `gates.quick` and `gates.final` are lists of
+texts; `account` must exist. The field editor keeps comments and unknown keys. On the Server the editor
+refuses a change to `repo.path` and `repo.worktrees` (the folder is chosen by the server, see above); the desktop
+App allows it. Saving is refused while a run, a build or the chat is going: stop it first. After a save the chat
+starts a new session (with the messages still on screen) unless it is busy, then the change applies from the next
+session.
+
+**Deleting a project.** **Delete project…** (in the same dialog) needs the project's name typed again and a confirmation. It is
+refused while a run, a build or a chat turn is going (stop it first). The project folder
+(`data/projects/<project>`, with its runs, reports, chats and attachments) is always deleted. The repository is
+deleted only if the checkbox **Also delete the code repository** is ticked **and** the folder is under `<data>/repos`
+(a repository kept elsewhere is left alone, and the reason is shown).
+On a server, every deletion (project and repository) is written to the audit log, see `docs/SERVER.md`.
+
 ## MCP servers
 
 A project can give its workers extra MCP servers in `project.toml`:
@@ -348,7 +366,7 @@ as `chat_mode = "assistant"`, `"coworker"` or `"planner"` (default assistant). S
 new chat session and keeps the messages on screen.
 
 - **Assistant** (safe, cheap; model from `[chat.assistant] model` in `data/settings.toml`, default
-  `haiku`). It reads the project's files, state, reports, logs and the repository without asking.
+  `haiku`; a project can override it, see *Per-project chat settings* below). It reads the project's files, state, reports, logs and the repository without asking.
   It never edits your code: it may only write task files (`tasks/*.md`) and add to `notes.md`. It
   hands work to the workers with its own tools: `add_task` and `queue_status` (no approval) and
   `run_next`, `run_task`, `run_all`, `plan_task`, `stop_run`, which each show an approval card first.
@@ -373,14 +391,74 @@ new chat session and keeps the messages on screen.
   - a budget per message, `[chat.coworker] budget_usd` (default 5.0). Each message runs in a fresh
     Claude process that resumes the conversation, so the budget counts that message only; when it's
     reached the answer ends with *Stopped: … reached the Coworker budget*. The check runs after each
-    model turn, so a message can go over by one turn.
-
-
+    model turn, so a message can go over by one turn (in every mode that has a per-message budget).
+- **Planner** (`[chat.planner]`, default `sonnet`, `budget_usd` 2.0 and `max_turns` 30 per message). It only reads
+  (Read/Glob/Grep) and plans: `propose_plan`, `update_plan`, `cancel_plan` and `architect` write the draft plan, and it
+  can't edit files, run commands or start anything. Nothing runs until you press **Approve and start** on the plan card.
   After approval the chat reports each plan task starting, finishing (branch and commit) or being
   blocked, and the run ending. A blocked task is only reported: the plan waits for you, and the
   Planner doesn't rewrite an approved plan. The card's **Stop** stops the run without an approval
   card; **Start** goes on; **Close** forgets a stopped or finished plan (its tasks stay in the
   queue). One approved plan per project at a time.
+
+**Per-project chat settings.** `[chat.<mode>]` in `data/settings.toml` sets the defaults for every project; a project's
+`project.toml` can override them with the same table (and `[chat.agents.<name>]` for the subagents). Settings page:
+**GET/POST `/api/p/<slug>/chat/agents`**; a saved change starts a new chat session (or applies from the next session
+while the chat is busy).
+
+| key | modes | default | meaning |
+|---|---|---|---|
+| `model`, `effort` | all | models haiku / sonnet / sonnet; effort medium for coworker and planner | `haiku`, `sonnet`, `opus` or a full `claude-…` id; `low`/`medium`/`high` |
+| `max_turns` | all | assistant 40, coworker 60, planner 30 | turns of one message (live Coworker: one burst) |
+| `budget_usd` | coworker, planner | 5.0 / 2.0 | per message (live Coworker: per burst, checked when it ends) |
+| `daily_budget_usd` | coworker | 25 | everything the live Coworker and its subagents spend per day; `0` = no cap |
+| `tools_off` | all | `[]` | tools taken away from the mode (it can never add tools) |
+| `prompt_extra` | all | empty | up to 4000 characters of project instructions appended to the system prompt |
+
+The subagents (`explorer`, `reviewer`, `implementer`) take `enabled`, `model`, `effort`, `max_turns`, `tools` and
+`prompt_extra`; a disabled subagent is not offered to the live Coworker. A project can't change `full_access` or `live`.
+
+The defaults are in the code (`chat_agents.py`, `core.CHAT_DEFAULTS`): a mode's setting is the default, then
+`[chat.<mode>]` in settings.toml, then the project's `[chat.<mode>]` in project.toml (each value is checked: budgets
+0.1 to 100 USD per message, `daily_budget_usd` 0 to 1000, `max_turns` 1 to 500, `prompt_extra` up to 4000
+characters). Subagent defaults: `explorer` (Haiku, effort low, 30 turns, Read/Grep/Glob), `reviewer` (Sonnet, effort
+medium, 40 turns, read tools plus Bash/PowerShell), `implementer` (Sonnet, effort medium, 60 turns, read and edit
+tools plus Bash/PowerShell); all enabled. A project's `project.toml` can set the same keys:
+
+```toml
+[chat.assistant]
+model = "sonnet"
+tools_off = ["Glob"]
+
+[chat.agents.reviewer]
+enabled = false
+```
+
+**The rule: config only removes tools.** `tools_off` takes tools away from a mode, and nothing in the settings or
+the project can give a mode a tool its base list doesn't have: the assistant and the planner stay read-only whatever
+the config says. The subagents' `tools` is a list from the tool catalogue, so it sets what that subagent gets (it is
+not limited to removing tools); `enabled = false` leaves a subagent out of the live Coworker. Full reference, the
+catalogue and the subagent design: **[docs/CHAT_AGENTS.md](docs/CHAT_AGENTS.md)**.
+
+**Attachments.** Click 📎 (or paste or drop images) in the chat's input to attach files to the next message. Each
+file is uploaded when chosen (`POST /api/p/<slug>/attachments?name=<file>`), and the message carries the file
+ids. Limits, defaults in `[chat.attachments]` of `data/settings.toml`:
+
+| key | default | meaning |
+|---|---|---|
+| `max_file_mb` | 10 | largest file; capped by the server's `max_upload_mb` (200) on a server |
+| `max_files` | 5 | files per message |
+| `max_project_mb` | 200 | all of a project's attachments together |
+| `text_inline_kb` | 20 | text files up to this size are put into the message; larger ones are read with the Read tool |
+
+Allowed types, checked by content (magic bytes for images and PDFs, UTF-8 for text), not by the name alone: images
+(png, jpg, jpeg, gif, webp), PDF, and text or code (txt, md, json, jsonl, csv, tsv, log, yaml, toml, xml, html, css,
+py, js, ts, sh, diff, sql, rs, go, java, c, cpp and a few more). SVG (scriptable) and executables are refused.
+
+Files are stored in `<project>/attachments/<id>/` (the file and a `meta.json`); nothing is written outside that
+folder, and it counts toward the disk like the rest of the project. Cleanup: **New chat** deletes the project's whole
+attachments folder; switching mode keeps them. When a chat loads, uploads not sent within 24 hours and sent files that
+no saved message refers to any more are removed.
 
 **Live Coworker** (default; `[chat.coworker] live = true`, needs `full_access`). The Coworker is one
 persistent session instead of a fresh process per message, and works like a teammate:

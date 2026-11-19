@@ -6,6 +6,17 @@ them under the new version number, tags it and builds the installer (see README,
 ## Unreleased
 
 ### Added
+- **Edit and delete a project from the dashboard.** The Settings dialog edits the name, base branch, account, checks and
+  `timeout_s`; the **Advanced: project.toml** editor saves the file after validation (valid TOML, at most 64 KB, the
+  required fields, `repo.path` and `repo.worktrees` can't change on a server). **Delete project…** is refused while a run,
+  a build or a chat turn is going; the repository is deleted only if it is under `<data>/repos` and **Also delete the code
+  repository** is ticked. Project and repository deletions are written to the audit log (`docs/SERVER.md`).
+- **Chat attachments.** 📎 (or paste or drop) adds up to 5 files per message: images, PDF and text/code, checked by
+  content; SVG and executables are refused. Limits in `[chat.attachments]` of settings.toml (`max_file_mb` 10, `max_files`
+  5, `max_project_mb` 200, `text_inline_kb` 20). Stored in `<project>/attachments`; **New chat** removes them.
+- **Chat agent configuration.** `[chat.<mode>]` and `[chat.agents.<name>]` in settings.toml, with project.toml overrides
+  for the same keys (model, effort, turns, budgets, `tools_off`, `prompt_extra`; subagents `enabled`, `model`, `effort`,
+  `max_turns`, `tools`, `prompt_extra`). See `docs/CHAT_AGENTS.md`.
 - **Remember me** on the server's sign-in page (ticked by default): the login lasts `remember_days` (default 30,
   `0` hides the box) with no idle timeout. Without it, a login lasts as before (`session_hours`,
   `session_idle_minutes`).

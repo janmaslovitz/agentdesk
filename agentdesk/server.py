@@ -27,7 +27,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import core, dag, hygiene, reliability, service
+from . import attachments, chat_agents, core, dag, hygiene, projedit, reliability, service
 
 _SDK_NAMES = ('AgentDefinition', 'AssistantMessage', 'ClaudeSDKClient', 'HookMatcher', 'PermissionResultAllow', 'PermissionResultDeny', 'RateLimitEvent', 'ResultMessage', 'SystemMessage', 'TaskNotificationMessage', 'TaskStartedMessage', 'TextBlock', 'ToolResultBlock', 'ToolUseBlock', 'UserMessage', 'create_sdk_mcp_server')
 
@@ -159,11 +159,13 @@ Glob). You never edit the repository: you may only create or edit task files in 
 notes.md. The workers do the coding. Your tools for them (the agentdesk server):
 - add_task: queue a task (title, body, optional tier and depends). queue_status: tasks and the run.
 - task_activity(id?): the agent timeline of a task; when asked what an agent is doing, read it and say in a sentence or two.
+- answer_task(id, answer): record the user's answer to a task that waits for a decision (needs_decision).
 - run_next, run_task(id), run_all, plan_task(id) (preview the router's plan), stop_run. The user
   approves each of these on the dashboard; only one run per project goes at a time.
-Shell commands (Bash/PowerShell) also wait for the user's approval, so prefer Read/Grep/Glob and use
-the shell only when it's really needed (e.g. `git log`), one plain command at a time. If the user
-denies a call, don't retry it: say what you wanted to do.
+Shell commands ({shell}) wait for the user's approval unless the command is on the project's allow-list
+(`[chat] allowed_commands` in project.toml), so prefer Read/Grep/Glob and use the shell only when it's
+really needed (e.g. `git log`), one plain command at a time. If the user denies a call, don't retry it: say
+what you wanted to do.
 When the user asks for work, write a clear task (ask one short question first only if the goal is
 unclear), then say it's queued, and offer to start it. Never invent results: read the files.
 """
@@ -235,16 +237,16 @@ How you work: the user expects a colleague who acts, not one who waits for instr
   the cause, fix it (yourself, or through architect and the workers when it is bigger), run the checks, push what
   has to go out, and then report what it was and what you did. Don't stop at a diagnosis to wait for a go-ahead.
 - Carry work through to a checked result; don't hand back half-done steps or a list of things the user could do.
-- You are the reviewer of the workers' output. When tasks finish (you are woken with "[Run finished]"), read each
+- You are the reviewer of the workers' output. When tasks finish ({finished}), read each
   finished task's report (review(id) gives the report and the branch's changes; read more of the diff or the files
   when it matters) BEFORE you report. Tell the user the substance: what each task found or changed, with the key
   facts and numbers, your verdict (good / needs a fix / needs a follow-up) and what you did about it. A status line
   ("037 done, commit abc, I haven't read the report") is not a report. Never tell the user that you haven't read
   a report, a diff or a file: read it, then speak. Unread work is not finished work.
 - Delegate the AgentDesk way: for a goal bigger than one task, call architect(goal); it drafts a dependency graph of
-  tasks and wakes you. Review the draft critically (scope, dependencies, files, acceptance criteria) and
+  tasks{architect_wakes}. Review the draft critically (scope, dependencies, files, acceptance criteria) and
   approve_plan() it (or cancel_plan() and call architect again with a sharper goal). The orchestrator then runs the
-  graph in parallel and wakes you when the run ends. Use run_all for queued tasks (every ready task runs in
+  graph in parallel{run_wakes}. Use run_all for queued tasks (every ready task runs in
   parallel, in dependency order); run_task only when exactly one task should run. After a run with finished work,
   integrate() merges the finished branches into auto/integration and runs the final checks; review that branch.
 - The user's rules for working with them live in {folder}/chat_rules.md and are shown at the end of these
@@ -270,19 +272,20 @@ The project's AgentDesk folder is {folder}:
 Your tools for the workers (the agentdesk server), no approval needed: architect(goal), plan(), approve_plan(),
 cancel_plan(), graph(), review(id), integrate(), add_task, queue_status, task_activity(id) (the agent timeline: when
 asked what an agent is doing, read it and describe it in a sentence or two), run_all, run_task(id), run_next,
-plan_task(id), stop_run, checkup, watch_run. Only one run per project goes at a time; it runs many tasks in parallel.
-Delegate bigger pieces of work to the workers as tasks; do small things yourself.
+plan_task(id), stop_run, answer_task(id, answer), checkup, watch_run, schedule_checkup. Only one run per project goes at a
+time; it runs many tasks in parallel. Delegate bigger pieces of work to the workers as tasks; do small things yourself.
 
-Shell commands (Bash/PowerShell) run without asking, but a guard refuses pushing, changing remotes,
+Shell commands ({shell}) run without asking, but a guard refuses pushing, changing remotes,
 publishing, pull requests, resetting or switching to main, and editing AgentDesk's config; edits
 outside your worktree, tasks/, notes.md and chat_rules.md are refused too. Don't try to work around a refusal:
-say what you wanted to do and let the user do it. You have a budget per message
-(${budget:.2f}); finish with a short summary of what you did and what's left. Never invent results.
+say what you wanted to do and let the user do it. Each message has a budget of ${budget:.2f}: the process stops
+after the turn that reaches it (it can overshoot by one turn). Finish with a short summary of what you did and what's
+left. Never invent results.
 """
 
 COWORKER_FULL_PROMPT = """You are the Coworker on the user's AgentDesk dashboard for the project "{name}": its curator. You
-work above the whole project, on your own, with full access: every tool and every shell command runs
-without asking, in the project's own checkout {repo} (base branch "{base}", currently checked out there
+work above the whole project, on your own, with full access: every tool and every shell command ({shell}) runs
+without asking (except the very important commands listed below), in the project's own checkout {repo} (base branch "{base}", currently checked out there
 unless you switch) and anywhere else on this computer. Be brief and plain; answer in the user's language.
 
 Your job is to look after the project and keep it moving:
@@ -310,10 +313,11 @@ The project's AgentDesk folder is {folder}:
 Your tools for the workers (the agentdesk server), no approval needed: architect(goal), plan(), approve_plan(),
 cancel_plan(), graph(), review(id), integrate(), add_task, queue_status, task_activity(id) (the agent timeline: when
 asked what an agent is doing, read it and describe it in a sentence or two), run_all, run_task(id), run_next,
-plan_task(id), stop_run, checkup, watch_run. Only one run per project goes at a time; it runs many tasks in parallel.
+plan_task(id), stop_run, answer_task(id, answer), checkup, watch_run, schedule_checkup. Only one run per project goes at a
+time; it runs many tasks in parallel.
 
-You have a budget per message (${budget:.2f}); finish with a short summary: what you did, the result, and
-what comes next if anything does. Workers run in their own worktrees, so your edits in the checkout don't collide with theirs.
+{budget_line} Finish with a short summary of what you did and what's left. Workers run in their own worktrees, so your
+edits in the checkout don't collide with theirs.
 """
 
 PLANNER_PROMPT = """You are the Planner on the user's AgentDesk dashboard for the project "{name}" (repository
@@ -349,7 +353,7 @@ of its tasks is blocked, explain what failed (state.json last_failure, agentdesk
 suggest, and wait for the user's decision.
 
 You can't edit files or run commands, and never push or publish anything. Budget per message:
-${budget:.2f}. Never invent results: read the files. Each user message starts with the plan's current
+${budget:.2f} (the process stops after the turn that reaches it). Never invent results: read the files. Each user message starts with the plan's current
 state in brackets.
 """
 
@@ -371,17 +375,13 @@ CHAT_PROMPT += VERIFY_RULE
 COWORKER_LIVE_ADDENDUM = """
 This is a live session: it stays open between messages, so you can be interactive like a teammate.
 - The user can write to you while you work: read new messages as they come and adapt. Keep replies short.
-- Background work: run long commands in the background (Bash/PowerShell with run_in_background) and keep going;
+- Background work: run long commands in the background ({shell} with run_in_background) and keep going;
   you are woken when they finish. Use watch_run right after starting a worker run: it wakes you when the run
   ends or fails and costs nothing while waiting. Use schedule_checkup to come back later.
-- Subagents (the Agent tool): "explorer" (cheap, read-only investigation), "reviewer" (reads a branch or diff and
-  reports problems), "implementer" (makes one focused change and runs the checks). Run several in parallel for
-  independent questions; give each a self-contained brief and verify what they report before relying on it.
-- checkup gives you the project's health in one report (queue, run, failures, unmerged branches, usage, spending).
+{subagents}- checkup gives you the project's health in one report (queue, run, failures, unmerged branches, usage, spending).
   When woken by a scheduled checkup, act on what needs attention (queue tasks, merge what passes, tell the user
   what needs them); if everything is fine, answer with one line.
-Spending: about ${burst:.2f} per burst of work (a message or a wake-up) and ${daily:.2f} per day for everything
-you and your subagents do; keep bursts proportionate and prefer the cheaper subagents for reading and searching.
+Spending: {spending} Keep bursts proportionate and prefer the cheaper subagents for reading and searching.
 """
 
 CHECKUP_PROMPT = ("[Scheduled checkup] Run the checkup tool and look at the project: failed or blocked tasks, finished work "
@@ -390,27 +390,62 @@ CHECKUP_PROMPT = ("[Scheduled checkup] Run the checkup tool and look at the proj
                   "needs attention reply with the single line: All quiet.")
 
 
-def live_agents() -> dict:
-    """Subagents the live Coworker can launch with the Agent tool."""
+# The SDK's built-in subagents inherit every tool of the parent; the live Coworker only gets the configured ones.
+BUILTIN_AGENTS = ("general-purpose", "Explore", "Plan", "statusline-setup")
+# What a reviewer's shell may not do (its prompt says "read and run checks only"; this enforces the obvious part).
+REVIEWER_DENY = re.compile(
+    r"\bgit\s+(?:-\S+\s+(?:\S+\s+)?)*(?:commit|reset|checkout|switch|restore|stash|push|merge|rebase|cherry-pick|revert|clean|add|rm|mv|"
+    r"tag|apply|am|pull|fetch|worktree|config|gc|prune|branch\s+-\w*[dDmMcC])\b"
+    r"|\btee\b|\bsed\s+(?:-\w*i|--in-place)|\b(?:rm|mv|cp|mkdir|rmdir|touch|chmod|chown|ln|truncate|dd|del|erase|rename|Remove-Item|"
+    r"Set-Content|Add-Content|Out-File|New-Item|Move-Item|Copy-Item)\b", re.I)
+REDIRECT = re.compile(r">")
+REDIRECT_OK = re.compile(r"\d*>&\d|\d*>>?\s*(?:/dev/null|nul)\b", re.I)
+
+
+def reviewer_shell_denied(cmd: str) -> str | None:
+    """Why a reviewer subagent's shell command is refused (it may only read and run checks), or None."""
+    if (why := core.guard_denied(cmd)):
+        return f"matches the guard's deny list ({why})"
+    if REVIEWER_DENY.search(cmd) or REDIRECT.search(REDIRECT_OK.sub("", cmd)):
+        return "the reviewer may only read and run checks, not change files or git state"
+    return None
+
+
+def live_agents(p: core.Project) -> dict:
+    """Subagents the live Coworker can launch with the Agent tool: the enabled ones of chat_agents.agent_definitions(p)."""
     _load_sdk()
-    return {
-        "explorer": AgentDefinition(
-            description="Fast read-only investigator: finds files, reads code and logs, answers a specific question about the repository.",
-            prompt="You investigate and report. Read and search only; never change anything. Answer the question in a short, factual "
-                   "report with file paths and line numbers.",
-            tools=["Read", "Grep", "Glob"], model="haiku"),
-        "reviewer": AgentDefinition(
-            description="Reviews a branch, commit range or diff for correctness bugs and missed requirements, and runs the project's checks.",
-            prompt="You review code. Read the diff (git diff / git log), read the surrounding code, run the project's checks when "
-                   "that helps, and report concrete problems with file and line, most serious first. Don't edit files. If it is fine, say so.",
-            tools=["Read", "Grep", "Glob", "Bash", "PowerShell"], model="sonnet"),
-        "implementer": AgentDefinition(
-            description="Makes one focused code change in the checkout and runs the relevant checks, then reports what changed.",
-            prompt="You make exactly the change you are asked for, in the files you are told about, following the project's instructions "
-                   "(CLAUDE.md / AGENTS.md / README). Run the relevant checks. Don't commit unless asked. Report the files changed and the "
-                   "check results.",
-            model="sonnet"),
-    }
+    return {name: AgentDefinition(**kw) for name, kw in chat_agents.agent_definitions(p).items()}
+
+
+def subagent_lines(defs: dict) -> str:
+    """The live addendum's bullet about the subagents that exist (empty when none is enabled)."""
+    if not defs:
+        return ""
+    what = {"explorer": "read-only investigation: Read/Grep/Glob, no shell", "reviewer": "reads a branch or diff, runs checks and reports "
+            "problems; its shell is for reading and checks only", "implementer": "makes one focused change and runs the checks"}
+    items = ", ".join(f'"{n}" ({what.get(n, "a helper")}; {d.get("model") or "inherit"})' for n, d in defs.items())
+    return (f"- Subagents (the Agent tool): {items}. Run several in parallel for independent questions; give each a self-contained "
+            "brief and verify what they report before relying on it.\n")
+
+
+def coworker_role(folder, live: bool) -> str:
+    """COWORKER_ROLE; only the live session is woken by finished runs and the architect, the other modes poll."""
+    return COWORKER_ROLE.format(
+        folder=folder,
+        finished='you are woken with "[Run finished]"' if live else "check queue_status and review(id) whenever the user asks or you started the run",
+        architect_wakes=" and wakes you" if live else " (read it with plan() when it is done)",
+        run_wakes=" and wakes you when the run ends" if live else " (poll queue_status; nothing wakes you)")
+
+
+def shell_names() -> str:
+    return "/".join(chat_agents.shell_tools())
+
+
+def spending_text(burst: float, daily: float) -> str:
+    tail = (f"${daily:.2f} per day for everything you and your subagents do; new work is blocked when it is reached." if daily
+            else "no daily cap.")
+    return (f"about ${burst:.2f} per burst of work (a message or a wake-up), checked when the burst ends (you are told if it was "
+            f"exceeded; nothing stops you mid-burst), and {tail}")
 
 
 MCP = "agentdesk"
@@ -627,6 +662,7 @@ class Chat:
         self.client: ClaudeSDKClient | None = None
         self.archived = 0  # entries moved out of chat.json into chat_archive.jsonl (older than the live tail)
         self.history: list[dict] = self.load_history()
+        self.sweep_attachments()
         self.lock = threading.Lock()
         self.approvals = Approvals(loop)
         self.busy = False
@@ -671,6 +707,23 @@ class Chat:
                 data = old + data  # could not archive: keep everything where it was
         self.archived = self._archive_count()
         return data
+
+    def sweep_attachments(self) -> None:
+        """Drop uploads nobody sent (older than a day) and sent files no transcript entry refers to any more."""
+        keep: set[str] = set()
+        for m in self.history:
+            keep.update(a.get("id") for a in (m.get("attachments") or []) if isinstance(a, dict) and isinstance(a.get("id"), str))
+        try:
+            with self.p.path("chat_archive.jsonl").open(encoding="utf-8") as f:
+                for line in f:
+                    for m in re.findall(r'"id"\s*:\s*"([0-9a-f]{12})"', line):
+                        keep.add(m)
+        except OSError:
+            pass
+        try:
+            attachments.sweep(self.p, keep)
+        except Exception as e:  # a failed cleanup never keeps the chat from opening
+            core.Store(self.p).log(f"attachment cleanup failed: {e or type(e).__name__}")
 
     def _archive_count(self) -> int:
         try:
@@ -733,7 +786,7 @@ class Chat:
         """Ask a tool-free model call for the updated memory; on any failure keep the old one."""
         try:
             old = self.load_memory()
-            model = core.chat_settings(core.chat_mode(self.p))["model"] or "haiku"
+            model = chat_agents.mode_settings(self.p, core.chat_mode(self.p))["model"] or "haiku"
             extra = ""
             for _ in range(2):  # one retry
                 prompt = MEMORY_PROMPT.format(sections="\n".join(f"## {s}" for s in MEMORY_SECTIONS), words=MEMORY_MAX_WORDS - 200,
@@ -801,6 +854,17 @@ class Chat:
         r = await self.coworker_permission(str(data.get("tool_name", "")), dict(data.get("tool_input") or {}))
         if isinstance(r, PermissionResultDeny):
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": r.message}}
+        return {}
+
+    async def subagent_hook(self, data: dict, _tool_use_id=None, _ctx=None) -> dict:
+        """PreToolUse hook of the live Coworker: a reviewer subagent's shell may only read and run checks (the parent
+        allows everything, subagents included, so the prompt alone would be the only limit). Calls by the Coworker itself
+        and by other subagents pass."""
+        if str(data.get("agent_type") or "") == "reviewer" and str(data.get("tool_name", "")) in core.SHELL_TOOLS:
+            why = reviewer_shell_denied(str((data.get("tool_input") or {}).get("command", "")))
+            if why:
+                return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                               "permissionDecisionReason": f"refused for the reviewer: {why}"}}
         return {}
 
     async def planner_permission(self, name: str, args: dict, _ctx=None):
@@ -1086,58 +1150,73 @@ class Chat:
     # -- sessions: the Assistant keeps one CLI process; the Coworker starts one per message (resuming the
     # session), because --max-budget-usd counts the spend of the process, which makes it a per-message budget.
 
+    def _lists(self, mode: str, full_access: bool | None = None) -> tuple[list, list]:
+        """(allowed_tools, disallowed_tools) of a mode: the constant lists, with the project's tools_off only added to the
+        disallowed ones."""
+        t = chat_agents.mode_tool_lists(self.p, mode, full_access)
+        return t["allowed"], t["disallowed"]
+
     def _assistant_options(self):
-        cs = core.chat_settings("assistant")
+        cs = chat_agents.mode_settings(self.p, "assistant")
         self.model = cs["model"]
-        prompt = self.with_memory(CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p)))
+        prompt = CHAT_PROMPT.format(name=self.p.name, repo=self.p.repo, next_id=core.next_task_id(self.p), shell=shell_names())
+        prompt = self.with_memory(prompt + chat_agents.prompt_extra(self.p, "assistant"))
+        allowed, disallowed = self._lists("assistant")
         # Only read-only tools go in allowed_tools: anything listed there skips can_use_tool.
         return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.dir), system_prompt=prompt + ACK_RULE,
-                            max_turns=40,
-                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
+                            max_turns=int(cs["max_turns"]),
+                            allowed_tools=allowed, add_dirs=[str(self.p.repo)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools())},
-                            disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
+                            disallowed_tools=disallowed, permission_mode="default",
                             can_use_tool=self.permission, setting_sources=[])
 
     def _coworker_options(self):
-        cs = core.chat_settings("coworker")
+        cs = chat_agents.mode_settings(self.p, "coworker")
         self.model = cs["model"]
-        if cs.get("full_access"):
+        full = bool(cs.get("full_access"))
+        allowed, disallowed = self._lists("coworker", full)
+        extra = chat_agents.prompt_extra(self.p, "coworker")
+        budget = float(cs["budget_usd"])
+        if full:
+            budget_line = (f"You have a budget of ${budget:.2f} per message: the process stops after the turn that reaches it "
+                           "(it can overshoot by one turn).")
             prompt = COWORKER_FULL_PROMPT.format(name=self.p.name, repo=self.p.repo, base=self.p.cfg["repo"]["base"],
-                                                 folder=self.p.dir, budget=float(cs["budget_usd"]))
+                                                 folder=self.p.dir, budget_line=budget_line, shell=shell_names())
             gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
             # Everything is allowed through can_use_tool (no guard, no hook); the project checkout is the working directory.
-            prompt = self.with_memory(prompt + COWORKER_ROLE.format(folder=self.p.dir))
+            prompt = self.with_memory(prompt + coworker_role(self.p.dir, False) + extra)
             return core.options(self.p, scratch=False, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo), system_prompt=prompt + ACK_RULE,
-                                max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
-                                allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
+                                max_turns=int(cs["max_turns"]), max_budget_usd=budget, resume=self.session_id,
+                                allowed_tools=allowed, add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
                                 mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
-                                disallowed_tools=[], permission_mode="default",
+                                disallowed_tools=disallowed, permission_mode="default",
                                 can_use_tool=self.coworker_permission, setting_sources=[], env=gate_env)
         wt = core.cowork_worktree(self.p)
-        prompt = self.with_memory(COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=float(cs["budget_usd"]))
-                                  + COWORKER_ROLE.format(folder=self.p.dir))
+        prompt = self.with_memory(COWORKER_PROMPT.format(name=self.p.name, wt=wt, repo=self.p.repo, folder=self.p.dir, budget=budget,
+                                                         shell=shell_names())
+                                  + coworker_role(self.p.dir, False) + extra)
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
         # Shell, edit and run tools must not go in allowed_tools (that skips can_use_tool, i.e. the guard).
         # No setting_sources: a project's .claude/settings.json could allow commands past the guard.
         return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(wt), system_prompt=prompt + ACK_RULE,
-                            max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
-                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir)],
+                            max_turns=int(cs["max_turns"]), max_budget_usd=budget, resume=self.session_id,
+                            allowed_tools=allowed, add_dirs=[str(self.p.dir)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
-                            disallowed_tools=["WebFetch", "WebSearch", "NotebookEdit", "Task", "Agent"], permission_mode="default",
+                            disallowed_tools=disallowed, permission_mode="default",
                             can_use_tool=self.coworker_permission, setting_sources=[], env=gate_env,
                             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.coworker_hook])]})
 
     def _planner_options(self):
-        cs = core.chat_settings("planner")
+        cs = chat_agents.mode_settings(self.p, "planner")
         self.model = cs["model"]
-        prompt = PLANNER_PROMPT.format(name=self.p.name, repo=self.p.repo, budget=float(cs["budget_usd"]))
+        prompt = PLANNER_PROMPT.format(name=self.p.name, repo=self.p.repo, budget=float(cs["budget_usd"])) + chat_agents.prompt_extra(self.p, "planner")
+        allowed, disallowed = self._lists("planner")
         # Read-only plus the planning tools; the permission check and the hook refuse everything else.
         return core.options(self.p, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.dir), system_prompt=prompt + ACK_RULE,
                             max_turns=int(cs["max_turns"]), max_budget_usd=float(cs["budget_usd"]), resume=self.session_id,
-                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.repo)],
+                            allowed_tools=allowed, add_dirs=[str(self.p.repo)],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.planner_tools())},
-                            disallowed_tools=["Bash", "PowerShell", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch",
-                                              "Task", "Agent"],
+                            disallowed_tools=disallowed,
                             permission_mode="default", can_use_tool=self.planner_permission, setting_sources=[],
                             hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.planner_hook])]})
 
@@ -1168,7 +1247,8 @@ class Chat:
     def _answer(self, text: str, tools=(), cost: float = 0.0, tokens: dict | None = None) -> dict:
         return {"text": text, "tools": list(tools), "cost": cost, "tokens": tokens or {}, "model": self.model}
 
-    async def _ask(self, text: str) -> dict:
+    async def _ask(self, text: str, attachments_meta: list | None = None) -> dict:
+        text += attachments.prompt_block(self.p, attachments_meta)
         mode = core.chat_mode(self.p)
         coworker = mode in AUTONOMOUS  # coworker or planner: per-message budget and the usage pause
         acct = self.p.account.get("name", "default")
@@ -1215,34 +1295,42 @@ class Chat:
             u.setdefault("tokens", {})[k] = u.get("tokens", {}).get(k, 0) + v
         core.write_json(self.p.path("chat_usage.json"), u)
         parts = ["\n\n".join(reply).strip()]
-        if coworker and (note := budget_note(result, cost, mode)):
+        if coworker and (note := budget_note(result, cost, mode, self.p)):
             parts.append(note)
         return self._answer("\n\n".join(x for x in parts if x) or "(no answer)", calls.values(), cost, tokens)
 
     # -- the live Coworker: one persistent session whose messages are read continuously and shown as they arrive
 
     def is_live(self) -> bool:
-        cs = core.chat_settings("coworker")
+        cs = chat_agents.mode_settings(self.p, "coworker")
         return core.chat_mode(self.p) == "coworker" and bool(cs.get("full_access")) and bool(cs.get("live", True))
 
     def _live_options(self):
-        cs = core.chat_settings("coworker")
+        cs = chat_agents.mode_settings(self.p, "coworker")
         self.model = cs["model"]
-        prompt = COWORKER_FULL_PROMPT.format(name=self.p.name, repo=self.p.repo, base=self.p.cfg["repo"]["base"],
-                                             folder=self.p.dir, budget=float(cs["budget_usd"]))
-        prompt += COWORKER_LIVE_ADDENDUM.format(burst=float(cs["budget_usd"]), daily=float(cs.get("daily_budget_usd") or 0))
-        prompt += COWORKER_ROLE.format(folder=self.p.dir)
+        burst, daily = float(cs["budget_usd"]), float(cs.get("daily_budget_usd") or 0)
+        defs = chat_agents.agent_definitions(self.p)
+        prompt = COWORKER_FULL_PROMPT.format(name=self.p.name, repo=self.p.repo, base=self.p.cfg["repo"]["base"], folder=self.p.dir,
+                                             budget_line="Your spending limits are under Spending below.", shell=shell_names())
+        prompt += COWORKER_LIVE_ADDENDUM.format(shell=shell_names(), subagents=subagent_lines(defs), spending=spending_text(burst, daily))
+        prompt += coworker_role(self.p.dir, True) + chat_agents.prompt_extra(self.p, "coworker")
         gate_env = {k: str(v) for k, v in self.p.cfg.get("gates", {}).get("env", {}).items()}
-        daily = float(cs.get("daily_budget_usd") or 0)
+        allowed, disallowed = self._lists("coworker", True)
+        # Only the configured subagents: the SDK's built-in ones inherit every tool (none at all when all are disabled).
+        for name in ((BUILTIN_AGENTS) if defs else ("Agent",)):
+            entry = f"Agent({name})" if defs else name
+            if entry not in disallowed and "Agent" not in disallowed:
+                disallowed.append(entry)
         # The process-wide limit is only a backstop (the CLI counts the spend of the whole process); the bursts are
         # checked when they end, the day's total before each new burst.
         return core.options(self.p, scratch=False, model=self.model, effort=cs.get("effort") or None, cwd=str(self.p.repo),
                             system_prompt=self.with_memory(prompt) + ACK_RULE, max_turns=int(cs["max_turns"]),
                             max_budget_usd=daily or None, resume=self.session_id,
-                            allowed_tools=["Read", "Glob", "Grep"], add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
+                            allowed_tools=allowed, add_dirs=[str(self.p.dir), str(Path(self.p.cfg["repo"]["worktrees"]))],
                             mcp_servers={MCP: create_sdk_mcp_server(MCP, tools=self.tools(approval=False))},
-                            disallowed_tools=[], permission_mode="default", can_use_tool=self.coworker_permission,
-                            setting_sources=[], env={**gate_env, "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}, agents=live_agents(), stderr=self._on_stderr)
+                            disallowed_tools=disallowed, permission_mode="default", can_use_tool=self.coworker_permission,
+                            setting_sources=[], env={**gate_env, "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS": "1"}, agents=live_agents(self.p),
+                            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[self.subagent_hook])]}, stderr=self._on_stderr)
 
     def daily_spent(self) -> float:
         d = self.usage().get("daily") or {}
@@ -1344,7 +1432,7 @@ class Chat:
         self.session_cost, self.session_id = total, msg.session_id or self.session_id
         self._record_usage(cost, tokens)
         self.busy, self.auto_turn = False, False
-        cs = core.chat_settings("coworker")
+        cs = chat_agents.mode_settings(self.p, "coworker")
         burst, daily = float(cs["budget_usd"]), float(cs.get("daily_budget_usd") or 0)
         notes = []
         if msg.subtype == "error_max_budget_usd":
@@ -1404,12 +1492,12 @@ class Chat:
                     except Exception:
                         pass
 
-    async def _live_send(self, text: str) -> dict:
-        cs = core.chat_settings("coworker")
+    async def _live_send(self, text: str, attachments_meta: list | None = None) -> dict:
+        cs = chat_agents.mode_settings(self.p, "coworker")
         cap = float(cs.get("daily_budget_usd") or 0)
         if cap and self.daily_spent() >= cap:
             why = (f"Today's Coworker spending reached the daily budget of ${cap:.2f}. Raise `[chat.coworker] daily_budget_usd` "
-                   "in settings.toml (0 = no cap) to go on today.")
+                   "in settings.toml or the project's chat settings (0 = no cap) to go on today.")
             self.note(why)
             return {"error": why}
         if self.drop:
@@ -1421,8 +1509,8 @@ class Chat:
         self.busy, self.auto_turn = True, False
         self.last_event, self.idle_warned = time.time(), False
         if not text.startswith("[Scheduled checkup]"):
-            self.live_prompt = text  # the memory is updated from it when the burst ends
-        await client.query(text)
+            self.live_prompt = text  # the memory is updated from it when the burst ends (the plain text)
+        await client.query(text + attachments.prompt_block(self.p, attachments_meta))
         return {"started": True, "live": True}
 
     def inject(self, text: str, label: str) -> None:
@@ -1478,7 +1566,7 @@ class Chat:
         rd = reading_view(p.account.get("name", "default"))
         if rd:
             lines.append(f"Account usage: {round(rd['utilization'] * 100)}% ({rd['source']}, {rd['age_min']} min ago)")
-        cs = core.chat_settings("coworker")
+        cs = chat_agents.mode_settings(p, "coworker")
         cap = float(cs.get("daily_budget_usd") or 0)
         lines.append(f"Coworker spending today: ${self.daily_spent():.2f}" + (f" of ${cap:.2f}" if cap else ""))
         lines.append("Recent log:")
@@ -1542,18 +1630,27 @@ class Chat:
         data = core.read_json(self.p.path("chat_usage.json"), {"spent_usd": 0.0, "tokens": {}})
         return data if isinstance(data, dict) else {"spent_usd": 0.0, "tokens": {}}
 
-    def start(self, text: str) -> dict:
+    @staticmethod
+    def _user_entry(text: str, metas: list[dict]) -> dict:
+        entry = {"role": "user", "text": text}
+        if metas:
+            entry["attachments"] = [{k: m.get(k) for k in ("id", "name", "size", "mime", "kind")} for m in metas]
+        return entry
+
+    def start(self, text: str, attachments_ids: list | None = None) -> dict:
         """Answer in the background and return at once: a request held open for minutes gets dropped by the
-        window/proxy ("chat falls off"). The page polls /chat until `busy` is false."""
+        window/proxy ("chat falls off"). The page polls /chat until `busy` is false. `attachments_ids`: uploaded
+        files to send with the message (refused with AttachmentError, nothing claimed, when one is unknown or sent)."""
         if self.is_live():  # no waiting: you can write while it works, and its answers stream in as entries
+            metas = attachments.claim(self.p, attachments_ids) if attachments_ids else []
             with self.note_lock:
-                self.history.append({"role": "user", "text": text})
+                self.history.append(self._user_entry(text, metas))
                 try:
                     self.save_history()
                 except OSError:
                     pass
             try:
-                return asyncio.run_coroutine_threadsafe(self._live_send(text), self.loop).result(timeout=90)
+                return asyncio.run_coroutine_threadsafe(self._live_send(text, metas), self.loop).result(timeout=90)
             except Exception as e:
                 self.client = None
                 self.busy = False
@@ -1562,16 +1659,19 @@ class Chat:
                 return {"error": msg}
         if self.busy:
             return {"error": "the assistant is still answering the previous message"}
+        metas = attachments.claim(self.p, attachments_ids) if attachments_ids else []
         self.busy = True
-        threading.Thread(target=self.ask, args=(text,), daemon=True, name=f"chat-{self.p.slug}").start()
+        threading.Thread(target=self.ask, args=(text, metas), daemon=True, name=f"chat-{self.p.slug}").start()
         return {"started": True}
 
-    def ask(self, text: str) -> dict:
+    def ask(self, text: str, attachments_meta: list | None = None) -> dict:
+        """Answer one message (blocking). `attachments_meta`: the metas attachments.claim returned for it."""
+        metas = list(attachments_meta or [])
         with self.lock:
-            self.history.append({"role": "user", "text": text})
+            self.history.append(self._user_entry(text, metas))
             self.save_history()
             self.busy = True
-            fut = asyncio.run_coroutine_threadsafe(self._ask(text), self.loop)
+            fut = asyncio.run_coroutine_threadsafe(self._ask(text, metas) if metas else self._ask(text), self.loop)
             ok = True
             try:
                 # Approvals can wait up to 10 minutes each, so the answer may take a while.
@@ -1606,6 +1706,10 @@ class Chat:
                 self.p.path("chat.json").unlink(missing_ok=True)
                 self.p.path("chat_archive.jsonl").unlink(missing_ok=True)
                 self.p.path("chat_memory.md").unlink(missing_ok=True)
+                try:
+                    attachments.remove_all(self.p)
+                except OSError:
+                    pass
 
     @staticmethod
     def _slim(m: dict, cap: int = 2000) -> dict:
@@ -1623,7 +1727,7 @@ class Chat:
         """The chat state. `since`: only the entries added after that seq (the page polls often; the whole
         transcript is 100 KB and more), else the whole transcript."""
         mode = core.chat_mode(self.p)
-        cs = core.chat_settings(mode)
+        cs = chat_agents.mode_settings(self.p, mode)
         history = self.history if since is None else [m for m in list(self.history) if m.get("seq", 0) > since]
         more, start = False, 0
         if limit:  # a page by position: the last `limit` entries before position `before` (archive + live tail)
@@ -1792,13 +1896,13 @@ class Chat:
         return {"ok": True}
 
 
-def budget_note(result, cost: float, mode: str = "coworker") -> str | None:
+def budget_note(result, cost: float, mode: str = "coworker", p: core.Project | None = None) -> str | None:
     """The chat's message when a coworker/planner message hit `[chat.<mode>] budget_usd`."""
     if result is None or result.subtype != "error_max_budget_usd":
         return None
-    budget = float(core.chat_settings(mode)["budget_usd"])
+    budget = float((chat_agents.mode_settings(p, mode) if p is not None else core.chat_settings(mode))["budget_usd"])
     return (f"Stopped: this message spent {usd(cost)} and reached the {mode.title()} budget of {usd(budget)} per message "
-            f"(`[chat.{mode}] budget_usd` in settings.toml). Send another message to continue.")
+            f"(`[chat.{mode}] budget_usd` in settings.toml or the project's chat settings). Send another message to continue.")
 
 
 def usd(x: float) -> str:
@@ -2148,7 +2252,7 @@ def project_state(p: core.Project) -> dict:
         row.update(state=n["state"], level=n["level"], stuck_on=n["stuck_on"])
     s = core.settings()
     mode = core.chat_mode(p)
-    cs = core.chat_settings(mode)
+    cs = chat_agents.mode_settings(p, mode)
     ch = chat(p)
     try:
         plan = core.plan_view(p)
@@ -2841,6 +2945,58 @@ def repo_dir_for_import(d: dict, upload: Path | None) -> Path:
         str(d.get("filename") or ""), export_name))
 
 
+def settings_route(p: core.Project, d: dict) -> dict:
+    """POST /api/p/<slug>/settings: fields or raw toml; refused while anything runs; new chat session after a save."""
+    if project_busy(p) or runner(p).running() or core.build_job(p).running():
+        return {"ok": False, "message": "a run or build is in progress for this project; stop it first"}
+    if "toml" in d:
+        res = projedit.save_toml(p, d["toml"], allow_repo_change=desktop())
+    else:
+        res = projedit.update_settings(p, {k: d[k] for k in ("name", "base", "account", "quick", "final", "timeout_s") if k in d})
+    if res.get("ok"):
+        c = CHATS.get(p.slug)
+        if c is not None and not c.is_busy():
+            c.reset(keep_history=True)
+        globals()["_OV"] = None
+    return res
+
+
+def delete_route(p: core.Project, d: dict) -> tuple[dict, int]:
+    """POST /api/p/<slug>/delete {confirm, name, delete_repo}: forget the project's server-side state, then delete it."""
+    if d.get("confirm") is not True:
+        return {"ok": False, "message": "this needs confirmation"}, 400
+    if str(d.get("name") or "") != p.slug:
+        return {"ok": False, "message": "the typed name does not match the project"}, 400
+    c = CHATS.get(p.slug)
+    busy = None
+    if runner(p).running():
+        busy = "a run is in progress for this project; stop it first"
+    elif core.build_job(p).running():
+        busy = "a build is running in this project"
+    elif c is not None and c.is_busy():
+        busy = "the chat is busy; wait for it or stop it first"
+    elif project_busy(p):
+        busy = "a run or build is in progress for this project"
+    if busy:
+        return {"ok": False, "busy": True, "message": busy}, 200
+    with LOCK:
+        c = CHATS.pop(p.slug, None)
+    if c is not None:
+        c.reset(keep_history=True)  # denies approvals, disconnects the session
+    try:
+        res = projedit.delete_project(p, d.get("delete_repo") is True, busy)
+    except projedit.ProjectBusy as e:
+        return {"ok": False, "busy": True, "message": str(e)}, 200
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}, 200
+    with LOCK:
+        RUNNERS.pop(p.slug, None)
+    FLAGGED.pop(p.slug, None)
+    ITEM_LOGGED.pop(p.slug, None)
+    globals()["_OV"] = None
+    return res, 200
+
+
 def desktop() -> bool:
     """Running in the native desktop window (folder pickers, local paths); False for the server / a browser."""
     return _WINDOW is not None
@@ -2903,6 +3059,37 @@ class Handler(BaseHTTPRequestHandler):
             return json.loads(self.rfile.read(n).decode("utf-8"))
         except ValueError:
             return {}
+
+    def attachment_upload(self, p: core.Project, query: dict) -> dict:
+        """POST /api/p/<slug>/attachments?name=<file>: the raw body is streamed into <project dir>/attachments."""
+        self.close_connection = True  # on a refusal the body is not (fully) read, so the connection can't be reused
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        try:
+            meta = attachments.store(p, query.get("name", ""), self.rfile, n)
+        except attachments.AttachmentError as e:
+            return {"ok": False, "message": str(e)}
+        return {"ok": True, "attachment": meta}
+
+    def attachment_get(self, p: core.Project, aid: str) -> None:
+        f = attachments.file_path(p, aid)
+        meta = attachments.get(p, aid) if f else None
+        if f is None or meta is None:
+            return self.send(404, b"not found", "text/plain")
+        try:
+            data = f.read_bytes()
+        except OSError:
+            return self.send(404, b"not found", "text/plain")
+        mime = str(meta.get("mime") or "application/octet-stream")
+        if meta.get("kind") == "image" and mime in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+            disp = "inline"
+        else:
+            disp = "attachment"
+        fname = attachments.sanitize_name(meta.get("name", ""))
+        self.send(200, data, mime, {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox",
+                                    "Content-Disposition": f'{disp}; filename="{fname}"'})
 
     def proj(self, slug: str) -> core.Project | None:
         try:
@@ -3022,14 +3209,20 @@ class Handler(BaseHTTPRequestHandler):
                 if q.get("lite") != "1":  # the log poll during a build skips the git calls of the version/task list
                     info.update(core.build_plan(p, q.get("version") or None))
                 return self.json(info)
+            if len(parts) == 4 and parts[3] == "settings":
+                return self.json({**projedit.settings_view(p), "desktop": desktop()})
             if len(parts) == 4 and parts[3] == "disk":
                 return self.json(disk_view(p, "refresh=1" in (urllib.parse.urlparse(self.path).query or "")))
             if len(parts) == 4 and parts[3] == "chat":
                 qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 num = lambda k: int(qs[k][0]) if k in qs and qs[k][0].isascii() and qs[k][0].isdigit() else None
                 return self.json(chat(p).info(num("since"), min(num("limit") or 0, 500) or None, num("before")))
+            if len(parts) == 5 and parts[3] == "chat" and parts[4] == "agents":
+                return self.json(chat_agents.config_view(p))
             if len(parts) == 4 and parts[3] == "pending":
                 return self.json({"pending": chat(p).approvals.pending()})
+            if len(parts) == 5 and parts[3] == "attachments":
+                return self.attachment_get(p, parts[4])
             if len(parts) == 5 and parts[3] == "task":
                 t = next((t for t in core.load_tasks(p) if t.id == parts[4]), None)
                 if t is None:
@@ -3042,7 +3235,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
         parts = [x for x in self.path.split("?")[0].split("/") if x]
         query = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
-        upload = parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")
+        upload = (parts == ["api", "projects", "import"] and "zip" in (self.headers.get("Content-Type") or "")) \
+            or (len(parts) == 4 and parts[:2] == ["api", "p"] and parts[3] == "attachments")  # raw bodies, not JSON
         d = {} if upload else self.body()
         if parts[:2] == ["api", "v1"]:
             code, obj = service.rest("POST", [urllib.parse.unquote(x) for x in parts[2:]], query, d if isinstance(d, dict) else {})
@@ -3189,6 +3383,11 @@ class Handler(BaseHTTPRequestHandler):
                         if sel and not err:
                             core.save_build_selection(p, sel["version"], sel["tasks"], sel["seen"])
                     return self.json({"ok": False, "message": err} if err else {"ok": True})
+                if act == "settings" and len(parts) == 4:
+                    return self.json(settings_route(p, d))
+                if act == "delete" and len(parts) == 4:
+                    res, code = delete_route(p, d)
+                    return self.json(res, code)
                 if act == "disk" and parts[4:] == ["clean"]:
                     return self.json(disk_clean(p, d))
                 if act == "autorunner" and len(parts) == 4:
@@ -3210,16 +3409,38 @@ class Handler(BaseHTTPRequestHandler):
                     deps = [x.strip() for x in str(d.get("depends", "")).split(",") if x.strip()]
                     core.add_task(p, tid, str(d.get("title", "")).strip() or "Untitled", str(d.get("body", "")), d.get("tier") or None, deps)
                     return self.json({"ok": True, "id": tid})
+                if act == "attachments" and len(parts) == 4:
+                    return self.json(self.attachment_upload(p, query))
+                if act == "attachments" and len(parts) == 6 and parts[5] == "delete":
+                    if not attachments.delete(p, parts[4]):
+                        return self.json({"ok": False, "message": "no such unsent attachment"}, 404)
+                    return self.json({"ok": True})
                 if act == "chat" and len(parts) == 4:
                     text = str(d.get("text", "")).strip()[:4000]
-                    if not text:
+                    ids = d.get("attachments") or []
+                    if not isinstance(ids, list):
+                        return self.json({"error": "attachments must be a list of ids"}, 400)
+                    if not text and not ids:
                         return self.json({"error": "empty"})
-                    return self.json(chat(p).start(text))
+                    try:
+                        return self.json(chat(p).start(text, ids))
+                    except attachments.AttachmentError as e:
+                        return self.json({"error": str(e)}, 400)
                 if act == "chat" and parts[4:] == ["interrupt"]:
                     return self.json({"ok": chat(p).interrupt()})
                 if act == "chat" and parts[4:] == ["reset"]:
                     chat(p).reset()
                     return self.json({"ok": True})
+                if act == "chat" and parts[4:] == ["agents"]:
+                    out = chat_agents.save_config(p, d)
+                    if not out.get("ok"):
+                        return self.json(out, 400)
+                    c = chat(p)
+                    if c.is_busy():
+                        out["note"] = "applies from the next session"
+                    else:
+                        c.reset(keep_history=True)
+                    return self.json(out)
                 if act == "chat" and parts[4:] == ["mode"]:
                     mode = str(d.get("mode", ""))
                     core.set_chat_mode(p, mode)
