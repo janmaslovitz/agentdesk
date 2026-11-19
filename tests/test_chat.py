@@ -323,7 +323,7 @@ def test_transcript_survives_restart(project, monkeypatch):
     monkeypatch.setattr(c, "_ask", fake_ask)
     assert c.ask("hello") == answer
     saved = json.loads(project.path("chat.json").read_text(encoding="utf-8"))
-    assert saved == [{"role": "user", "text": "hello"}, {"role": "assistant", **answer}]
+    assert [{k: v for k, v in m.items() if k != "ts"} for m in saved] == [{"role": "user", "text": "hello"}, {"role": "assistant", **answer}]
     assert "Ünïcode ✓" in project.path("chat.json").read_text(encoding="utf-8")  # ensure_ascii=False
 
     # a new Chat for the same project (as after a restart) shows the same transcript

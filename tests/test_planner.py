@@ -342,7 +342,7 @@ def test_planner_session(chat, fake):
     assert {"Bash", "PowerShell", "Write", "Edit"} <= set(o.disallowed_tools)
     assert o.hooks["PreToolUse"][0].hooks == [chat.planner_hook]
     assert c.text.startswith("[Plan: no plan]") and c.text.endswith("Add a config parser")
-    assert chat.history[-2] == {"role": "user", "text": "Add a config parser"}
+    assert {k: v for k, v in chat.history[-2].items() if k != "ts"} == {"role": "user", "text": "Add a config parser"}
     fake.script = [result(2.3, subtype="error_max_budget_usd")]
     out = chat.ask("more")
     assert "Planner budget of $2.00" in out["text"] and fake.made[1].options.resume == "s1"

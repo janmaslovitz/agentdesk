@@ -58,6 +58,8 @@ tr.task { cursor: pointer; } tr.task:hover { background: var(--chip); } tr.sel {
 /* Tasks fill the screen below the top bar: the list scrolls inside (wheel or scrollbar), the header row stays. */
 #taskSec.fit .tscroll { flex: 1 1 auto; min-height: 140px; overflow-y: auto; }
 #taskSec.fit .detail { flex: 0 1 auto; max-height: 50%; }
+/* Wide screens: the chat is as tall as the Tasks panel; messages scroll inside, the input stays at the bottom. */
+@media (min-width: 1101px) { .grid { align-items: stretch; } #chatSec { min-height: 0; height: 100%; } #chatSec .msgs { min-height: 0; max-height: none; flex: 1 1 0; } #chatSec > :not(.msgs):not(h3) { flex: 0 0 auto; } }
 .tscroll thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); box-shadow: inset 0 -1px 0 var(--line); }
 .detail.empty { display: none; }
 .detail .dhead { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 8px 0; margin-bottom: 4px; background: var(--bg); border-bottom: 1px solid var(--line); }
@@ -83,6 +85,7 @@ pre { font: 12px/1.45 var(--mono); white-space: pre-wrap; margin: 6px 0; }
 .msg button.copy { user-select: none; -webkit-user-select: none; position: absolute; top: 3px; right: 4px; font-size: 10px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); cursor: pointer; opacity: 0; }
 .msg:hover > button.copy, .msg .call[open]:hover > button.copy, button.copy:focus { opacity: 1; }
 .msg .call button.copy { position: static; display: block; margin: 3px 0 2px auto; opacity: 1; }
+.msg .ts { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .msg .cost { font-size: 11px; color: var(--muted); margin-top: 6px; white-space: normal; }
 .skel { display: flex; flex-direction: column; gap: 10px; padding: 8px; }
 .skel .bar { height: 34px; border-radius: 10px; background: linear-gradient(90deg, var(--chip) 25%, var(--line) 50%, var(--chip) 75%); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; }
@@ -930,7 +933,7 @@ function shell() {
       <table><thead><tr><th>ID</th><th>Task</th><th>Status</th><th>Tier / model</th><th>Tokens</th><th>Cost</th><th></th></tr></thead><tbody id="tasks"></tbody></table>
       <div class="muted" id="tierAvg" style="margin:6px 14px"></div></div>
       <div class="detail empty" id="detail"></div></section>
-    <section><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')">Coworker</button><button data-mode="planner" onclick="setMode('planner')">Planner</button></span>
+    <section id="chatSec"><h3>Chat <span class="seg" id="modeSeg"><button data-mode="assistant" onclick="setMode('assistant')">Assistant</button><button data-mode="coworker" onclick="setMode('coworker')">Coworker</button><button data-mode="planner" onclick="setMode('planner')">Planner</button></span>
         <span class="badge" id="coworkBadge" hidden>Coworker: full access, no approvals</span>
         <span class="muted" id="chatModel"></span><span class="spacer"></span><button onclick="resetChat()">New chat</button></h3>
       <div class="modenote" id="modeNote" hidden></div>
@@ -1588,6 +1591,9 @@ function addMsg(role, text, meta, detached) {
     div.appendChild(c);
   }
   // Follow the chat only if you are at the bottom (or just sent something); never yank away from what you're reading.
+  const when = meta?.ts ? new Date(meta.ts * 1000) : (text ? new Date() : null);
+  if (when) { const t = document.createElement("div"); t.className = "ts"; t.title = when.toLocaleString();
+    t.textContent = (when.toDateString() === new Date().toDateString() ? "" : when.toLocaleDateString([], {day: "2-digit", month: "2-digit"}) + " ") + when.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"}); div.appendChild(t); }
   if (detached) return div;  // older page: the caller inserts it above
   const box = $("msgs"), atEnd = role === "user" || box.scrollTop + box.clientHeight >= box.scrollHeight - 60;
   box.appendChild(div); if (atEnd) box.scrollTop = box.scrollHeight; return div;

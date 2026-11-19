@@ -1351,7 +1351,7 @@ class Chat:
         """Add an entry to the transcript; the page fetches the ones newer than its last seq."""
         with self.note_lock:
             self.seq += 1
-            self.history.append({**entry, "seq": self.seq})
+            self.history.append({"ts": round(time.time(), 1), **entry, "seq": self.seq})
             # chat.json is the whole transcript: rewriting it for every streamed entry is O(n) each time. At most once
             # a second here; a finished burst (the result entry, with a cost) always saves.
             if entry.get("cost") is not None or time.time() - self._saved_at >= 1.0:
@@ -1632,7 +1632,7 @@ class Chat:
 
     @staticmethod
     def _user_entry(text: str, metas: list[dict]) -> dict:
-        entry = {"role": "user", "text": text}
+        entry = {"role": "user", "text": text, "ts": round(time.time(), 1)}
         if metas:
             entry["attachments"] = [{k: m.get(k) for k in ("id", "name", "size", "mime", "kind")} for m in metas]
         return entry
@@ -1683,7 +1683,7 @@ class Chat:
                 ok = False
             finally:
                 self.busy = False
-            self.history.append({"role": "assistant", **out})
+            self.history.append({"role": "assistant", "ts": round(time.time(), 1), **out})
             self.save_history()
             if ok and out.get("text") and out["text"] != "(no answer)":
                 self.update_memory(text, out["text"])  # reset() waits for this lock, so it can't be undone by a stale write
@@ -1757,7 +1757,7 @@ class Chat:
         """A progress note in the chat (not from the model); the page fetches notes newer than its last seq."""
         with self.note_lock:
             self.seq += 1
-            self.history.append({"role": "assistant", "text": text, "kind": "progress", "seq": self.seq})
+            self.history.append({"role": "assistant", "text": text, "kind": "progress", "seq": self.seq, "ts": round(time.time(), 1)})
 
     def watch_plan(self) -> None:
         """Poll the approved plan in the background until it's finished or closed."""
@@ -2651,7 +2651,7 @@ def mark_interrupted_chat(p: core.Project) -> list[str]:
     if not mid:
         return []
     seq = max([int(h.get("seq", 0)) for h in hist if isinstance(h, dict)] + [0]) + 1
-    hist.append({"role": "assistant", "kind": "interrupted", "text": "⚠ " + INTERRUPTED, "seq": seq})
+    hist.append({"role": "assistant", "kind": "interrupted", "text": "⚠ " + INTERRUPTED, "seq": seq, "ts": round(time.time(), 1)})
     tmp = f.with_suffix(".tmp")
     tmp.write_text(json.dumps(hist, indent=2, ensure_ascii=False), encoding="utf-8")
     core.replace_file(tmp, f)

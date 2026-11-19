@@ -278,7 +278,7 @@ def test_a_busy_chat_does_not_consume_the_attachment(project, fake):
 def test_user_entry_without_attachments_is_unchanged(chat, fake, monkeypatch):
     monkeypatch.setattr(chat, "update_memory", lambda *a: None)
     chat.ask("plain")
-    assert chat.history[0] == {"role": "user", "text": "plain"}
+    assert {k: v for k, v in chat.history[0].items() if k != "ts"} == {"role": "user", "text": "plain"}
     assert fake.made[-1].texts[-1] == "plain"
 
 
