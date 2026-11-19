@@ -121,6 +121,7 @@ def start(argv: list[str]):
             going = [p.slug for p in core.projects() if server.run_alive(p)[0]]
             if going:
                 server.log_error(f"shutdown: leaving the runs of {', '.join(going)} going; they finish on their own")
+        server.cancel_all_logins()
         srv.server_close()
         if pidf:
             pidf.unlink(missing_ok=True)

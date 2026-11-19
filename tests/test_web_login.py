@@ -59,3 +59,82 @@ def test_wrong_code_and_no_flow(fake_cli):
 def test_api_key_accounts_dont_sign_in(monkeypatch):
     monkeypatch.setattr(core, "account", lambda name: {"name": name, "kind": "api_key", "key_env": "X"})
     assert "API-key accounts" in server.start_login("k")["error"]
+
+
+SPAWNING_CLI = textwrap.dedent("""\
+    import subprocess, sys
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    open(sys.argv[-1], "w").write(str(child.pid))
+    print("visit: https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc", flush=True)
+    sys.stdin.readline()
+""")
+
+
+def _alive(pid):
+    import os
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie still answers kill(0): count it as gone
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().split()[2] != "Z"
+    except OSError:
+        return True
+
+
+@pytest.fixture
+def spawning_cli(tmp_path, monkeypatch):
+    script = tmp_path / "claude_spawn.py"
+    script.write_text(SPAWNING_CLI, encoding="utf-8")
+    pidfile = tmp_path / "child.pid"
+    launcher = tmp_path / "claude"
+    launcher.write_text(f"#!/bin/sh\nexec {sys.executable} {script} \"$@\" {pidfile}\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setattr(core, "bundled_cli", lambda: str(launcher))
+    yield pidfile
+    server.cancel_all_logins()
+
+
+def _child(pidfile):
+    import time
+    for _ in range(100):
+        if pidfile.exists() and pidfile.read_text():
+            return int(pidfile.read_text())
+        time.sleep(0.05)
+    raise AssertionError("the fake CLI started no child")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups")
+def test_cancel_ends_the_cli_and_what_it_started(spawning_cli):
+    assert server.start_login("default").get("ok")
+    flow, child = server.LOGINS["default"], _child(spawning_cli)
+    assert _alive(child)
+    server.cancel_login("default")
+    assert flow.proc.poll() is not None and not _alive(child) and "default" not in server.LOGINS
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups")
+def test_abandoned_sign_in_ends_by_itself(spawning_cli, monkeypatch):
+    import time
+    monkeypatch.setattr(server, "LOGIN_TIMEOUT_S", 0.3)
+    assert server.start_login("default").get("ok")
+    flow, child = server.LOGINS["default"], _child(spawning_cli)
+    for _ in range(60):
+        if flow.proc.poll() is not None and not _alive(child):
+            break
+        time.sleep(0.05)
+    assert flow.proc.poll() is not None and not _alive(child)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups")
+def test_stopping_the_dashboard_ends_every_sign_in(spawning_cli):
+    assert server.start_login("default").get("ok")
+    flow = server.LOGINS["default"]
+    server.cancel_all_logins()
+    assert flow.proc.poll() is not None and not server.LOGINS
+
+
+def test_closing_the_dialog_any_way_cancels():
+    html = (core.Path(server.__file__).parent / "web" / "index.html").read_text(encoding="utf-8")
+    assert '$("dLogin").addEventListener("close"' in html and "login/cancel" in html

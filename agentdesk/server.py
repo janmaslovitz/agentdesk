@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import atexit
 import signal
 import socket
 import subprocess
@@ -1953,6 +1954,10 @@ class LoginFlow:
         kw: dict = {"creationflags": core.no_console_flags()} if sys.platform == "win32" else {"start_new_session": True}
         self.proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, **kw)
         threading.Thread(target=self._read, daemon=True, name=f"login-{name}").start()
+        # An abandoned sign-in (dialog closed, tab gone, nobody pressed Cancel) ends by itself after the timeout.
+        self._timer = threading.Timer(LOGIN_TIMEOUT_S, self.cancel)
+        self._timer.daemon = True
+        self._timer.start()
 
     def _read(self) -> None:
         for chunk in iter(lambda: self.proc.stdout.read1(4096), b""):
@@ -1990,11 +1995,20 @@ class LoginFlow:
         return self.proc.returncode == 0, tail[-400:] or ("signed in" if self.proc.returncode == 0 else "the sign-in failed")
 
     def cancel(self) -> None:
+        """End the CLI and everything it started (its own process group on POSIX), and reap it."""
+        self._timer.cancel()
         if self.proc.poll() is None:
             try:
-                self.proc.kill()
+                if sys.platform == "win32":
+                    self.proc.kill()
+                else:
+                    os.killpg(self.proc.pid, signal.SIGKILL)  # start_new_session: its pid is the group id
             except OSError:
                 pass
+        try:
+            self.proc.wait(5)
+        except subprocess.TimeoutExpired:
+            pass
 
     def expired(self) -> bool:
         return time.time() - self.started > LOGIN_TIMEOUT_S or self.proc.poll() is not None
@@ -2041,6 +2055,16 @@ def cancel_login(name: str) -> dict:
     if flow:
         flow.cancel()
     return {"ok": True}
+
+
+def cancel_all_logins() -> None:
+    """End every sign-in still going: the dashboard is stopping, and a sign-in runs in its own session, so it would
+    otherwise outlive it."""
+    for name in list(LOGINS):
+        cancel_login(name)
+
+
+atexit.register(cancel_all_logins)
 
 
 # ----------------------------------------------------------------------------- views

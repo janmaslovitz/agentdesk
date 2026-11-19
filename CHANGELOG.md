@@ -31,6 +31,11 @@ them under the new version number, tags it and builds the installer (see README,
   while long tasks go starts as soon as a slot is free instead of waiting for a running task to end. A task retried
   or answered after it failed in the same run starts again in that run.
 
+### Fixed
+- Signing an account in no longer leaves `claude auth login` running: a sign-in left without Cancel (dialog closed
+  with Esc, tab closed) ends after 15 minutes, Cancel ends the CLI with everything it started, and a stop or update
+  of the dashboard ends the sign-ins still waiting.
+
 ## 1.6.2 - 2026-11-13
 
 ### Added

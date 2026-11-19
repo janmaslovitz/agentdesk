@@ -617,12 +617,15 @@ async function loginCode() {
   $("lGo").disabled = false;
   if (r.error) { $("lMsg").textContent = r.error; return; }
   if (!r.ok) { $("lMsg").textContent = "Not signed in: " + (r.message || "unknown error") + " Press Cancel and try again."; return; }
-  closeDlg("dLogin"); note(`Signed in: ${loginFor}`); refreshAll();
+  const done = loginFor; loginFor = "";
+  closeDlg("dLogin"); note(`Signed in: ${done}`); refreshAll();
 }
-async function loginCancel() {
-  if (loginFor) await api(`/api/accounts/${encodeURIComponent(loginFor)}/login/cancel`, {});
-  closeDlg("dLogin");
-}
+function loginCancel() { closeDlg("dLogin"); }
+// However the dialog closes (Cancel, Esc), a sign-in still waiting for its code is ended on the server.
+$("dLogin").addEventListener("close", () => {
+  if (loginFor) api(`/api/accounts/${encodeURIComponent(loginFor)}/login/cancel`, {});
+  loginFor = "";
+});
 async function addTask() {
   const r = await api(`/api/p/${cur}/tasks`, {title: $("tTitle").value, tier: $("tTier").value, depends: $("tDeps").value, body: $("tBody").value});
   if (r.error) return note(r.error);
