@@ -184,6 +184,17 @@ Every automatic deletion (what, which user / project, bytes, why) goes to `audit
 includes deletions by an instance's own hygiene loop: it writes `<user home>/storage-audit.jsonl`, which the gateway
 moves into `audit.log` at each scan.
 
+**Deleting a project from the dashboard** is audited the same way: the project folder as kind `project`, and the
+repository as kind `repo` when **Also delete the code repository** is ticked and it is under `<data>/repos`. Each record
+has the project, the path, the bytes freed and the reason `deleted from the dashboard`. A refused deletion (a run,
+build or chat turn going) deletes nothing and writes nothing.
+
+**Chat attachments count toward the user's disk.** They are files in `<project>/attachments` under the user's data
+folder, so they use the user's quota and the disk budget like the rest of the project's data (the Storage page shows
+them per project). Limits on a server: `max_file_mb` is capped by `max_upload_mb` (200 MB by default, `server.toml`).
+They are removed by **New chat**, and unsent or unreferenced ones by the cleanup when a chat loads (see README,
+"The chat").
+
 ### Sizing a 512 GB host
 
 | | GB |

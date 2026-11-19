@@ -125,6 +125,24 @@ are shown, and `POST /api/projects` refuses a folder path sent by the browser. *
 The desktop App keeps its **A folder on this computer** and **From GitHub** tabs with Browse and the
 "choose the folder to clone into" option.
 
+**Editing a project.** The project's **Settings** dialog edits the name, the base
+branch, the account, the `quick` and `final` checks and `timeout_s` (the check timeout, 60 to 86400 seconds; default
+as in `[gates]`). A base branch must exist in the repository and an account must be one of the server's accounts.
+The **Advanced: project.toml** editor shows the file itself and saves it after validation: it must be valid TOML and at most
+64 KB; `name` is text; `[repo]` needs `path` and `base` as text; `gates.quick` and `gates.final` are lists of
+texts; `account` must exist. The field editor keeps comments and unknown keys. On the Server the editor
+refuses a change to `repo.path` and `repo.worktrees` (the folder is chosen by the server, see above); the desktop
+App allows it. Saving is refused while a run, a build or the chat is going: stop it first. After a save the chat
+starts a new session (with the messages still on screen) unless it is busy, then the change applies from the next
+session.
+
+**Deleting a project.** **Delete project…** (in the same dialog) needs the project's name typed again and a confirmation. It is
+refused while a run, a build or a chat turn is going (stop it first). The project folder
+(`data/projects/<project>`, with its runs, reports, chats and attachments) is always deleted. The repository is
+deleted only if the checkbox **Also delete the code repository** is ticked **and** the folder is under `<data>/repos`
+(a repository kept elsewhere is left alone, and the reason is shown).
+On a server, every deletion (project and repository) is written to the audit log, see `docs/SERVER.md`.
+
 ## MCP servers
 
 A project can give its workers extra MCP servers in `project.toml`:
@@ -399,6 +417,48 @@ while the chat is busy).
 
 The subagents (`explorer`, `reviewer`, `implementer`) take `enabled`, `model`, `effort`, `max_turns`, `tools` and
 `prompt_extra`; a disabled subagent is not offered to the live Coworker. A project can't change `full_access` or `live`.
+
+The defaults are in the code (`chat_agents.py`, `core.CHAT_DEFAULTS`): a mode's setting is the default, then
+`[chat.<mode>]` in settings.toml, then the project's `[chat.<mode>]` in project.toml (each value is checked: budgets
+0.1 to 100 USD per message, `daily_budget_usd` 0 to 1000, `max_turns` 1 to 500, `prompt_extra` up to 4000
+characters). Subagent defaults: `explorer` (Haiku, effort low, 30 turns, Read/Grep/Glob), `reviewer` (Sonnet, effort
+medium, 40 turns, read tools plus Bash/PowerShell), `implementer` (Sonnet, effort medium, 60 turns, read and edit
+tools plus Bash/PowerShell); all enabled. A project's `project.toml` can set the same keys:
+
+```toml
+[chat.assistant]
+model = "sonnet"
+tools_off = ["Glob"]
+
+[chat.agents.reviewer]
+enabled = false
+```
+
+**The rule: config only removes tools.** `tools_off` takes tools away from a mode, and nothing in the settings or
+the project can give a mode a tool its base list doesn't have: the assistant and the planner stay read-only whatever
+the config says. The subagents' `tools` is a list from the tool catalogue, so it sets what that subagent gets (it is
+not limited to removing tools); `enabled = false` leaves a subagent out of the live Coworker. Full reference, the
+catalogue and the subagent design: **[docs/CHAT_AGENTS.md](docs/CHAT_AGENTS.md)**.
+
+**Attachments.** Click 📎 (or paste or drop images) in the chat's input to attach files to the next message. Each
+file is uploaded when chosen (`POST /api/p/<slug>/attachments?name=<file>`), and the message carries the file
+ids. Limits, defaults in `[chat.attachments]` of `data/settings.toml`:
+
+| key | default | meaning |
+|---|---|---|
+| `max_file_mb` | 10 | largest file; capped by the server's `max_upload_mb` (200) on a server |
+| `max_files` | 5 | files per message |
+| `max_project_mb` | 200 | all of a project's attachments together |
+| `text_inline_kb` | 20 | text files up to this size are put into the message; larger ones are read with the Read tool |
+
+Allowed types, checked by content (magic bytes for images and PDFs, UTF-8 for text), not by the name alone: images
+(png, jpg, jpeg, gif, webp), PDF, and text or code (txt, md, json, jsonl, csv, tsv, log, yaml, toml, xml, html, css,
+py, js, ts, sh, diff, sql, rs, go, java, c, cpp and a few more). SVG (scriptable) and executables are refused.
+
+Files are stored in `<project>/attachments/<id>/` (the file and a `meta.json`); nothing is written outside that
+folder, and it counts toward the disk like the rest of the project. Cleanup: **New chat** deletes the project's whole
+attachments folder; switching mode keeps them. When a chat loads, uploads not sent within 24 hours and sent files that
+no saved message refers to any more are removed.
 
 **Live Coworker** (default; `[chat.coworker] live = true`, needs `full_access`). The Coworker is one
 persistent session instead of a fresh process per message, and works like a teammate:

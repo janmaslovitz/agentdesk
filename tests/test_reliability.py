@@ -22,7 +22,12 @@ from agentdesk.gateway import app, config, instances, users
 @pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="needs unix sockets")
 def test_sd_notify_sends_to_notify_socket(monkeypatch):
     # an AF_UNIX path is limited to ~104 bytes: pytest's tmp_path can be longer (deep or per-worker temp roots)
-    with tempfile.TemporaryDirectory(prefix="adn", dir="/tmp") as d:
+    try:  # a short root; /tmp may be missing or read-only in a sandbox
+        tempfile.TemporaryDirectory(prefix="adn", dir="/tmp").cleanup()
+        short = "/tmp"
+    except OSError:
+        short = None
+    with tempfile.TemporaryDirectory(prefix="adn", dir=short) as d:
         path = os.path.join(d, "n.sock")
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
         try:
