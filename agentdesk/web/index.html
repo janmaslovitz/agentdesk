@@ -172,7 +172,7 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
 <body>
 <aside>
   <h1>AgentDesk</h1>
-  <h2>Projects <span><button onclick="openDlg('dImport')">Import</button> <button onclick="openDlg('dProject')">+ Add</button></span></h2>
+  <h2>Projects <span><button onclick="openDlg('dImport')">Import</button> <button onclick="openDlg('dNewProject')">+ Add</button></span></h2>
   <div id="projects"></div>
   <h2>Auto-runner</h2>
   <div class="acct"><label><input type="checkbox" id="autoGlobal" onchange="toggleAuto(null, this.checked)"> Manage all projects automatically</label>
@@ -186,9 +186,9 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
   <div class="muted" style="font-size:11px" id="datadir"></div>
 </aside>
 
-<div class="wrap" id="main"><div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dProject')">Add project</button></div></div>
+<div class="wrap" id="main"><div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dNewProject')">Add project</button></div></div>
 
-<dialog id="dProject" class="wide"><h3>New project</h3>
+<dialog id="dNewProject" class="wide"><h3>New project</h3>
   <div id="pForm">
   <div class="hint" id="pStep1">1. Where is the code?</div>
   <div class="tabs"><button type="button" id="pTab_new" onclick="pTab('new')" style="display:none">New project</button><button type="button" id="pTab_dir" onclick="pTab('dir')">A folder on this computer</button><button type="button" id="pTab_git" onclick="pTab('git')">From GitHub (git URL)</button></div>
@@ -237,7 +237,41 @@ button.sm, .menu > summary { padding: 2px 8px; font-size: 12px; }
   </div>
   <div id="pRun" style="display:none"><div id="pStatus" class="hint"></div><progress></progress></div>
   <pre id="pMsg" class="msgbox" style="display:none"></pre>
-  <div class="row"><button id="pCancel" onclick="closeDlg('dProject')">Cancel</button><button class="primary" id="pGo" onclick="addProject()" disabled>Add</button></div>
+  <div class="row"><button id="pCancel" onclick="closeDlg('dNewProject')">Cancel</button><button class="primary" id="pGo" onclick="addNewProject()" disabled>Add</button></div>
+</dialog>
+
+<dialog id="dProject" class="wide"><h3>Project settings</h3>
+  <div id="pSetSections">
+    <div class="grp" id="psEdit"><h4>Project</h4>
+      <label for="psName">Name</label><input id="psName"><div class="hint err" id="psE_name"></div>
+      <label for="psBase">Base branch</label><input id="psBase"><div class="hint err" id="psE_base"></div>
+      <label for="psAccount">Account</label><select id="psAccount"></select><div class="hint err" id="psE_account"></div>
+      <label for="psQuick">Quick checks (one command per line)</label><textarea id="psQuick" rows="3"></textarea><div class="hint err" id="psE_quick"></div>
+      <label for="psFinal">Final checks (one command per line)</label><textarea id="psFinal" rows="3"></textarea><div class="hint err" id="psE_final"></div>
+      <label for="psTimeout">Timeout per check run (seconds)</label><input id="psTimeout" type="number" min="60" max="86400"><div class="hint err" id="psE_timeout_s"></div>
+      <div class="hint" id="psRepoNote"></div>
+      <pre id="psMsg" class="msgbox" style="display:none"></pre>
+      <div class="row"><button class="primary" id="psSave" onclick="psSave()">Save</button></div>
+    </div>
+    <div class="grp" id="psAdvSec"><details id="psAdv"><summary>Advanced: project.toml</summary>
+      <textarea id="psToml" rows="12" spellcheck="false" style="font-family:ui-monospace,Consolas,monospace"></textarea>
+      <div class="hint" id="psTomlNote"></div>
+      <pre id="psTomlMsg" class="msgbox" style="display:none"></pre>
+      <div class="row"><button id="psTomlSave" onclick="psSaveToml()">Save project.toml</button></div>
+    </details></div>
+    <div class="grp" id="psDanger"><h4>Danger zone</h4>
+      <div class="hint" id="psRepoKeep"></div>
+      <button class="danger" id="psDelBtn" onclick="psDelAsk()">Delete project…</button>
+      <div id="psDelBox" style="display:none">
+        <p class="hint" id="psDelText"></p>
+        <label for="psDelName" id="psDelNameL">Type the project slug to confirm</label><input id="psDelName" autocomplete="off" oninput="psDelCheck()">
+        <label class="chk" id="psDelRepoL"><input type="checkbox" id="psDelRepo"> Also delete the code repository</label>
+        <pre id="psDelMsg" class="msgbox" style="display:none"></pre>
+        <div class="row"><button onclick="psDelCancel()">Cancel</button><button class="danger" id="psDelGo" onclick="psDelete()" disabled>Delete project</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="row"><button onclick="closeDlg('dProject')">Close</button></div>
 </dialog>
 
 <dialog id="dExport" class="wide"><h3>Export project</h3>
@@ -337,7 +371,8 @@ async function api(path, body) {
 function openDlg(id) {
   if (id === "dExport") xModeSet();
   if (id === "dImport") iOpen();
-  if (id === "dProject") pOpen();
+  if (id === "dNewProject") pOpen();
+  if (id === "dProject") psOpen();
   $(id).showModal();
 }
 function closeDlg(id) { $(id).close(); }
@@ -420,7 +455,7 @@ function pBusy(on, text) {
   $("pGo").disabled = on || (!on && !pValid());
   for (const el of $("pForm").querySelectorAll("input,select,button,summary")) el.disabled = on;
 }
-async function addProject() {
+async function addNewProject() {
   if (!pValid()) return;
   const git = pMode === "git", fresh = pMode === "new", gh = fresh && $("pGh").checked;
   const body = {name: $("pName").value.trim(), base: $("pBase").value.trim(), preset: $("pPreset").value, account: $("pAccount").value};
@@ -446,7 +481,7 @@ async function addProject() {
     pMsg(`The project was created and is ready to use (code in ${r.repo}, branch ${r.base}).\n\nThe GitHub step did not complete:\n${r.github.message}\n\nYou can set a remote and push later from the Git panel.`);
     return;
   }
-  closeDlg("dProject");
+  closeDlg("dNewProject");
 }
 async function exportZip() {
   const r = await fetch(`/api/projects/${cur}/export`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({include_logs: $("xLogs").checked})});
@@ -691,11 +726,85 @@ function fitTasks() {
 window.addEventListener("resize", fitTasks);
 setInterval(fitTasks, 1000);  // what sits above it (cards, the plan, notes) changes height now and then
 
+
+// ---- project settings dialog (sections live in #pSetSections so more can be added)
+let psData = null, psBusy = false;
+const psShow = (id, t) => { $(id).textContent = t || ""; $(id).style.display = t ? "" : "none"; };
+const psLines = s => s.split("\n").map(x => x.trim()).filter(Boolean);
+function psErr(field, t) {
+  for (const e of document.querySelectorAll("#psEdit .err")) e.textContent = "";
+  const el = $("psE_" + field);
+  if (el) el.textContent = t; else psShow("psMsg", t);
+}
+function psFill(s) {
+  psData = s;
+  $("psName").value = s.name || ""; $("psBase").value = s.base || "";
+  $("psAccount").innerHTML = (s.accounts || []).map(a => `<option value="${esc(a)}"${a === s.account ? " selected" : ""}>${esc(a)}</option>`).join("");
+  $("psQuick").value = (s.quick || []).join("\n"); $("psFinal").value = (s.final || []).join("\n");
+  $("psTimeout").value = s.timeout_s ?? ""; $("psToml").value = s.toml || "";
+  $("psRepoNote").innerHTML = "Repository: <code>" + esc(s.repo) + "</code>";
+  $("psTomlNote").textContent = ov?.desktop ? "" : "On the server the repo path can't change.";
+  const own = String(s.repo || "").includes("/repos/");
+  $("psDelRepoL").style.display = own ? "" : "none";
+  $("psRepoKeep").textContent = own ? "" : "The repository is outside the data repos folder, so it will be kept; only the project's data is deleted.";
+}
+async function psOpen() {
+  psData = null;
+  for (const id of ["psMsg", "psTomlMsg", "psDelMsg"]) psShow(id, "");
+  psErr("", ""); psDelCancel();
+  if (!cur) return;
+  let r;
+  try { r = await api(`/api/p/${encodeURIComponent(cur)}/settings`); } catch (e) { r = {error: String(e)}; }
+  if (r.error || !r.slug) { psShow("psMsg", r.error || "Could not load the settings."); return; }
+  psFill(r);
+}
+async function psSave() {
+  if (!psData) return;
+  psErr("", ""); psShow("psMsg", "");
+  const body = {name: $("psName").value, base: $("psBase").value, account: $("psAccount").value,
+    quick: psLines($("psQuick").value), final: psLines($("psFinal").value), timeout_s: $("psTimeout").value};
+  const r = await api(`/api/p/${encodeURIComponent(cur)}/settings`, body);
+  if (r.ok === false || r.error) { psErr(r.field || "", r.error || "Not saved."); return; }
+  if (r.settings) psFill(r.settings);
+  psShow("psMsg", "Saved."); refreshAll(); refresh();
+}
+async function psSaveToml() {
+  if (!psData) return;
+  psShow("psTomlMsg", "");
+  const r = await api(`/api/p/${encodeURIComponent(cur)}/settings`, {toml: $("psToml").value});
+  if (r.ok === false || r.error) { psShow("psTomlMsg", (r.field ? r.field + ": " : "") + (r.error || "Not saved.")); return; }
+  if (r.settings) psFill(r.settings);
+  psShow("psTomlMsg", "Saved."); refreshAll(); refresh();
+}
+function psDelAsk() {
+  if (!psData) return;
+  $("psDelText").textContent = "This deletes the project's tasks, logs and data and can't be undone.";
+  $("psDelNameL").textContent = "Type the project slug (" + psData.slug + ") to confirm";
+  $("psDelName").value = ""; $("psDelRepo").checked = false; psShow("psDelMsg", "");
+  $("psDelBox").style.display = ""; $("psDelBtn").style.display = "none"; psDelCheck();
+}
+function psDelCancel() { $("psDelBox").style.display = "none"; $("psDelBtn").style.display = ""; }
+function psDelCheck() { $("psDelGo").disabled = psBusy || !psData || $("psDelName").value.trim() !== psData.slug; }
+async function psDelete() {
+  if (!psData || $("psDelName").value.trim() !== psData.slug) return;
+  psBusy = true; psDelCheck(); psShow("psDelMsg", "Deleting…");
+  let r;
+  try {
+    r = await api(`/api/p/${encodeURIComponent(psData.slug)}/delete`, {confirm: true, name: $("psDelName").value.trim(), delete_repo: $("psDelRepo").checked && $("psDelRepoL").style.display !== "none"});
+  } catch (e) { r = {error: String(e)}; }
+  psBusy = false; psDelCheck();
+  if (!r.ok) { psShow("psDelMsg", r.error || r.message || "The project can't be deleted right now."); return; }
+  closeDlg("dProject");
+  cur = null; localStorage.removeItem("agentdesk.project");
+  $("main").innerHTML = `<div class="empty">Project deleted.${r.repo_note ? " " + esc(r.repo_note) + "." : ""}</div>`;
+  await refreshAll();
+}
+
 function shell() {
   $("main").innerHTML = `
   <div class="top"><h2 id="pTitle"></h2><span class="m" id="pMeta"></span><span id="runstate" class="pill">idle</span>
     <label class="pill" title="Start the next ready task by itself"><input type="checkbox" id="autoProj" onchange="toggleAuto(cur, this.checked)"> <span id="autoState">Auto</span></label><span class="spacer"></span>
-    <button onclick="openDlg('dTask')">+ Task</button><button onclick="openDlg('dExport')">Export</button>
+    <button onclick="openDlg('dTask')">+ Task</button><button onclick="openDlg('dExport')">Export</button><button onclick="openDlg('dProject')">Settings</button>
     <button class="primary" onclick="run('next')">Run next</button><button onclick="run('all')">Run all</button><button class="danger" onclick="stop()">Stop</button></div>
   <div class="stats">
     <div class="card"><div class="k">Spent by agents</div><div class="v num" id="spent"></div><div class="s" id="budget"></div></div>
@@ -1065,7 +1174,7 @@ async function refresh() {
 }
 async function refreshOnce() {
   const want = cur;
-  if (!cur) { $("main").innerHTML = `<div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dProject')">Add project</button></div>`; return; }
+  if (!cur) { $("main").innerHTML = `<div class="empty">Add a project to start: <button class="primary" onclick="openDlg('dNewProject')">Add project</button></div>`; return; }
   if (!$("tasks")) { shell(); requestAnimationFrame(fitTasks); }
   let s0; try { s0 = await api(`/api/p/${want}/state`); } catch { return; }
   if (want !== cur) { refreshAgain = true; return; }  // switched project while waiting: fetch again for the new one
