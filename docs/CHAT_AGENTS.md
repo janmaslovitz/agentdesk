@@ -6,13 +6,15 @@ layer that `agentdesk/chat_agents.py` adds. Every finding is tagged:
 
 - **fixed in chat_agents.py**: the corrected data or helper lives in `chat_agents.py`; server.py must still read it
   (the wiring task), a "Wiring" note says how;
-- **to fix in server.py (wiring task)**: the text or code is in server.py (or the README) and was not touched here.
+- **fixed in server.py**: the text or code was in server.py (or the README) and the wiring task changed it; the note says how.
 
-## How it works today
+There are no open items left.
+
+## How it works (the audit's starting point; the findings below say what changed)
 
 | Mode | Tools it gets | Limits |
 |---|---|---|
-| Assistant | `allowed_tools` Read/Glob/Grep; Write/Edit only through `permission()` (tasks/*.md, notes.md); Bash/PowerShell and the run tools ask for an approval card (an allow-list in project.toml skips the card) | one persistent session, `max_turns=40` hard-coded, no budget |
+| Assistant | `allowed_tools` Read/Glob/Grep; Write/Edit only through `permission()` (tasks/*.md, notes.md); Bash/PowerShell and the run tools ask for an approval card (an allow-list in project.toml skips the card) | one persistent session, `max_turns` (default 40, configurable), no budget |
 | Coworker (full access, live) | everything; only `[chat.coworker_confirm]` shell patterns ask; AgentDesk tools incl. `checkup`, `watch_run`; subagents from `live_agents()` | `max_turns`, per-burst budget checked *after* the burst, process backstop = `daily_budget_usd` |
 | Coworker (full access, `live=false`) | same, a fresh process per message | `max_budget_usd = budget_usd` per message |
 | Coworker (guarded) | own worktree, guard + hook; Web/Agent tools disallowed | as above |
@@ -34,9 +36,10 @@ implementer (sonnet, **no `tools` list**).
 2. **The reviewer is told "Don't edit files" but has a shell.** Bash can write files, commit, reset. The prompt did not say
    so. **fixed in chat_agents.py**: the prompt now limits the shell to reading (`git diff/log/show/status`) and running
    checks and forbids creating/editing/deleting files, commits, resets, checkouts, stashes and pushes; it still has no
-   Edit/Write tools. A prompt is not enforcement: **to fix in server.py (wiring task)**: a `PreToolUse` hook that
-   applies the guard to subagent calls (the hook payload carries the agent), or at least the guard's deny list, so a
-   reviewer's shell can't write. (In full-access mode the parent allows everything, subagents included.)
+   Edit/Write tools. A prompt is not enforcement: **fixed in server.py**: the live Coworker has a `PreToolUse` hook (`Chat.subagent_hook`)
+   that refuses a reviewer subagent's shell call (payload `agent_type == "reviewer"`) when it matches `[guard] deny` or
+   changes files or git state (`reviewer_shell_denied`: commit/reset/checkout/…, redirects, `rm`/`mv`/`tee`/`sed -i`, …).
+   In full-access mode the parent allows everything, so calls by the Coworker itself and by other subagents are not touched.
 3. **PowerShell is offered on Linux/macOS.** The reviewer's tool list names `PowerShell` everywhere. **fixed in
    chat_agents.py**: `PowerShell` is dropped from subagent tools unless `IS_WINDOWS`; `shell_tools()` gives the
    platform's shell tools. Wiring: use it.
@@ -45,31 +48,33 @@ implementer (sonnet, **no `tools` list**).
 5. **The explorer's description over-promised** ("reads logs"; it can't run `git log`). **fixed in chat_agents.py**:
    description and prompt say it has no shell and must report what it couldn't get.
 6. **Built-in subagents stay.** `agents=live_agents()` only adds to the SDK's built-in agents (general-purpose, …),
-   which inherit all tools. **to fix in server.py (wiring task)**: decide whether to restrict the Agent tool to the
-   three definitions in `_live_options` (the SDK's permission rules for Agent types).
+   which inherit all tools. **fixed in server.py**: `_live_options` adds `Agent(general-purpose)`, `Agent(Explore)`, `Agent(Plan)`,
+   `Agent(statusline-setup)` to `disallowed_tools` (`BUILTIN_AGENTS`), so only the enabled configured subagents can be
+   started; with all three disabled the whole `Agent` tool is disallowed and the prompt has no Subagents bullet.
 
 ### Prompts versus tools and behaviour
 
 7. **"Shell commands (Bash/PowerShell)"** in CHAT_PROMPT, COWORKER_PROMPT and COWORKER_LIVE_ADDENDUM on every
-   platform. **to fix in server.py (wiring task)**: format the prompts with `"/".join(chat_agents.shell_tools())`.
+   platform. **fixed in server.py**: the prompts carry `{shell}`, formatted with `"/".join(chat_agents.shell_tools())`.
 8. **CHAT_PROMPT: "Shell commands also wait for the user's approval"**, but commands matching `[chat] allowed_commands`
-   run without a card (README documents the allow-list). **to fix in server.py (wiring task)**.
+   run without a card (README documents the allow-list). **fixed in server.py**: the prompt names the allow-list.
 9. **COWORKER_FULL_PROMPT contradicts itself**: "every tool and every shell command runs without asking" and, a
    paragraph later, that push/release/PR/remote/hard-reset/… show an approval card (`coworker_permission` +
-   `[chat.coworker_confirm]`). **to fix in server.py (wiring task)**: say "except the very important commands below".
-   README ("without approval cards and without the guard") has the same mismatch. **to fix in server.py (wiring task)**.
+   `[chat.coworker_confirm]`). **fixed in server.py**: "except the very important commands listed below".
+   README ("without approval cards and without the guard") had the same mismatch. **fixed in server.py** (README).
 10. **COWORKER_ROLE promises wake-ups** ("you are woken with `[Run finished]`", architect "wakes you") for every
     Coworker mode, but `watch_run_bg`/`watch_architect_bg` wake a live session; with `live=false` or the guarded
-    mode `inject()` only posts a note to the chat and the model is never woken. **to fix in server.py (wiring task)**:
-    make that paragraph live-only (COWORKER_LIVE_ADDENDUM already is the live part), or tell the non-live prompt to poll
-    `queue_status`.
+    mode `inject()` only posts a note to the chat and the model is never woken. **fixed in server.py**:
+    `coworker_role(folder, live)` keeps the wake-up sentences for the live session only; the other modes are told to poll
+    `queue_status` / `plan()`.
 11. **The tools lists in the prompts are incomplete/uneven**: COWORKER_PROMPT lists `checkup`, `watch_run` but not
     `schedule_checkup`; CHAT_PROMPT omits `answer_task`; README lists only seven Coworker tools (not `architect`, `plan`,
     `graph`, `review`, `integrate`, `approve_plan`, `cancel_plan`, `task_activity`, `answer_task`, `checkup`, `watch_run`,
-    `schedule_checkup`). **to fix in server.py (wiring task)** (prompts and README).
+    `schedule_checkup`). **fixed in server.py**: the Coworker prompts list `answer_task`, `schedule_checkup`; CHAT_PROMPT lists `answer_task`; README lists
+    the full Coworker tool set.
 12. **README's Planner bullet is missing**: the chat section jumps from the Coworker's budget bullet to "After approval
     the chat reports each plan task…" with the Planner description gone; `[chat.planner]` is documented nowhere.
-    **to fix in server.py (wiring task)** (README).
+    **fixed in server.py** (README: a Planner bullet and `[chat.planner]`).
 13. **The assistant is not blocked from `MultiEdit`.** `permission()` handles Write/Edit only; `MultiEdit` falls through to
     `PermissionResultAllow()` and is absent from the assistant's `disallowed_tools`, so it can edit the repository
     despite "You never edit the repository". **fixed in chat_agents.py**: `BASE_DISALLOWED["assistant"]` contains
@@ -85,18 +90,19 @@ implementer (sonnet, **no `tools` list**).
     chat_agents.py** (and `core.CHAT_DEFAULTS["assistant"]["max_turns"] = 40`): `mode_settings(p, "assistant")["max_turns"]`.
     Wiring: pass it to `core.options`.
 16. **COWORKER_LIVE_ADDENDUM prints "$0.00 per day"** when `daily_budget_usd = 0`, which means *no cap*.
-    **to fix in server.py (wiring task)**.
+    **fixed in server.py**: `spending_text()` prints "no daily cap" for 0.
 17. **Two budget statements in one live prompt**: COWORKER_FULL_PROMPT says "a budget per message (${budget})", the live
     addendum says "per burst (a message or a wake-up)"; and the real enforcement is different again: the burst budget is
-    only checked after the burst (a note, no stop), the CLI's `max_budget_usd` is the *daily* backstop. **to fix in
-    server.py (wiring task)**: one sentence per mode that says what is enforced.
+    only checked after the burst (a note, no stop), the CLI's `max_budget_usd` is the *daily* backstop. **fixed in
+    server.py**: one sentence per mode says what is enforced (per message: the process stops after the turn that reaches the
+    budget; live: checked when the burst ends, daily cap blocks new work).
 18. **`budget_note` points at "settings.toml"** only; with project overrides the value may come from project.toml.
-    **to fix in server.py (wiring task)** (say "settings.toml or the project's chat settings").
+    **fixed in server.py** (says "settings.toml or the project's chat settings"; `budget_note(..., p)` reads the project's value).
 19. **The assistant has no budget** (one persistent session, `budget_note` only for coworker/planner) though the config
     story lists `budget_usd` for modes. **fixed in chat_agents.py**: `MODE_KEYS["assistant"]` has no budget keys, so the
     UI can't offer a limit that isn't enforced.
 20. **Per-turn/budget overshoot**: the CLI checks `max_budget_usd` after each turn, so a message can go over by one turn
-    (README says so for the guarded Coworker only). **to fix in server.py (wiring task)** (README wording).
+    (README says so for the guarded Coworker only). **fixed in server.py** (README wording).
 
 ### Settings documented differently from the code
 
@@ -104,7 +110,7 @@ implementer (sonnet, **no `tools` list**).
     (effort, budget_usd, max_turns, full_access, live, …); `max_turns` appears only in `CHAT_DEFAULTS` (coworker 60,
     planner 30) and nowhere in the README or settings.toml comments. **fixed in chat_agents.py** for reading
     (`mode_settings` is the one place that overlays the layers and `config_view` shows the effective values); the
-    README still needs a table (**to fix in server.py (wiring task)**).
+    README has the table now (**fixed in server.py**).
 22. **The README says the models come from `data/settings.toml` only**; projects had no way to choose a model, effort, budget
     or turn cap. **fixed in chat_agents.py**: `[chat.<mode>]` and `[chat.agents.<name>]` in project.toml, validated.
 23. **A project could not tell the chat anything about itself** except through chat_rules.md. **fixed in
@@ -153,7 +159,7 @@ spells these tables another way (dotted keys, inline tables) is refused with an 
   at session start (an unreadable project.toml gives the defaults). Only `save_config` rejects them, with the field name.
 - The settings.toml layer of the modes is passed through as before (it is the administrator's file), except the new keys.
 
-### Wiring checklist for server.py
+### Wiring in server.py (done)
 
 `_assistant_options`: `max_turns=mode_settings(...)["max_turns"]`, tool lists from `mode_tool_lists`, `prompt_extra`;
 same for the coworker (three option builders) and planner; `live_agents()` → `{n: AgentDefinition(**kw) for n, kw in

@@ -212,7 +212,9 @@ def test_interrupt_only_when_busy(chat):
 def test_options_agents_and_tools(chat):
     o = chat._live_options()
     assert set(o.agents) == {"explorer", "reviewer", "implementer"} and o.agents["explorer"].model == "haiku"
-    assert o.cwd == str(chat.p.repo) and o.disallowed_tools == [] and o.max_budget_usd == 25.0
+    assert o.cwd == str(chat.p.repo) and o.max_budget_usd == 25.0
+    # full access: nothing is disallowed but the SDK's built-in subagents, which would inherit every tool
+    assert o.disallowed_tools == [f"Agent({n})" for n in server.BUILTIN_AGENTS]
     assert o.can_use_tool == chat.coworker_permission
     assert "live session" in o.system_prompt and "$25.00 per day" in o.system_prompt
     names = {t.name for t in chat.tools(approval=False)}
