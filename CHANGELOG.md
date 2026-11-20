@@ -17,6 +17,8 @@ them under the new version number, tags it and builds the installer (see README,
 - **Chat agent configuration.** `[chat.<mode>]` and `[chat.agents.<name>]` in settings.toml, with project.toml overrides
   for the same keys (model, effort, turns, budgets, `tools_off`, `prompt_extra`; subagents `enabled`, `model`, `effort`,
   `max_turns`, `tools`, `prompt_extra`). See `docs/CHAT_AGENTS.md`.
+- **Time under each chat message** (HH:MM:SS, with the date for earlier days; full date on hover). Older messages
+  have no time.
 - **Remember me** on the server's sign-in page (ticked by default): the login lasts `remember_days` (default 30,
   `0` hides the box) with no idle timeout. Without it, a login lasts as before (`session_hours`,
   `session_idle_minutes`).
@@ -36,6 +38,8 @@ them under the new version number, tags it and builds the installer (see README,
 - "What is the agent doing?" and task_activity now start with a "now:" line: the live queue status and the pipeline
   step (worker on it, checks running, reviewer reading, done). Timeline lines name the reviewer and the router, and
   chat agents are told to state what the tools show instead of writing "I didn't check".
+- The chat window has the height of the Tasks window (from 1101px wide): messages scroll inside it, the reply box
+  and buttons stay pinned at the bottom.
 - A run looks for newly ready work every `[run] recheck_seconds` (default 30), so a task added, retried or answered
   while long tasks go starts as soon as a slot is free instead of waiting for a running task to end. A task retried
   or answered after it failed in the same run starts again in that run.
