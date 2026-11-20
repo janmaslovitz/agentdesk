@@ -5,6 +5,9 @@ them under the new version number, tags it and builds the installer (see README,
 
 ## Unreleased
 
+
+## 1.6.3 - 2026-11-20
+
 ### Added
 - **Edit and delete a project from the dashboard.** The Settings dialog edits the name, base branch, account, checks and
   `timeout_s`; the **Advanced: project.toml** editor saves the file after validation (valid TOML, at most 64 KB, the
